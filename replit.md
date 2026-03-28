@@ -48,6 +48,18 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 - `pnpm run build` — runs `typecheck` first, then recursively runs `build` in all packages that define it
 - `pnpm run typecheck` — runs `tsc --build --emitDeclarationOnly` using project references
 
+## Discord Bot (cs2-bot/)
+
+Python-based Discord bot for grading CS2 player props.
+
+- **Entry:** `cs2-bot/bot.py` — main bot, command handlers
+- **Scraper:** `cs2-bot/scraper.py` — CloudScraper + BeautifulSoup HLTV scraper
+- **Simulator:** `cs2-bot/simulator.py` — Negative Binomial + 100k Monte Carlo engine
+- **Keep-alive:** `cs2-bot/keep_alive.py` — Flask server on port 5000 for uptime
+- **Command:** `!grade [Player] [Line] [Kills/HS]` — e.g. `!grade ZywOo 38.5 Kills`
+- **Workflow:** `Elite CS2 Prop Grader Bot` (runs `cd cs2-bot && python bot.py`)
+- **Token:** Set as `DISCORD_TOKEN` in Replit Secrets
+
 ## Packages
 
 ### `artifacts/api-server` (`@workspace/api-server`)
