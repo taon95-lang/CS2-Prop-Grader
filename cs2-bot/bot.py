@@ -8,6 +8,7 @@ import logging
 from scraper import (
     get_player_info,
     get_player_info_fallback,
+    get_matchup_adjustment,
 )
 from simulator import run_simulation
 from keep_alive import keep_alive
@@ -74,17 +75,18 @@ async def on_ready():
 # ---------------------------------------------------------------------------
 
 @bot.command(name="grade")
-async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: str = "Kills"):
+async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: str = "Kills", opponent: str = None):
     if not player_name or not line:
         await ctx.send(
             embed=discord.Embed(
                 title="❌ Usage Error",
                 description=(
                     "**Correct usage:**\n"
-                    "`!grade [Player Name] [Line] [Kills/HS]`\n\n"
+                    "`!grade [Player Name] [Line] [Kills/HS] [Opponent?]`\n\n"
                     "**Examples:**\n"
                     "`!grade ZywOo 38.5 Kills`\n"
-                    "`!grade s1mple 14.5 HS`"
+                    "`!grade ZywOo 38.5 Kills NaVi`\n"
+                    "`!grade s1mple 14.5 HS FaZe`"
                 ),
                 color=0xFF4136,
             )
@@ -103,21 +105,34 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     if stat_type == "Hs":
         stat_type = "HS"
 
+    # Normalise opponent (strip quotes if the user wrapped it)
+    if opponent:
+        opponent = opponent.strip('"\'').strip()
+
     # Progress stages shown in the embed while the scraper and sim are running
-    _STAGES = [
-        "🌐 Connecting to residential proxy (ScraperAPI)...",
-        "🔍 Fetching HLTV player profile...",
-        "📡 Loading HLTV match stats (JS rendering, ~30–60s)...",
-        "📊 Running 10,000 Monte Carlo simulations...",
+    _STAGES_BASE = [
+        "🔍 Searching HLTV for player profile...",
+        "📡 Fetching recent match pages (Maps 1 & 2)...",
+        "📡 Parsing per-map kill data from match stats...",
+        "📊 Running 25,000 Monte Carlo simulations...",
         "⏳ Almost there — finalising results...",
     ]
+    _STAGES_OPP = [
+        "🔍 Searching HLTV for player profile...",
+        "📡 Fetching recent match pages (Maps 1 & 2)...",
+        f"🛡️ Fetching {opponent}'s defensive profile...",
+        "📊 Applying matchup adjustment + running simulations...",
+        "⏳ Almost there — finalising results...",
+    ]
+    _STAGES = _STAGES_OPP if opponent else _STAGES_BASE
 
     def _stage_embed(elapsed: int, stage_idx: int) -> discord.Embed:
         bar = "▓" * min(10, elapsed // 8) + "░" * max(0, 10 - elapsed // 8)
+        matchup_line = f" vs **{opponent}**" if opponent else ""
         return discord.Embed(
             title="⚙️ Analyzing...",
             description=(
-                f"**Player:** {player_name}\n"
+                f"**Player:** {player_name}{matchup_line}\n"
                 f"**Prop:** {line_val} {stat_type}\n\n"
                 f"{_STAGES[stage_idx]}\n\n"
                 f"`[{bar}]` ⏱️ {elapsed}s elapsed"
@@ -134,7 +149,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     fut = asyncio.ensure_future(
         loop.run_in_executor(
             None,
-            lambda: _analyze_player(player_name, line_val, stat_type),
+            lambda: _analyze_player(player_name, line_val, stat_type, opponent),
         )
     )
 
@@ -226,15 +241,25 @@ async def help_cmd(interaction: discord.Interaction):
     )
     embed.add_field(
         name="Command",
-        value="`!grade [Player Name] [Line] [Kills/HS]`",
+        value="`!grade [Player Name] [Line] [Kills/HS] [Opponent?]`",
         inline=False,
     )
     embed.add_field(
         name="Examples",
         value=(
             "`!grade ZywOo 38.5 Kills`\n"
-            "`!grade s1mple 14.5 HS`\n"
-            "`!grade NiKo 22.5 Kills`"
+            "`!grade ZywOo 38.5 Kills NaVi`\n"
+            "`!grade s1mple 14.5 HS FaZe`\n"
+            "`!grade NiKo 22.5 Kills Vitality`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Opponent (optional)",
+        value=(
+            "Add the opposing team name to factor in their defensive profile.\n"
+            "The bot fetches how many kills that team concedes per map and adjusts\n"
+            "the simulation accordingly (±25% max)."
         ),
         inline=False,
     )
@@ -242,7 +267,7 @@ async def help_cmd(interaction: discord.Interaction):
         name="How it works",
         value=(
             "1️⃣ Fetches last 10 BO3 series (Maps 1 & 2 only) from HLTV\n"
-            "2️⃣ Adjusts round projections based on match odds\n"
+            "2️⃣ (Optional) Fetches opponent's defensive kills-allowed profile\n"
             "3️⃣ Fits a Negative Binomial distribution to kill data\n"
             "4️⃣ Runs 25,000 Monte Carlo simulations\n"
             "5️⃣ Grades the prop on a 1-10 scale based on edge\n"
@@ -268,7 +293,12 @@ async def help_cmd(interaction: discord.Interaction):
 # Core analysis (blocking — always run via executor)
 # ---------------------------------------------------------------------------
 
-def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
+def _analyze_player(
+    player_name: str,
+    line: float,
+    stat_type: str,
+    opponent: str | None = None,
+) -> dict:
     """
     All blocking I/O and CPU work lives here.
     Run via loop.run_in_executor so the async event loop is never blocked.
@@ -277,6 +307,8 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
       1. get_player_info() — searches HLTV, fetches accessible match pages,
          extracts per-map kills from matchstats HTML section.
       2. get_player_info_fallback() — seeded estimated stats if HLTV fails.
+      3. If opponent provided, fetch their defensive profile and scale the
+         kill distribution by (avg_kills_allowed / baseline).
     """
     internal_stat = "Kills" if stat_type in ("Kills", "kills") else "HS"
 
@@ -315,7 +347,26 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
-    # --- Step 3: Monte Carlo simulation ---
+    # --- Step 3 (optional): Opponent matchup adjustment ---
+    matchup_info: dict | None = None
+    if opponent:
+        try:
+            matchup_info = get_matchup_adjustment(opponent)
+            if matchup_info:
+                adj = matchup_info["adjustment"]
+                map_stats = [round(k * adj, 2) for k in map_stats]
+                logger.info(
+                    f"Matchup adjustment for '{opponent}': "
+                    f"×{adj} ({matchup_info['label']}) — "
+                    f"{matchup_info['sample_maps']} sample maps"
+                )
+            else:
+                logger.warning(f"Could not fetch defensive stats for '{opponent}' — no adjustment applied")
+        except Exception as e:
+            logger.warning(f"Matchup adjustment failed ({type(e).__name__}): {e}")
+            matchup_info = None
+
+    # --- Step 4: Monte Carlo simulation ---
     favorite_prob = 0.55  # default edge assumption
     try:
         sim_result = run_simulation(
@@ -333,6 +384,7 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     sim_result["used_fallback"] = used_fallback
     sim_result["player_name"] = player_name
     sim_result["line"] = line
+    sim_result["matchup"] = matchup_info  # None if no opponent given
     return sim_result
 
 
@@ -348,13 +400,37 @@ def build_result_embed(
     grade = result.get("grade", "N/A")
     emoji = grade_emoji(grade)
 
+    matchup = result.get("matchup")
+    opp_display = matchup["team_display"] if matchup else None
+
     title = f"{emoji} CS2 Prop Grade — {player_name}"
+    if opp_display:
+        title += f" vs {opp_display}"
+
     description = (
         f"**Prop:** `{line} {stat_type}` ({'Over' if decision == 'OVER' else 'Under' if decision == 'UNDER' else decision})\n"
         f"**Data:** {result.get('data_source', 'HLTV')}"
     )
 
     embed = discord.Embed(title=title, description=description, color=color)
+
+    # Matchup section (only when opponent was provided)
+    if matchup:
+        adj = matchup["adjustment"]
+        adj_pct = round((adj - 1) * 100, 1)
+        adj_sign = "+" if adj_pct >= 0 else ""
+        label = matchup["label"]
+        label_emoji = {"tough": "🛡️ Tough", "average": "⚖️ Average", "soft": "💨 Soft"}.get(label, label)
+        embed.add_field(
+            name=f"🎯 Matchup — vs {opp_display}",
+            value=(
+                f"**Defense:** {label_emoji}\n"
+                f"**Avg Kills Allowed/Map:** `{matchup['avg_allowed']}`\n"
+                f"**Adjustment:** `{adj_sign}{adj_pct}%` applied to kill distribution\n"
+                f"**Sample:** {matchup['sample_maps']} maps"
+            ),
+            inline=False,
+        )
 
     n_series = result.get("n_series", 0)
     n_maps = result.get("n_samples", 0)

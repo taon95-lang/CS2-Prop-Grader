@@ -2,9 +2,10 @@
 HLTV scraper — uses curl_cffi Chrome impersonation against accessible HLTV endpoints.
 
 Discovered accessible paths (no Cloudflare block):
-  /search?query={name}          → player search (get player ID)
+  /search?query={name}          → player/team search (get IDs)
   /player/{id}/{slug}           → player profile (get team, overview)
   /results?player={id}          → player's recent results (get match IDs)
+  /results?team={id}            → team's recent results (get match IDs)
   /matches/{id}/{slug}          → match detail page (per-map kill stats)
 
 Blocked paths (Cloudflare Turnstile — DO NOT USE):
@@ -17,6 +18,7 @@ import re
 import random
 import time
 import logging
+import statistics as _stats
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -414,4 +416,267 @@ def get_player_info_fallback(player_name: str, stat_type: str = "Kills") -> dict
         'std': round(real_std, 2),
         'sample_size': n,
         'source': '⚠️ Estimated (HLTV unavailable — stats are approximate)',
+    }
+
+
+# ---------------------------------------------------------------------------
+# Team search & defensive stats
+# ---------------------------------------------------------------------------
+
+# Pro-level baseline: average kills per player per map across tier-1/2 CS2
+_BASELINE_KILLS_PER_MAP = 18.5
+
+# In-memory cache: {team_id_str: (timestamp, result_dict)}
+_TEAM_DEF_CACHE: dict = {}
+_TEAM_DEF_CACHE_TTL = 4 * 3600  # 4 hours
+
+
+_TEAM_ALIASES: dict[str, str] = {
+    "navi": "natus-vincere",
+    "naví": "natus-vincere",
+    "natus vincere": "natus-vincere",
+    "g2": "g2-esports",
+    "faze": "faze",
+    "nip": "ninjas-in-pyjamas",
+    "ninjas": "ninjas-in-pyjamas",
+    "mouz": "mousesports",
+    "astralis": "astralis",
+    "liquid": "team-liquid",
+    "ence": "ence",
+    "heroic": "heroic",
+    "cloud9": "cloud9",
+    "c9": "cloud9",
+    "spirit": "team-spirit",
+    "vitality": "team-vitality",
+    "complexity": "complexity-gaming",
+    "col": "complexity-gaming",
+    "big": "big",
+    "apeks": "apeks",
+    "pain": "pain-gaming",
+    "imperial": "imperial",
+    "9z": "9z",
+    "outsiders": "outsiders",
+    "forze": "forze",
+    "gambit": "gambit-esports",
+    "fnatic": "fnatic",
+    "eg": "evil-geniuses",
+    "evil geniuses": "evil-geniuses",
+}
+
+_SECONDARY_MARKERS = ('junior', 'academy', 'youth', '-2', '-b-team', 'b-team', 'female', 'women')
+
+
+def search_team(name: str) -> tuple | None:
+    """
+    Search HLTV for a team by name or alias.
+    Returns (team_id, team_slug, display_name) or None if not found.
+    """
+    # Resolve known aliases first so the search query is more accurate
+    query = _TEAM_ALIASES.get(name.lower().strip(), name)
+
+    url = f"{HLTV_BASE}/search?query={query}"
+    html = _fetch(url)
+    if not html:
+        logger.warning(f"[search_team] fetch failed for '{name}'")
+        return None
+
+    matches = re.findall(r'/team/(\d+)/([\w-]+)', html)
+    if not matches:
+        logger.warning(f"[search_team] no /team/ links found for '{name}'")
+        return None
+
+    # Deduplicate while preserving order
+    seen: dict[str, str] = {}
+    for tid, slug in matches:
+        if tid not in seen:
+            seen[tid] = slug
+
+    # Scoring: exact slug match → contains → partial → penalise junior/academy squads
+    name_norm = re.sub(r'[^a-z0-9]', '', query.lower())
+    best_tid, best_slug, best_score = None, None, -1000
+
+    for tid, slug in seen.items():
+        slug_norm = re.sub(r'[^a-z0-9]', '', slug.lower())
+
+        # Base match score
+        if slug_norm == name_norm:
+            score = 200
+        elif slug_norm.startswith(name_norm):
+            score = 150
+        elif name_norm in slug_norm:
+            score = 100
+        elif slug_norm in name_norm:
+            score = 50
+        else:
+            score = 0
+
+        # Heavy penalty for junior/academy/female rosters
+        if any(marker in slug.lower() for marker in _SECONDARY_MARKERS):
+            score -= 120
+
+        if score > best_score:
+            best_score, best_tid, best_slug = score, tid, slug
+
+    if not best_tid:
+        best_tid, best_slug = next(iter(seen.items()))
+
+    display = best_slug.replace('-', ' ').title()
+    logger.info(f"[search_team] '{name}' (query='{query}') → team_id={best_tid} slug={best_slug} score={best_score}")
+    return best_tid, best_slug, display
+
+
+def _get_match_kills_for_team(html: str, team_id: str) -> list[int]:
+    """
+    Given match page HTML and a team_id, return a list of per-player kill counts
+    scored BY THE OPPONENT (i.e., kills conceded by our target team).
+    Each entry is one player's kills on one map.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    matchstats = soup.find(id='match-stats')
+    if not matchstats:
+        return []
+
+    raw = str(matchstats)
+    map_ids = re.findall(r'id="(\d{5,7})-content"', raw)
+    if not map_ids:
+        return []
+
+    kill_samples: list[int] = []
+
+    for map_id in map_ids[:2]:  # Maps 1 & 2 only
+        content_div = matchstats.find(id=f'{map_id}-content')
+        if not content_div:
+            continue
+
+        tables = content_div.find_all('table', class_='totalstats')
+        if len(tables) < 2:
+            continue
+
+        for table in tables:
+            # Identify which team owns this table via the /team/{id}/ href
+            team_link = table.find('a', href=re.compile(rf'/team/{team_id}/'))
+            if team_link:
+                # This table belongs to our target team — skip it (we want opponents)
+                continue
+
+            # This is the opponent's table — collect their kills
+            for tr in table.find_all('tr')[1:]:  # skip header row
+                kd_text = tr.get_text()
+                kd_match = re.search(r'(\d+)\s*-\s*\d+', kd_text)
+                if kd_match:
+                    kills = int(kd_match.group(1))
+                    if 3 <= kills <= 60:  # sanity bounds
+                        kill_samples.append(kills)
+
+    return kill_samples
+
+
+def get_team_defensive_stats(team_id: str, n_matches: int = 10) -> dict | None:
+    """
+    Compute how many kills the given team concedes per player per map on average.
+
+    Returns:
+        {
+            'avg_kills_allowed': 16.8,     # kills per opponent player per map
+            'adjustment': 0.91,            # multiplier vs baseline
+            'label': 'tough',              # 'tough' | 'average' | 'soft'
+            'sample_maps': 18,
+        }
+    or None if insufficient data.
+    """
+    # Check in-memory cache
+    cached = _TEAM_DEF_CACHE.get(team_id)
+    if cached:
+        ts, data = cached
+        if time.time() - ts < _TEAM_DEF_CACHE_TTL:
+            logger.info(f"[defensive_stats] cache hit for team_id={team_id}")
+            return data
+
+    results_url = f"{HLTV_BASE}/results?team={team_id}"
+    html = _fetch(results_url)
+    if not html:
+        logger.warning(f"[defensive_stats] could not fetch results for team_id={team_id}")
+        return None
+
+    match_pairs = re.findall(r'/matches/(\d+)/([\w-]+)', html)
+    seen: dict[str, str] = {}
+    for mid, slug in match_pairs:
+        if mid not in seen and len(mid) >= 6:
+            seen[mid] = slug
+
+    match_list = list(seen.items())[:n_matches]
+    if not match_list:
+        logger.warning(f"[defensive_stats] no matches found for team_id={team_id}")
+        return None
+
+    all_kills: list[int] = []
+
+    for match_id, slug in match_list:
+        time.sleep(0.4)
+        match_url = f"{HLTV_BASE}/matches/{match_id}/{slug}"
+        page_html = _fetch(match_url)
+        if not page_html:
+            continue
+        kills = _get_match_kills_for_team(page_html, team_id)
+        all_kills.extend(kills)
+        logger.info(
+            f"[defensive_stats] match {match_id}: {len(kills)} opponent kill samples"
+        )
+
+    if len(all_kills) < 5:
+        logger.warning(f"[defensive_stats] only {len(all_kills)} samples — not enough")
+        return None
+
+    avg = _stats.mean(all_kills)
+    adjustment = round(avg / _BASELINE_KILLS_PER_MAP, 4)
+    adjustment = max(0.75, min(1.25, adjustment))  # clamp to ±25%
+
+    if avg < 16.5:
+        label = 'tough'
+    elif avg > 20.5:
+        label = 'soft'
+    else:
+        label = 'average'
+
+    result = {
+        'avg_kills_allowed': round(avg, 1),
+        'adjustment': round(adjustment, 4),
+        'label': label,
+        'sample_maps': len(all_kills),
+    }
+
+    _TEAM_DEF_CACHE[team_id] = (time.time(), result)
+    logger.info(f"[defensive_stats] team_id={team_id} → {result}")
+    return result
+
+
+def get_matchup_adjustment(opponent_name: str) -> dict | None:
+    """
+    Public entry point: search for a team, then fetch its defensive profile.
+
+    Returns a dict with:
+        team_display   : str   — e.g. "Natus Vincere"
+        adjustment     : float — multiplier applied to kill distribution (0.75–1.25)
+        label          : str   — 'tough' | 'average' | 'soft'
+        avg_allowed    : float — avg kills conceded per player per map
+        sample_maps    : int
+    or None if the team can't be found / not enough data.
+    """
+    team_info = search_team(opponent_name)
+    if not team_info:
+        logger.warning(f"[matchup] team not found: '{opponent_name}'")
+        return None
+
+    team_id, team_slug, display = team_info
+    def_stats = get_team_defensive_stats(team_id)
+    if not def_stats:
+        logger.warning(f"[matchup] no defensive stats for {display} (id={team_id})")
+        return None
+
+    return {
+        'team_display': display,
+        'adjustment': def_stats['adjustment'],
+        'label': def_stats['label'],
+        'avg_allowed': def_stats['avg_kills_allowed'],
+        'sample_maps': def_stats['sample_maps'],
     }
