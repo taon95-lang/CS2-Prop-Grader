@@ -59,40 +59,54 @@ def _is_blocked(resp) -> bool:
     )
 
 
+def _get_scraperapi_key() -> str:
+    """
+    Return the ScraperAPI key from whichever env var / secret name is set.
+    Checks both SCRAPER_API_KEY (user secret) and SCRAPERAPI_KEY (env var set
+    by the bot setup) so either name works transparently.
+    """
+    import os
+    return (
+        os.environ.get("SCRAPER_API_KEY")      # user-added Replit Secret
+        or os.environ.get("SCRAPERAPI_KEY")    # env var set during setup
+        or ""
+    )
+
+
 def _fetch(url: str, **_kwargs) -> str | None:
     """
     Fetch a URL with maximum Cloudflare evasion. One attempt per client,
     no retries, no sleeps — bail immediately so the caller can use Estimated Stats.
 
     Strategy:
-      1. ScraperAPI residential proxy  (bypasses Cloudflare at the IP level)
-      2. httpx + HTTP/2                (best HTTP/2 fingerprint)
-      3. curl_cffi Chrome impersonation (best TLS fingerprint)
+      1. ScraperAPI SDK  — residential rotating proxies, built-in CF bypass
+      2. httpx + HTTP/2  — exact Chrome HTTP/2 fingerprint
+      3. curl_cffi       — exact Chrome TLS fingerprint
     """
-    import os
-    import requests as _requests
-
-    scraper_key = os.environ.get("SCRAPERAPI_KEY", "")
-
-    # --- Primary: ScraperAPI (residential IPs, built-in Cloudflare bypass) ---
-    if scraper_key:
+    # ------------------------------------------------------------------ #
+    # 1. ScraperAPI Python SDK (primary — bypasses Cloudflare at IP level)
+    # ------------------------------------------------------------------ #
+    api_key = _get_scraperapi_key()
+    if api_key:
         try:
-            api_url = "http://api.scraperapi.com"
-            params = {"api_key": scraper_key, "url": url}
-            logger.info(f"[scraperapi] GET {url}")
-            resp = _requests.get(api_url, params=params, timeout=FETCH_TIMEOUT + 5)
+            from scraperapi_sdk import ScraperAPIClient
+            client = ScraperAPIClient(api_key)
+            logger.info(f"[scraperapi-sdk] GET {url}")
+            resp = client.get(url=url)
             if resp.status_code == 200 and not _is_blocked(resp):
-                logger.info(f"[scraperapi] OK — {len(resp.text):,} chars")
+                logger.info(f"[scraperapi-sdk] OK — {len(resp.text):,} chars")
                 return resp.text
-            logger.warning(f"[scraperapi] status={resp.status_code} — trying httpx")
+            logger.warning(f"[scraperapi-sdk] status={resp.status_code} — trying httpx")
         except Exception as e:
-            logger.warning(f"[scraperapi] {type(e).__name__}: {e} — trying httpx")
+            logger.warning(f"[scraperapi-sdk] {type(e).__name__}: {e} — trying httpx")
     else:
-        logger.warning("[scraperapi] No SCRAPERAPI_KEY set — skipping")
+        logger.warning("[scraperapi-sdk] No API key found — skipping to httpx")
 
     headers = _chrome_headers()
 
-    # --- Secondary: httpx with HTTP/2 + exact Chrome header order ---
+    # ------------------------------------------------------------------ #
+    # 2. httpx with HTTP/2 + exact Chrome header order
+    # ------------------------------------------------------------------ #
     try:
         import httpx
         logger.info(f"[httpx/h2] GET {url}")
@@ -110,7 +124,9 @@ def _fetch(url: str, **_kwargs) -> str | None:
     except Exception as e:
         logger.warning(f"[httpx/h2] {type(e).__name__}: {e} — trying curl_cffi")
 
-    # --- Last resort: curl_cffi Chrome TLS+HTTP/2 impersonation ---
+    # ------------------------------------------------------------------ #
+    # 3. curl_cffi Chrome TLS + HTTP/2 impersonation (last resort)
+    # ------------------------------------------------------------------ #
     try:
         from curl_cffi import requests as _curl
         logger.info(f"[curl_cffi] GET {url}")
@@ -122,7 +138,7 @@ def _fetch(url: str, **_kwargs) -> str | None:
     except Exception as e:
         logger.warning(f"[curl_cffi] {type(e).__name__}: {e}")
 
-    logger.warning(f"All three clients failed for {url} — caller will use Estimated Stats")
+    logger.warning(f"All three clients failed for {url} — using Estimated Stats")
     return None
 
 
