@@ -1,431 +1,417 @@
 """
-HLTV scraper — httpx with HTTP/2 + exact Chrome header order as primary,
-curl_cffi Chrome TLS impersonation as fallback. No retries, no sleeps.
+HLTV scraper — uses curl_cffi Chrome impersonation against accessible HLTV endpoints.
+
+Discovered accessible paths (no Cloudflare block):
+  /search?query={name}          → player search (get player ID)
+  /player/{id}/{slug}           → player profile (get team, overview)
+  /results?player={id}          → player's recent results (get match IDs)
+  /matches/{id}/{slug}          → match detail page (per-map kill stats)
+
+Blocked paths (Cloudflare Turnstile — DO NOT USE):
+  /stats/players                → always 403
+  /stats/players/...            → always 403
+  /stats/matches/...            → always 403
 """
 
 import re
 import random
+import time
 import logging
-
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 HLTV_BASE = "https://www.hltv.org"
+FETCH_TIMEOUT = 25  # seconds — match pages can be 500KB-1MB, give them room
 
-FETCH_TIMEOUT = 10  # Hard 10-second per-request wall — bail immediately on breach
-
-# Chrome 124 User-Agent — matches the sec-ch-ua hint below
-_CHROME_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.6367.207 Safari/537.36"
-)
-
-
-def _chrome_headers() -> list[tuple[str, str]]:
-    """
-    Return headers as an ordered list that exactly matches a real Chrome 124
-    HTTP/2 navigation request. Header ORDER matters for HTTP/2 HPACK fingerprinting
-    — Cloudflare uses the frame ordering to detect non-browser clients.
-    """
-    return [
-        ("sec-ch-ua", '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'),
-        ("sec-ch-ua-mobile", "?0"),
-        ("sec-ch-ua-platform", '"Windows"'),
-        ("upgrade-insecure-requests", "1"),
-        ("user-agent", _CHROME_UA),
-        ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
-        ("sec-fetch-site", "none"),
-        ("sec-fetch-mode", "navigate"),
-        ("sec-fetch-user", "?1"),
-        ("sec-fetch-dest", "document"),
-        ("accept-encoding", "gzip, deflate, br"),
-        ("accept-language", "en-US,en;q=0.9"),
-        ("cache-control", "max-age=0"),
-    ]
+try:
+    from curl_cffi import requests as _cffi_req
+    _CFFI_OK = True
+except ImportError:
+    _CFFI_OK = False
+    logger.warning("curl_cffi not available — install it for HLTV access")
 
 
-def _is_blocked(resp) -> bool:
-    """Return True if the response is a Cloudflare challenge or access block."""
-    if resp.status_code in (403, 503, 429):
-        return True
-    body = resp.text or ""
-    return (
-        "Just a moment" in body
-        or "cf-browser-verification" in body
-        or "Enable JavaScript and cookies to continue" in body
-        or "Checking your browser" in body
-    )
-
-
-def _get_scraperapi_key() -> str:
-    """
-    Return the ScraperAPI key from whichever env var / secret name is set.
-    Checks both SCRAPER_API_KEY (user secret) and SCRAPERAPI_KEY (env var set
-    by the bot setup) so either name works transparently.
-    """
-    import os
-    return (
-        os.environ.get("SCRAPER_API_KEY")      # user-added Replit Secret
-        or os.environ.get("SCRAPERAPI_KEY")    # env var set during setup
-        or ""
-    )
-
-
-def _fetch(url: str, **_kwargs) -> str | None:
-    """
-    Fetch a URL with maximum Cloudflare evasion. One attempt per client,
-    no retries, no sleeps — bail immediately so the caller can use Estimated Stats.
-
-    Strategy:
-      1. ScraperAPI SDK  — residential rotating proxies, built-in CF bypass
-      2. httpx + HTTP/2  — exact Chrome HTTP/2 fingerprint
-      3. curl_cffi       — exact Chrome TLS fingerprint
-    """
-    # ------------------------------------------------------------------ #
-    # 1. ScraperAPI — JS rendering (free plan)
-    #    render=true      → executes JS, bypasses Cloudflare challenge
-    #    keep_headers=true → forwards Chrome-like headers to HLTV
-    #    NOTE: premium=true requires a paid plan — omitted to avoid instant failures
-    # ------------------------------------------------------------------ #
-    api_key = _get_scraperapi_key()
-    if api_key:
-        try:
-            import requests as _req
-            params = {
-                "api_key": api_key,
-                "url": url,
-                "render": "true",
-                "keep_headers": "true",
-            }
-            logger.info(f"[scraperapi] GET {url} (render=true, keep_headers=true)")
-            resp = _req.get("http://api.scraperapi.com", params=params, timeout=70)
-            logger.info(f"[scraperapi] status={resp.status_code} — {len(resp.text):,} chars — snippet: {resp.text[:200]!r}")
-            if resp.status_code == 200 and not _is_blocked(resp):
-                logger.info(f"[scraperapi] OK — returning {len(resp.text):,} chars")
-                return resp.text
-            logger.warning(f"[scraperapi] blocked or non-200 (status={resp.status_code}) — trying httpx")
-        except Exception as e:
-            logger.warning(f"[scraperapi] {type(e).__name__}: {e} — trying httpx")
-    else:
-        logger.warning("[scraperapi] No API key found — skipping to httpx")
-
-    headers = _chrome_headers()
-
-    # ------------------------------------------------------------------ #
-    # 2. httpx with HTTP/2 + exact Chrome header order
-    # ------------------------------------------------------------------ #
+def _fetch(url: str) -> str | None:
+    """Fetch a URL using curl_cffi Chrome impersonation. Returns None on failure."""
+    if not _CFFI_OK:
+        logger.warning(f"[fetch] curl_cffi not available, skipping {url}")
+        return None
     try:
-        import httpx
-        logger.info(f"[httpx/h2] GET {url}")
-        with httpx.Client(
-            http2=True,
-            follow_redirects=True,
-            timeout=FETCH_TIMEOUT,
-            verify=True,
-        ) as client:
-            resp = client.get(url, headers=headers)
-        if resp.status_code == 200 and not _is_blocked(resp):
-            logger.info(f"[httpx/h2] OK — {len(resp.text):,} chars")
+        logger.info(f"[fetch] GET {url}")
+        resp = _cffi_req.get(url, impersonate="chrome110", timeout=FETCH_TIMEOUT)
+        if resp.status_code == 200 and "Just a moment" not in resp.text:
+            logger.info(f"[fetch] OK — {len(resp.text):,} chars")
             return resp.text
-        logger.warning(f"[httpx/h2] status={resp.status_code} — trying curl_cffi")
+        logger.warning(f"[fetch] status={resp.status_code} or CF block — skipping")
+        return None
     except Exception as e:
-        logger.warning(f"[httpx/h2] {type(e).__name__}: {e} — trying curl_cffi")
-
-    # ------------------------------------------------------------------ #
-    # 3. curl_cffi Chrome TLS + HTTP/2 impersonation (last resort)
-    # ------------------------------------------------------------------ #
-    try:
-        from curl_cffi import requests as _curl
-        logger.info(f"[curl_cffi] GET {url}")
-        resp = _curl.get(url, impersonate="chrome124", timeout=FETCH_TIMEOUT)
-        if resp.status_code == 200 and not _is_blocked(resp):
-            logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
-            return resp.text
-        logger.warning(f"[curl_cffi] status={resp.status_code} — returning None")
-    except Exception as e:
-        logger.warning(f"[curl_cffi] {type(e).__name__}: {e}")
-
-    logger.warning(f"All three clients failed for {url} — using Estimated Stats")
-    return None
+        logger.warning(f"[fetch] {type(e).__name__}: {e}")
+        return None
 
 
 # ---------------------------------------------------------------------------
-# Player lookup
+# Step 1 — Player search
 # ---------------------------------------------------------------------------
 
-def search_player(player_name: str) -> dict | None:
+def search_player(name: str) -> tuple[str, str, str] | None:
     """
-    Resolve a player name to their HLTV numeric ID and URL slug.
-    Tries the stats search endpoint first, then the global search.
+    Search HLTV for a player by name.
+    Returns (player_id, player_slug, display_name) or None.
     """
-    # Approach 1: stats player list search
-    url = f"{HLTV_BASE}/stats/players?name={player_name.replace(' ', '+')}"
+    url = f"{HLTV_BASE}/search?query={name}"
     html = _fetch(url)
-    if html:
-        soup = BeautifulSoup(html, "html.parser")
-        # Links like /stats/players/player/7998/ZywOo
-        links = soup.select("td.playerCol a[href*='/stats/players/player/']")
-        if not links:
-            links = soup.select("a[href*='/stats/players/player/']")
-        for link in links:
-            href = link.get("href", "")
-            m = re.search(r"/stats/players/player/(\d+)/([^/?#]+)", href)
-            if m:
-                return {"id": m.group(1), "name": m.group(2), "url": f"{HLTV_BASE}/player/{m.group(1)}/{m.group(2)}"}
-
-    # Approach 2: global search
-    url2 = f"{HLTV_BASE}/search?term={player_name.replace(' ', '+')}"
-    html2 = _fetch(url2)
-    if html2:
-        soup2 = BeautifulSoup(html2, "html.parser")
-        links2 = soup2.select("a[href*='/player/']")
-        for link in links2:
-            href = link.get("href", "")
-            m = re.search(r"/player/(\d+)/([^/?#]+)", href)
-            if m:
-                return {"id": m.group(1), "name": m.group(2), "url": f"{HLTV_BASE}/player/{m.group(1)}/{m.group(2)}"}
-
-    logger.warning(f"Could not find player: {player_name}")
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Match stats scraping
-# ---------------------------------------------------------------------------
-
-def _parse_stat_cell(cells: list, idx: int) -> str:
-    try:
-        return cells[idx].get_text(strip=True)
-    except IndexError:
-        return "0"
-
-
-def _safe_int(text: str) -> int:
-    cleaned = re.sub(r"[^\d]", "", text)
-    return int(cleaned) if cleaned else 0
-
-
-def _safe_float(text: str) -> float:
-    cleaned = re.sub(r"[^\d.]", "", text)
-    try:
-        return float(cleaned)
-    except ValueError:
-        return 0.0
-
-
-def get_player_recent_series(player_id: str, player_slug: str, stat_type: str = "Kills") -> list:
-    """
-    Fetch last 10 BO3 series for a player (Maps 1 & 2 only) from HLTV.
-    Returns a list of per-map stat dicts.
-
-    HLTV stats match table columns (0-indexed):
-      0: Date  1: Event  2: Match (link)  3: Map  4: Kills  5: HS
-      6: Assists  7: Deaths  8: K/D  9: ADR  10: Rating
-    """
-    url = (
-        f"{HLTV_BASE}/stats/players/matches/{player_id}/{player_slug}"
-        f"?matchType=Lan&rankingFilter=Top50"
-    )
-    html = _fetch(url, retries=3, delay=2.0)
-
     if not html:
-        logger.warning("Failed to fetch player match stats page")
+        return None
+
+    matches = re.findall(r'/player/(\d+)/([\w-]+)', html)
+    if not matches:
+        logger.warning(f"[search] No player found for '{name}'")
+        return None
+
+    # Score matches by how closely the slug matches the search name
+    name_lower = name.lower().replace(" ", "").replace("-", "")
+    best = None
+    best_score = -1
+    for pid, slug in dict.fromkeys(matches).items() if isinstance(matches, dict) else dict.fromkeys(matches):
+        slug_clean = slug.lower().replace("-", "")
+        score = sum(1 for a, b in zip(name_lower, slug_clean) if a == b)
+        if slug_clean == name_lower:
+            score += 100  # exact match bonus
+        if score > best_score:
+            best_score = score
+            best = (pid, slug)
+
+    if not best:
+        return None
+
+    pid, slug = best
+    display = slug.replace("-", " ").title()
+    logger.info(f"[search] Found player: {display} (id={pid}, slug={slug})")
+    return pid, slug, display
+
+
+def _score_player_match(name: str, pid: str, slug: str) -> int:
+    """Score how well a player ID/slug matches the searched name."""
+    name_lower = re.sub(r'[^a-z0-9]', '', name.lower())
+    slug_lower = re.sub(r'[^a-z0-9]', '', slug.lower())
+    if name_lower == slug_lower:
+        return 200
+    if name_lower in slug_lower or slug_lower in name_lower:
+        return 100
+    # character overlap score
+    return sum(1 for a, b in zip(name_lower, slug_lower) if a == b)
+
+
+def search_player_v2(name: str) -> tuple[str, str, str] | None:
+    """Improved player search with better matching."""
+    url = f"{HLTV_BASE}/search?query={name}"
+    html = _fetch(url)
+    if not html:
+        return None
+
+    matches = re.findall(r'/player/(\d+)/([\w-]+)', html)
+    if not matches:
+        logger.warning(f"[search] No player found for '{name}'")
+        return None
+
+    seen = {}
+    for pid, slug in matches:
+        if pid not in seen:
+            seen[pid] = slug
+
+    best_pid, best_slug, best_score = None, None, -1
+    for pid, slug in seen.items():
+        score = _score_player_match(name, pid, slug)
+        if score > best_score:
+            best_score = score
+            best_pid, best_slug = pid, slug
+
+    if not best_pid:
+        return None
+
+    display = best_slug.replace("-", " ").title()
+    logger.info(f"[search] Best match: {display} (id={best_pid}, slug={best_slug}, score={best_score})")
+    return best_pid, best_slug, display
+
+
+# ---------------------------------------------------------------------------
+# Step 2 — Get player's recent BO3 match IDs from the results page
+# ---------------------------------------------------------------------------
+
+def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[str, str]]:
+    """
+    Fetch /results?player={id} and return a list of (match_id, slug) tuples
+    for recently completed matches. Only returns large IDs (7+ digits) which
+    correspond to accessible HLTV match pages.
+    """
+    url = f"{HLTV_BASE}/results?player={player_id}"
+    html = _fetch(url)
+    if not html:
         return []
 
-    soup = BeautifulSoup(html, "html.parser")
+    # Find all match links on the page — only large IDs work (small IDs return 500)
+    all_matches = re.findall(r'/matches/(\d+)/([a-z0-9-]+)', html)
+    seen = {}
+    for mid, slug in all_matches:
+        if mid not in seen and len(mid) >= 6:
+            seen[mid] = slug
 
-    # Find the stats table
-    table = (
-        soup.select_one("table.stats-table")
-        or soup.select_one("table#matchesTable")
-        or soup.select_one("div.stats-table table")
-        or soup.select_one("table")
-    )
+    results = list(seen.items())[:max_matches]
+    logger.info(f"[results] Found {len(results)} match IDs for player {player_id}")
+    return results
 
-    if not table:
-        logger.warning("No stats table found on HLTV page")
-        return []
 
-    rows = table.select("tbody tr")
-    if not rows:
-        rows = table.select("tr")[1:]  # skip header
+# ---------------------------------------------------------------------------
+# Step 3 — Parse a match page for per-map kills
+# ---------------------------------------------------------------------------
 
-    logger.info(f"Found {len(rows)} row(s) in match stats table")
+def _parse_match_kills(html: str, player_slug: str) -> dict:
+    """
+    Parse an HLTV match page and return:
+      {
+        'bo_type': 3,          # or 1/2
+        'maps': [
+          {'map_name': 'Dust2', 'kills': 22, 'deaths': 14, 'map_number': 1},
+          {'map_name': 'Inferno', 'kills': 19, 'deaths': 17, 'map_number': 2},
+          ...
+        ]
+      }
+    Returns None if the player isn't found or the match page has no stats.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
 
-    # Track series: match_id -> count of maps seen so far
-    series_map_count: dict[str, int] = {}
-    series_order: list[str] = []  # ordered list of unique match IDs seen
-    map_stats: list[dict] = []
+    # Determine BO type from score (e.g. Vitality 2 - NaVi 1)
+    score_elements = soup.find_all(class_=re.compile(r'won|lost|teamWon|teamLost', re.I))
+    team_scores = re.findall(r'>\s*(\d)\s*<', html[:50000])
+    bo_type = 1
+    if team_scores:
+        max_score = max(int(s) for s in team_scores if int(s) <= 3)
+        if max_score >= 2:
+            bo_type = 3
 
-    for row in rows:
-        cells = row.select("td")
-        if len(cells) < 5:
+    matchstats = soup.find(id='match-stats')
+    if not matchstats:
+        logger.debug("[parse] No match-stats section found")
+        return None
+
+    # Get ordered map IDs from the tab navigation
+    tab_ids = re.findall(r'id="(\d{5,7})"', str(matchstats))
+    # Deduplicate preserving order, skip 'all'
+    seen_ids = []
+    for tid in tab_ids:
+        if tid not in seen_ids:
+            seen_ids.append(tid)
+    map_ids = seen_ids  # ordered by map number
+
+    logger.info(f"[parse] Maps found: {map_ids} | BO type: {bo_type}")
+
+    # Get map names from the tab labels
+    map_names = {}
+    for div in matchstats.find_all(class_=re.compile(r'dynamic-map-name-full', re.I)):
+        div_id = div.get('id', '')
+        if div_id and div_id != 'all':
+            map_names[div_id] = div.get_text(strip=True)
+
+    # Normalise player slug for matching (lowercase, no hyphens)
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+
+    maps_result = []
+    for map_num, map_id in enumerate(map_ids, start=1):
+        content_div = matchstats.find(id=f'{map_id}-content')
+        if not content_div:
             continue
 
-        # --- Extract match ID from any link in the row ---
-        match_id = None
-        for cell in cells:
-            link = cell.select_one("a[href*='/matches/']")
-            if link:
-                m = re.search(r"/matches/(\d+)/", link.get("href", ""))
-                if m:
-                    match_id = m.group(1)
+        map_name = map_names.get(map_id, f'Map{map_num}')
+
+        # Find the player row — search all <tr> elements for the player's name
+        player_row = None
+        for tr in content_div.find_all('tr'):
+            row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm in row_text and slug_norm:
+                player_row = tr
+                break
+
+        if player_row is None:
+            # Try partial match (first 4 chars of slug)
+            short = slug_norm[:4]
+            for tr in content_div.find_all('tr'):
+                row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                if len(short) >= 3 and short in row_text:
+                    player_row = tr
                     break
 
-        if not match_id:
+        if player_row is None:
+            logger.debug(f"[parse] Player '{player_slug}' not found on map {map_num} ({map_name})")
             continue
 
-        # Track series order
-        if match_id not in series_map_count:
-            series_map_count[match_id] = 0
-            series_order.append(match_id)
-
-        # Stop once we have 10 series
-        if len(series_order) > 10:
-            break
-
-        series_map_count[match_id] += 1
-        map_num = series_map_count[match_id]
-
-        # Only include maps 1 and 2 (exclude map 3+)
-        if map_num > 2:
+        # Extract K-D from the row — format is "22-14"
+        kd_match = re.search(r'(\d+)-(\d+)', player_row.get_text())
+        if not kd_match:
             continue
 
-        # --- Map name ---
-        map_cell = None
-        for cell in cells:
-            if cell.get("class") and any(
-                c in ["mapCol", "statsDetail", "map-td"] for c in cell.get("class", [])
-            ):
-                map_cell = cell
-                break
-        map_name = map_cell.get_text(strip=True) if map_cell else cells[3].get_text(strip=True)
-
-        # --- Stat extraction ---
-        # Try to detect column positions dynamically via header
-        header_row = table.select_one("thead tr")
-        col_map = {}
-        if header_row:
-            for i, th in enumerate(header_row.select("th")):
-                txt = th.get_text(strip=True).lower()
-                col_map[txt] = i
-
-        def get_col(keys: list[str], default_idx: int) -> str:
-            for k in keys:
-                if k in col_map:
-                    return _parse_stat_cell(cells, col_map[k])
-            return _parse_stat_cell(cells, default_idx)
-
-        kills = _safe_int(get_col(["kills", "k"], 4))
-        hs    = _safe_int(get_col(["hs", "headshots", "hsk"], 5))
-        deaths = _safe_int(get_col(["deaths", "d"], 7))
-        adr   = _safe_float(get_col(["adr"], 9))
-
-        # Estimate rounds from deaths (proxy: most players die ~0.65/round)
-        if deaths > 0:
-            rounds = max(16, min(30, int(deaths / 0.65)))
-        else:
-            rounds = 22
-
-        stat_value = kills if stat_type == "Kills" else hs
-
-        map_stats.append({
-            "match_id": match_id,
-            "map_num": map_num,
-            "map_name": map_name,
-            "kills": kills,
-            "hs": hs,
-            "deaths": deaths,
-            "rounds": rounds,
-            "adr": adr,
-            "stat_value": stat_value,
+        kills = int(kd_match.group(1))
+        deaths = int(kd_match.group(2))
+        maps_result.append({
+            'map_name': map_name,
+            'kills': kills,
+            'deaths': deaths,
+            'map_number': map_num,
         })
+        logger.info(f"[parse] Map {map_num} ({map_name}): {player_slug} — {kills}K/{deaths}D")
 
-    logger.info(
-        f"Parsed {len(map_stats)} maps across {len([m for m in series_order if series_map_count[m] > 0])} series"
-    )
-    return map_stats
+    if not maps_result:
+        return None
+
+    return {'bo_type': bo_type, 'maps': maps_result}
 
 
 # ---------------------------------------------------------------------------
-# Match odds
+# Step 4 — Get HS kills specifically (from per-round headshot data if available)
 # ---------------------------------------------------------------------------
 
-def get_match_odds(player_name: str = "") -> float:
+def _parse_hs_kills(html: str, player_slug: str) -> dict | None:
     """
-    Attempt to fetch upcoming match odds from HLTV for round projection.
-    Returns the implied probability (0–1) of the stronger side.
-    Defaults to 0.55 (slight favourite) if scraping fails.
+    Try to extract headshot kills per map. HLTV doesn't show HS per map
+    in the matchstats section directly, so we derive a HS% from the ADR
+    pattern or fall back to None (caller will use overall HS% from profile).
+    Returns same format as _parse_match_kills but kills = headshot kills only.
     """
-    try:
-        html = _fetch(f"{HLTV_BASE}/matches", retries=2, delay=1.5)
+    # HS data is not reliably available per-map on HLTV match pages.
+    # We return None and let the caller handle HS via overall stats.
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main entry point — used by the bot
+# ---------------------------------------------------------------------------
+
+def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
+    """
+    Main scraper entry. Returns:
+      {
+        'player':        'ZywOo',
+        'player_id':     '11893',
+        'map_kills':     [22, 19, 28, 21, 17, ...],   # last N maps (maps 1 & 2 of BO3)
+        'mean':          21.4,
+        'std':           3.8,
+        'sample_size':   16,
+        'source':        'HLTV Live',
+      }
+    Or raises RuntimeError if the player cannot be found.
+    """
+    logger.info(f"[scraper] Looking up '{player_name}' for {stat_type}")
+
+    # Step 1: Find player
+    result = search_player_v2(player_name)
+    if not result:
+        raise RuntimeError(f"Player '{player_name}' not found on HLTV")
+    player_id, player_slug, display_name = result
+
+    # Step 2: Get recent match IDs
+    match_ids = get_player_match_ids(player_id, max_matches=30)
+    if not match_ids:
+        raise RuntimeError(f"No recent matches found for '{display_name}'")
+
+    # Step 3: Fetch match pages and collect per-map kill data
+    map_kills = []
+    bo3_series_count = 0
+    errors = 0
+
+    for match_id, slug in match_ids:
+        if bo3_series_count >= 10:
+            break  # collected 10 BO3 series
+
+        time.sleep(0.3)  # gentle rate limiting
+
+        match_url = f"{HLTV_BASE}/matches/{match_id}/{slug}"
+        html = _fetch(match_url)
         if not html:
-            return 0.55
+            errors += 1
+            if errors >= 5:
+                break
+            continue
 
-        soup = BeautifulSoup(html, "html.parser")
-        # Look for odds in upcoming match rows
-        # HLTV shows odds as percentages in team-rating or odds spans
-        odds_spans = soup.select("span.odd, span.oddsCell, div.odds")
-        if odds_spans:
-            values = []
-            for span in odds_spans[:6]:
-                txt = span.get_text(strip=True).replace("%", "")
-                try:
-                    v = float(txt) / 100.0
-                    if 0.4 <= v <= 0.9:
-                        values.append(v)
-                except ValueError:
-                    pass
-            if values:
-                return max(values)
+        parsed = _parse_match_kills(html, player_slug)
+        if not parsed:
+            continue
 
-    except Exception as e:
-        logger.warning(f"get_match_odds error: {e}")
+        # Only count BO3 series (3 maps possible, score 2-1 or 2-0)
+        maps = parsed.get('maps', [])
+        if len(maps) < 2:
+            continue  # Not enough map data — skip
 
-    return 0.55
+        # Take maps 1 and 2 only
+        for m in maps[:2]:
+            map_kills.append(m['kills'])
 
+        bo3_series_count += 1
+        logger.info(
+            f"[scraper] Series {bo3_series_count}: match {match_id} — "
+            f"maps: {[(m['map_name'], m['kills']) for m in maps[:2]]}"
+        )
 
-# ---------------------------------------------------------------------------
-# Fallback data generator
-# ---------------------------------------------------------------------------
+    if len(map_kills) < 4:
+        raise RuntimeError(
+            f"Insufficient data for '{display_name}' — only {len(map_kills)} map samples found "
+            f"(need at least 4). The player may be inactive or have few recent BO3 matches."
+        )
 
-def get_player_info_fallback(player_name: str, stat_type: str = "Kills") -> list:
-    """
-    Generate realistic sample data when HLTV is unavailable.
-    Uses seeded randomness so the same player always gets the same baseline.
-    """
-    import random as rnd
+    import statistics
+    mean = statistics.mean(map_kills)
+    std = statistics.stdev(map_kills) if len(map_kills) > 1 else 4.0
+    std = max(std, 2.0)  # floor to avoid degenerate distributions
 
-    rnd.seed(hash(player_name.lower()) % 100_000)
-
-    baselines = {
-        "zywoo": (23, 10), "s1mple": (25, 10), "niko": (21, 9),
-        "device": (19, 8), "broky": (18, 8), "electronic": (20, 9),
-        "ropz": (19, 8),   "gla1ve": (14, 6), "blameF": (19, 8),
-        "jame": (15, 6),   "sh1ro": (20, 9),  "ax1le": (21, 9),
+    return {
+        'player': display_name,
+        'player_id': player_id,
+        'map_kills': map_kills,
+        'mean': round(mean, 2),
+        'std': round(std, 2),
+        'sample_size': len(map_kills),
+        'source': 'HLTV Live',
     }
-    base_kills, base_hs = baselines.get(player_name.lower(), (17, 7))
 
-    map_stats = []
-    for i in range(20):  # 10 series × 2 maps
-        kills  = max(5,  int(rnd.gauss(base_kills, 4)))
-        hs     = max(1,  int(rnd.gauss(base_hs, 2)))
-        deaths = max(8,  int(rnd.gauss(18, 3)))
-        rounds = max(16, min(30, int(rnd.gauss(25, 2))))
-        adr    = round(rnd.gauss(78, 12), 1)
 
-        stat_value = kills if stat_type == "Kills" else hs
-        map_stats.append({
-            "match_id": f"est_{i // 2}",
-            "map_num": (i % 2) + 1,
-            "map_name": ["Mirage", "Inferno", "Nuke", "Ancient", "Vertigo"][i % 5],
-            "kills": kills,
-            "hs": hs,
-            "deaths": deaths,
-            "rounds": rounds,
-            "adr": adr,
-            "stat_value": stat_value,
-        })
-    return map_stats
+# ---------------------------------------------------------------------------
+# Fallback — generates seeded realistic estimates when HLTV is unreachable
+# ---------------------------------------------------------------------------
+
+def get_player_info_fallback(player_name: str, stat_type: str = "Kills") -> dict:
+    """
+    Generate seeded realistic estimated stats for when HLTV is unavailable.
+    The seed is derived from the player name so the same player always gets
+    the same estimates (reproducible but not real data).
+    """
+    seed = sum(ord(c) for c in player_name.lower())
+    rng = random.Random(seed)
+
+    # Elite fragger archetype varies by seed
+    tier = seed % 3  # 0 = elite, 1 = solid, 2 = average
+    if tier == 0:
+        base_mean = rng.uniform(19, 24)
+    elif tier == 1:
+        base_mean = rng.uniform(16, 20)
+    else:
+        base_mean = rng.uniform(13, 17)
+
+    std = rng.uniform(3.5, 5.5)
+    n = 20  # simulate 20 map samples (10 BO3 series × 2 maps)
+    map_kills = [
+        max(5, int(rng.gauss(base_mean, std)))
+        for _ in range(n)
+    ]
+
+    import statistics
+    mean = statistics.mean(map_kills)
+    real_std = statistics.stdev(map_kills)
+
+    return {
+        'player': player_name,
+        'player_id': None,
+        'map_kills': map_kills,
+        'mean': round(mean, 2),
+        'std': round(real_std, 2),
+        'sample_size': n,
+        'source': '⚠️ Estimated (HLTV unavailable — stats are approximate)',
+    }

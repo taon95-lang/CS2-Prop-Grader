@@ -6,9 +6,7 @@ import os
 import asyncio
 import logging
 from scraper import (
-    search_player,
-    get_player_recent_series,
-    get_match_odds,
+    get_player_info,
     get_player_info_fallback,
 )
 from simulator import run_simulation
@@ -275,37 +273,40 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     All blocking I/O and CPU work lives here.
     Run via loop.run_in_executor so the async event loop is never blocked.
 
-    Fix 3 — Simulation Guard:
-    If HLTV scraping fails at any point, the function always falls through
-    to Estimated Stats and always proceeds to the simulation. It never hangs
-    or returns early without a result.
+    Scraping strategy:
+      1. get_player_info() — searches HLTV, fetches accessible match pages,
+         extracts per-map kills from matchstats HTML section.
+      2. get_player_info_fallback() — seeded estimated stats if HLTV fails.
     """
     internal_stat = "Kills" if stat_type in ("Kills", "kills") else "HS"
 
-    # --- Step 1: Try HLTV (15s timeout enforced inside scraper) ---
+    # --- Step 1: Try live HLTV data ---
     map_stats = []
-    data_source = "HLTV Live (cloudscraper)"
+    data_source = "HLTV Live"
     used_fallback = False
 
     try:
-        player_info = search_player(player_name)
-        logger.info(f"Player search: {player_info}")
-
-        if player_info:
-            map_stats = get_player_recent_series(
-                player_info["id"], player_info["name"], stat_type=internal_stat
-            )
-            logger.info(f"HLTV returned {len(map_stats)} map(s)")
+        info = get_player_info(player_name, stat_type=internal_stat)
+        map_stats = info["map_kills"]
+        data_source = info["source"]
+        logger.info(
+            f"HLTV returned {len(map_stats)} map samples | "
+            f"mean={info['mean']} std={info['std']} source={info['source']}"
+        )
+    except RuntimeError as e:
+        logger.warning(f"HLTV scrape failed (RuntimeError): {e}")
+        map_stats = []
     except Exception as e:
-        logger.warning(f"HLTV scrape raised exception ({type(e).__name__}): {e}")
+        logger.warning(f"HLTV scrape raised unexpected error ({type(e).__name__}): {e}")
         map_stats = []
 
-    # --- Fix 3: Simulation Guard — always fall through to estimated if needed ---
-    if not map_stats or len(map_stats) < 4:
+    # --- Step 2: Fallback if not enough data ---
+    if len(map_stats) < 4:
         logger.warning("Insufficient HLTV data — using Estimated Stats fallback")
         try:
-            map_stats = get_player_info_fallback(player_name, stat_type=internal_stat)
-            data_source = "⚠️ Estimated (HLTV unavailable — stats are approximate)"
+            fallback = get_player_info_fallback(player_name, stat_type=internal_stat)
+            map_stats = fallback["map_kills"]
+            data_source = fallback["source"]
             used_fallback = True
         except Exception as e:
             logger.error(f"Fallback generator failed ({type(e).__name__}): {e}")
@@ -314,13 +315,8 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
-    # --- Step 2: Match odds (safe, always has a default) ---
-    try:
-        favorite_prob = get_match_odds(player_name)
-    except Exception:
-        favorite_prob = 0.55  # default: slight favourite
-
     # --- Step 3: Monte Carlo simulation ---
+    favorite_prob = 0.55  # default edge assumption
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
