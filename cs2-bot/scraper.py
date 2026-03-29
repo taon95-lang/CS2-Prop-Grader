@@ -65,15 +65,34 @@ def _fetch(url: str, **_kwargs) -> str | None:
     no retries, no sleeps — bail immediately so the caller can use Estimated Stats.
 
     Strategy:
-      1. httpx + HTTP/2 + exact Chrome header order  (best HTTP/2 fingerprint)
-      2. curl_cffi Chrome TLS+HTTP/2 impersonation   (best TLS fingerprint)
-
-    Both clients mimic a real Chrome browser at the protocol layer — HTTP/2
-    pseudo-headers, HPACK compression, and TLS ClientHello all match Chrome 124.
+      1. ScraperAPI residential proxy  (bypasses Cloudflare at the IP level)
+      2. httpx + HTTP/2                (best HTTP/2 fingerprint)
+      3. curl_cffi Chrome impersonation (best TLS fingerprint)
     """
+    import os
+    import requests as _requests
+
+    scraper_key = os.environ.get("SCRAPERAPI_KEY", "")
+
+    # --- Primary: ScraperAPI (residential IPs, built-in Cloudflare bypass) ---
+    if scraper_key:
+        try:
+            api_url = "http://api.scraperapi.com"
+            params = {"api_key": scraper_key, "url": url}
+            logger.info(f"[scraperapi] GET {url}")
+            resp = _requests.get(api_url, params=params, timeout=FETCH_TIMEOUT + 5)
+            if resp.status_code == 200 and not _is_blocked(resp):
+                logger.info(f"[scraperapi] OK — {len(resp.text):,} chars")
+                return resp.text
+            logger.warning(f"[scraperapi] status={resp.status_code} — trying httpx")
+        except Exception as e:
+            logger.warning(f"[scraperapi] {type(e).__name__}: {e} — trying httpx")
+    else:
+        logger.warning("[scraperapi] No SCRAPERAPI_KEY set — skipping")
+
     headers = _chrome_headers()
 
-    # --- Primary: httpx with HTTP/2 ---
+    # --- Secondary: httpx with HTTP/2 + exact Chrome header order ---
     try:
         import httpx
         logger.info(f"[httpx/h2] GET {url}")
@@ -87,19 +106,15 @@ def _fetch(url: str, **_kwargs) -> str | None:
         if resp.status_code == 200 and not _is_blocked(resp):
             logger.info(f"[httpx/h2] OK — {len(resp.text):,} chars")
             return resp.text
-        logger.warning(f"[httpx/h2] status={resp.status_code} blocked={_is_blocked(resp)} — trying curl_cffi")
+        logger.warning(f"[httpx/h2] status={resp.status_code} — trying curl_cffi")
     except Exception as e:
         logger.warning(f"[httpx/h2] {type(e).__name__}: {e} — trying curl_cffi")
 
-    # --- Fallback: curl_cffi full Chrome impersonation (TLS + HTTP/2 fingerprint) ---
+    # --- Last resort: curl_cffi Chrome TLS+HTTP/2 impersonation ---
     try:
         from curl_cffi import requests as _curl
         logger.info(f"[curl_cffi] GET {url}")
-        resp = _curl.get(
-            url,
-            impersonate="chrome124",
-            timeout=FETCH_TIMEOUT,
-        )
+        resp = _curl.get(url, impersonate="chrome124", timeout=FETCH_TIMEOUT)
         if resp.status_code == 200 and not _is_blocked(resp):
             logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
             return resp.text
@@ -107,7 +122,7 @@ def _fetch(url: str, **_kwargs) -> str | None:
     except Exception as e:
         logger.warning(f"[curl_cffi] {type(e).__name__}: {e}")
 
-    logger.warning(f"Both clients failed for {url} — caller will use Estimated Stats")
+    logger.warning(f"All three clients failed for {url} — caller will use Estimated Stats")
     return None
 
 
