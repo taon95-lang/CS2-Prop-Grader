@@ -84,23 +84,33 @@ def _fetch(url: str, **_kwargs) -> str | None:
       3. curl_cffi       — exact Chrome TLS fingerprint
     """
     # ------------------------------------------------------------------ #
-    # 1. ScraperAPI Python SDK (primary — bypasses Cloudflare at IP level)
+    # 1. ScraperAPI — JS rendering + premium residential IPs
+    #    render=true  → executes JS, solves Cloudflare challenge
+    #    premium=true → residential IPs, much harder for HLTV to block
+    #    wait_for_selector → waits until stats table is in the DOM
+    #    timeout=90   → JS rendering takes up to 60s; give extra headroom
     # ------------------------------------------------------------------ #
     api_key = _get_scraperapi_key()
     if api_key:
         try:
-            from scraperapi_sdk import ScraperAPIClient
-            client = ScraperAPIClient(api_key)
-            logger.info(f"[scraperapi-sdk] GET {url}")
-            resp = client.get(url=url)
+            import requests as _req
+            params = {
+                "api_key": api_key,
+                "url": url,
+                "render": "true",
+                "premium": "true",
+                "wait_for_selector": ".stats-section",
+            }
+            logger.info(f"[scraperapi] GET {url} (render+premium)")
+            resp = _req.get("http://api.scraperapi.com", params=params, timeout=90)
             if resp.status_code == 200 and not _is_blocked(resp):
-                logger.info(f"[scraperapi-sdk] OK — {len(resp.text):,} chars")
+                logger.info(f"[scraperapi] OK — {len(resp.text):,} chars")
                 return resp.text
-            logger.warning(f"[scraperapi-sdk] status={resp.status_code} — trying httpx")
+            logger.warning(f"[scraperapi] status={resp.status_code} — trying httpx")
         except Exception as e:
-            logger.warning(f"[scraperapi-sdk] {type(e).__name__}: {e} — trying httpx")
+            logger.warning(f"[scraperapi] {type(e).__name__}: {e} — trying httpx")
     else:
-        logger.warning("[scraperapi-sdk] No API key found — skipping to httpx")
+        logger.warning("[scraperapi] No API key found — skipping to httpx")
 
     headers = _chrome_headers()
 
