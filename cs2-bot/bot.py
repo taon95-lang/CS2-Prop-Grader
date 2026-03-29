@@ -90,33 +90,64 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     if stat_type == "Hs":
         stat_type = "HS"
 
-    # Acknowledge receipt
+    # --- Step 4: Immediately acknowledge so Discord never sees a dead interaction ---
     thinking_embed = discord.Embed(
         title="⚙️ Analyzing...",
         description=(
             f"**Player:** {player_name}\n"
             f"**Prop:** {line_val} {stat_type}\n\n"
             f"🔍 Fetching HLTV data (this may take 30s)...\n"
-            f"📊 Will run 100,000 Monte Carlo simulations once data is ready.\n\n"
-            f"*If HLTV times out after 10s, Estimated Stats are used automatically.*"
+            f"📊 Will run 25,000 Monte Carlo simulations once data is ready.\n\n"
+            f"*If HLTV times out after 15s, Estimated Stats are used automatically.*"
         ),
         color=0x7289DA,
     )
+    # Send the acknowledgement before doing any work — keeps Discord happy
     thinking_msg = await ctx.send(embed=thinking_embed)
+    # Also show a typing indicator so Discord keeps the channel "active"
+    await ctx.trigger_typing()
 
-    # Run in executor to avoid blocking
-    loop = asyncio.get_event_loop()
+    # Run blocking analysis in a thread executor so the event loop stays free
+    loop = asyncio.get_running_loop()
     try:
-        result = await loop.run_in_executor(
-            None,
-            lambda: _analyze_player(player_name, line_val, stat_type),
+        # Hard 60-second cap on the entire analysis — prevents infinite hangs
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: _analyze_player(player_name, line_val, stat_type),
+            ),
+            timeout=60,
         )
-    except Exception as e:
-        logger.error(f"Analysis error: {e}")
+    except asyncio.TimeoutError:
+        logger.error("Analysis timed out after 60s")
         await thinking_msg.edit(
             embed=discord.Embed(
-                title="❌ Error",
-                description=f"An error occurred while analyzing: `{str(e)[:200]}`",
+                title="❌ Timed Out",
+                description="The analysis took too long and was cancelled. Try again in a moment.",
+                color=0xFF4136,
+            )
+        )
+        return
+    except Exception as e:
+        err_name = type(e).__name__
+        logger.error(f"Analysis error ({err_name}): {e}")
+        # --- Step 3: Send explicit error name to Discord ---
+        await thinking_msg.edit(
+            embed=discord.Embed(
+                title="❌ Analysis Error",
+                description=f"**Simulation Error: {err_name}**\n```{str(e)[:300]}```",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    # --- Step 3: Surface simulation-level errors by name ---
+    if "sim_error" in result:
+        err_name = result["sim_error"]
+        await thinking_msg.edit(
+            embed=discord.Embed(
+                title="❌ Simulation Error",
+                description=f"**Simulation Error: {err_name}**\n{result.get('error', '')}",
                 color=0xFF4136,
             )
         )
@@ -168,13 +199,21 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     # 2. Get match odds for round projection
     favorite_prob = get_match_odds(player_name)
 
-    # 3. Monte Carlo simulation
-    sim_result = run_simulation(
-        map_stats=map_stats,
-        line=line,
-        stat_type=stat_type,
-        favorite_prob=favorite_prob,
-    )
+    # 3. Monte Carlo simulation — catch and name any failure
+    try:
+        sim_result = run_simulation(
+            map_stats=map_stats,
+            line=line,
+            stat_type=stat_type,
+            favorite_prob=favorite_prob,
+        )
+    except Exception as e:
+        err_name = type(e).__name__
+        logger.error(f"Simulation failed ({err_name}): {e}")
+        return {
+            "sim_error": err_name,
+            "error": str(e)[:300],
+        }
 
     sim_result["data_source"] = data_source
     sim_result["used_fallback"] = used_fallback

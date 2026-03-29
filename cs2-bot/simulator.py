@@ -7,7 +7,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-N_SIMULATIONS = 100_000
+N_SIMULATIONS = 25_000
 
 
 def calculate_kpr(map_stats: list) -> float:

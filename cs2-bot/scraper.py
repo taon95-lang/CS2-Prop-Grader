@@ -50,7 +50,7 @@ def _build_headers() -> dict:
     return h
 
 
-FETCH_TIMEOUT = 10  # Hard 10-second timeout per request — exceeding this falls back immediately
+FETCH_TIMEOUT = 15  # Hard 15-second timeout per request — exceeding this falls back immediately
 
 
 def _make_cloudscraper():
