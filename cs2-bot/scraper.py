@@ -50,6 +50,9 @@ def _build_headers() -> dict:
     return h
 
 
+FETCH_TIMEOUT = 10  # Hard 10-second timeout per request — exceeding this falls back immediately
+
+
 def _make_cloudscraper():
     """
     Build a cloudscraper session configured to impersonate Chrome on Windows,
@@ -62,7 +65,7 @@ def _make_cloudscraper():
             "platform": "windows",
             "mobile": False,
         },
-        delay=8,          # seconds to wait before solving JS challenge
+        delay=3,          # reduced so it fits within the 10s timeout budget
     )
     # Override the UA that cloudscraper sets internally
     scraper.headers.update({"User-Agent": random.choice(CUSTOM_USER_AGENTS)})
@@ -106,7 +109,7 @@ def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
         for attempt in range(1, retries + 1):
             try:
                 logger.info(f"[cloudscraper] {url} (attempt {attempt}/{retries})")
-                resp = scraper.get(url, headers=headers, timeout=25)
+                resp = scraper.get(url, headers=headers, timeout=FETCH_TIMEOUT)
 
                 if _is_blocked(resp):
                     logger.warning(f"[cloudscraper] CF block on attempt {attempt} — status {resp.status_code}")
@@ -126,9 +129,8 @@ def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
                 return resp.text
 
             except Exception as e:
-                logger.warning(f"[cloudscraper] Error on attempt {attempt}: {e}")
-                if attempt < retries:
-                    time.sleep(delay + random.uniform(0.5, 2.0))
+                logger.warning(f"[cloudscraper] Timed out or errored on attempt {attempt}: {e}")
+                return None  # bail immediately on timeout — don't retry, go to fallback
 
     except ImportError:
         logger.warning("cloudscraper not installed — skipping to curl_cffi")
@@ -141,7 +143,7 @@ def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
         for attempt in range(1, retries + 1):
             try:
                 logger.info(f"[curl_cffi] {url} (attempt {attempt}/{retries})")
-                resp = curl_session.get(url, headers=headers, timeout=25)
+                resp = curl_session.get(url, headers=headers, timeout=FETCH_TIMEOUT)
 
                 if _is_blocked(resp):
                     logger.warning(f"[curl_cffi] CF block on attempt {attempt}")
@@ -159,9 +161,8 @@ def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
                 return resp.text
 
             except Exception as e:
-                logger.warning(f"[curl_cffi] Error on attempt {attempt}: {e}")
-                if attempt < retries:
-                    time.sleep(delay + random.uniform(0.5, 2.0))
+                logger.warning(f"[curl_cffi] Timed out or errored on attempt {attempt}: {e}")
+                return None  # bail immediately on timeout
 
     except ImportError:
         logger.error("curl_cffi not installed either — no HTTP client available")

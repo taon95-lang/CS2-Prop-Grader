@@ -96,8 +96,9 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         description=(
             f"**Player:** {player_name}\n"
             f"**Prop:** {line_val} {stat_type}\n\n"
-            f"🔍 Fetching last 10 BO3 series from HLTV (Chrome TLS bypass)...\n"
-            f"📊 Running 100,000 Monte Carlo simulations (Negative Binomial)..."
+            f"🔍 Fetching HLTV data (this may take 30s)...\n"
+            f"📊 Will run 100,000 Monte Carlo simulations once data is ready.\n\n"
+            f"*If HLTV times out after 10s, Estimated Stats are used automatically.*"
         ),
         color=0x7289DA,
     )
