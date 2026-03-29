@@ -84,11 +84,10 @@ def _fetch(url: str, **_kwargs) -> str | None:
       3. curl_cffi       — exact Chrome TLS fingerprint
     """
     # ------------------------------------------------------------------ #
-    # 1. ScraperAPI — JS rendering + premium residential IPs
-    #    render=true  → executes JS, solves Cloudflare challenge
-    #    premium=true → residential IPs, much harder for HLTV to block
-    #    wait_for_selector → waits until stats table is in the DOM
-    #    timeout=90   → JS rendering takes up to 60s; give extra headroom
+    # 1. ScraperAPI — JS rendering (free plan)
+    #    render=true      → executes JS, bypasses Cloudflare challenge
+    #    keep_headers=true → forwards Chrome-like headers to HLTV
+    #    NOTE: premium=true requires a paid plan — omitted to avoid instant failures
     # ------------------------------------------------------------------ #
     api_key = _get_scraperapi_key()
     if api_key:
@@ -98,14 +97,15 @@ def _fetch(url: str, **_kwargs) -> str | None:
                 "api_key": api_key,
                 "url": url,
                 "render": "true",
-                "premium": "true",
+                "keep_headers": "true",
             }
-            logger.info(f"[scraperapi] GET {url} (render+premium)")
+            logger.info(f"[scraperapi] GET {url} (render=true, keep_headers=true)")
             resp = _req.get("http://api.scraperapi.com", params=params, timeout=70)
+            logger.info(f"[scraperapi] status={resp.status_code} — {len(resp.text):,} chars — snippet: {resp.text[:200]!r}")
             if resp.status_code == 200 and not _is_blocked(resp):
-                logger.info(f"[scraperapi] OK — {len(resp.text):,} chars")
+                logger.info(f"[scraperapi] OK — returning {len(resp.text):,} chars")
                 return resp.text
-            logger.warning(f"[scraperapi] status={resp.status_code} — trying httpx")
+            logger.warning(f"[scraperapi] blocked or non-200 (status={resp.status_code}) — trying httpx")
         except Exception as e:
             logger.warning(f"[scraperapi] {type(e).__name__}: {e} — trying httpx")
     else:
