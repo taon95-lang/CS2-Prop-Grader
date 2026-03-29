@@ -50,32 +50,22 @@ def _build_headers() -> dict:
     return h
 
 
-FETCH_TIMEOUT = 15  # Hard 15-second timeout per request — exceeding this falls back immediately
+FETCH_TIMEOUT = 10  # Hard 10-second per-request limit — bail immediately on breach
 
 
-def _make_cloudscraper():
-    """
-    Build a cloudscraper session configured to impersonate Chrome on Windows,
-    then inject our custom User-Agent on top.
-    """
-    import cloudscraper
-    scraper = cloudscraper.create_scraper(
-        browser={
-            "browser": "chrome",
-            "platform": "windows",
-            "mobile": False,
-        },
-        delay=3,          # reduced so it fits within the 10s timeout budget
-    )
-    # Override the UA that cloudscraper sets internally
-    scraper.headers.update({"User-Agent": random.choice(CUSTOM_USER_AGENTS)})
-    return scraper
-
-
-def _make_curl_session():
-    """Build a curl_cffi session impersonating Chrome (TLS fingerprint level)."""
-    from curl_cffi import requests as curl_requests
-    return curl_requests.Session(impersonate="chrome124")
+# Single modern UA used for all plain-requests calls
+_FAST_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.6367.207 Safari/537.36"
+)
+_FAST_HEADERS = {
+    "User-Agent": _FAST_UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
 
 
 def _is_blocked(resp) -> bool:
@@ -91,85 +81,42 @@ def _is_blocked(resp) -> bool:
     )
 
 
-def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
+def _fetch(url: str, **_kwargs) -> str | None:
     """
-    Fetch a URL with Cloudflare bypass.
+    Fetch a URL as fast as possible — no retries, no sleeps.
 
-    Strategy:
-      1. cloudscraper + custom User-Agent  (primary)
-      2. curl_cffi Chrome impersonation    (fallback if CF still blocks)
+    Strategy (one attempt each, bail immediately on timeout/block):
+      1. Plain requests + modern User-Agent  (fastest — no JS solver overhead)
+      2. curl_cffi Chrome TLS fingerprint    (if #1 is blocked by Cloudflare)
 
-    Returns the HTML string or None on total failure.
+    Any exception or block → returns None so the caller falls back to
+    Estimated Stats immediately without hanging.
     """
-    headers = _build_headers()
-
-    # --- Primary: cloudscraper + custom User-Agent ---
+    # --- Primary: plain requests (zero overhead) ---
     try:
-        scraper = _make_cloudscraper()
-        for attempt in range(1, retries + 1):
-            try:
-                logger.info(f"[cloudscraper] {url} (attempt {attempt}/{retries})")
-                resp = scraper.get(url, headers=headers, timeout=FETCH_TIMEOUT)
-
-                if _is_blocked(resp):
-                    logger.warning(f"[cloudscraper] CF block on attempt {attempt} — status {resp.status_code}")
-                    if attempt < retries:
-                        # Rotate UA before next attempt
-                        scraper.headers.update({"User-Agent": random.choice(CUSTOM_USER_AGENTS)})
-                        time.sleep(delay * attempt + random.uniform(1.5, 4.0))
-                    continue
-
-                if resp.status_code != 200:
-                    logger.warning(f"[cloudscraper] HTTP {resp.status_code}")
-                    if attempt < retries:
-                        time.sleep(delay)
-                    continue
-
-                logger.info(f"[cloudscraper] OK — {len(resp.text):,} chars")
-                return resp.text
-
-            except Exception as e:
-                logger.warning(f"[cloudscraper] Timed out or errored on attempt {attempt}: {e}")
-                return None  # bail immediately on timeout — don't retry, go to fallback
-
-    except ImportError:
-        logger.warning("cloudscraper not installed — skipping to curl_cffi")
+        import requests as _requests
+        logger.info(f"[requests] GET {url}")
+        resp = _requests.get(url, headers=_FAST_HEADERS, timeout=FETCH_TIMEOUT)
+        if resp.status_code == 200 and not _is_blocked(resp):
+            logger.info(f"[requests] OK — {len(resp.text):,} chars")
+            return resp.text
+        logger.warning(f"[requests] status={resp.status_code}, blocked={_is_blocked(resp)} — trying curl_cffi")
     except Exception as e:
-        logger.warning(f"cloudscraper session error: {e}")
+        logger.warning(f"[requests] {type(e).__name__}: {e} — trying curl_cffi")
 
-    # --- Fallback: curl_cffi Chrome TLS impersonation ---
+    # --- Fallback: curl_cffi Chrome TLS fingerprint (one attempt, no sleep) ---
     try:
-        curl_session = _make_curl_session()
-        for attempt in range(1, retries + 1):
-            try:
-                logger.info(f"[curl_cffi] {url} (attempt {attempt}/{retries})")
-                resp = curl_session.get(url, headers=headers, timeout=FETCH_TIMEOUT)
-
-                if _is_blocked(resp):
-                    logger.warning(f"[curl_cffi] CF block on attempt {attempt}")
-                    if attempt < retries:
-                        time.sleep(delay * attempt + random.uniform(1.0, 3.0))
-                    continue
-
-                if resp.status_code != 200:
-                    logger.warning(f"[curl_cffi] HTTP {resp.status_code}")
-                    if attempt < retries:
-                        time.sleep(delay)
-                    continue
-
-                logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
-                return resp.text
-
-            except Exception as e:
-                logger.warning(f"[curl_cffi] Timed out or errored on attempt {attempt}: {e}")
-                return None  # bail immediately on timeout
-
-    except ImportError:
-        logger.error("curl_cffi not installed either — no HTTP client available")
+        from curl_cffi import requests as _curl
+        logger.info(f"[curl_cffi] GET {url}")
+        resp = _curl.get(url, headers=_FAST_HEADERS, impersonate="chrome124", timeout=FETCH_TIMEOUT)
+        if resp.status_code == 200 and not _is_blocked(resp):
+            logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
+            return resp.text
+        logger.warning(f"[curl_cffi] status={resp.status_code} — returning None")
     except Exception as e:
-        logger.error(f"curl_cffi session error: {e}")
+        logger.warning(f"[curl_cffi] {type(e).__name__}: {e}")
 
-    logger.error(f"All fetch attempts failed for {url}")
+    logger.warning(f"_fetch failed for {url} — caller will use Estimated Stats")
     return None
 
 
@@ -196,8 +143,6 @@ def search_player(player_name: str) -> dict | None:
             m = re.search(r"/stats/players/player/(\d+)/([^/?#]+)", href)
             if m:
                 return {"id": m.group(1), "name": m.group(2), "url": f"{HLTV_BASE}/player/{m.group(1)}/{m.group(2)}"}
-
-    time.sleep(1.5)
 
     # Approach 2: global search
     url2 = f"{HLTV_BASE}/search?term={player_name.replace(' ', '+')}"

@@ -127,14 +127,14 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
                 None,
                 lambda: _analyze_player(player_name, line_val, stat_type),
             ),
-            timeout=60,
+            timeout=120,
         )
     except asyncio.TimeoutError:
-        logger.error("Analysis timed out after 60s")
+        logger.error("Analysis timed out after 120s")
         await thinking_msg.edit(
             embed=discord.Embed(
                 title="❌ Timed Out",
-                description="The analysis took longer than 60 seconds and was cancelled. Try again shortly.",
+                description="The analysis took longer than 120 seconds and was cancelled. Try again shortly.",
                 color=0xFF4136,
             )
         )
