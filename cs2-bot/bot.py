@@ -96,8 +96,8 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         description=(
             f"**Player:** {player_name}\n"
             f"**Prop:** {line_val} {stat_type}\n\n"
-            f"🔍 Fetching last 10 BO3 series from HLTV...\n"
-            f"📊 Running 100,000 Monte Carlo simulations..."
+            f"🔍 Fetching last 10 BO3 series from HLTV (Chrome TLS bypass)...\n"
+            f"📊 Running 100,000 Monte Carlo simulations (Negative Binomial)..."
         ),
         color=0x7289DA,
     )
@@ -139,32 +139,35 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     """Blocking function — run in executor."""
     internal_stat = "Kills" if stat_type in ("Kills", "kills") else "HS"
 
-    # 1. Search for player on HLTV
+    # 1. Search for player on HLTV (using curl_cffi Chrome fingerprint)
     player_info = search_player(player_name)
     logger.info(f"Player search result: {player_info}")
 
     map_stats = []
-    data_source = "HLTV"
+    data_source = "HLTV Live (curl_cffi)"
+    used_fallback = False
 
     if player_info:
         map_stats = get_player_recent_series(
             player_info["id"], player_info["name"], stat_type=internal_stat
         )
+        logger.info(f"Scraped {len(map_stats)} map(s) from HLTV")
 
     if not map_stats or len(map_stats) < 4:
         logger.warning(
-            f"HLTV scraping returned {len(map_stats)} maps. Using fallback data."
+            f"HLTV returned {len(map_stats)} maps — using fallback estimates"
         )
         map_stats = get_player_info_fallback(player_name, stat_type=internal_stat)
-        data_source = "Estimated (HLTV unavailable)"
+        data_source = "⚠️ Estimated (HLTV blocked — stats are approximate)"
+        used_fallback = True
 
     if not map_stats:
-        return {"error": "Could not retrieve player data. Please check the player name."}
+        return {"error": "Could not retrieve player data. Check the player name spelling."}
 
-    # 2. Get match odds
+    # 2. Get match odds for round projection
     favorite_prob = get_match_odds(player_name)
 
-    # 3. Run simulation
+    # 3. Monte Carlo simulation
     sim_result = run_simulation(
         map_stats=map_stats,
         line=line,
@@ -173,6 +176,7 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     )
 
     sim_result["data_source"] = data_source
+    sim_result["used_fallback"] = used_fallback
     sim_result["player_name"] = player_name
     sim_result["line"] = line
     return sim_result

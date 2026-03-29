@@ -1,226 +1,401 @@
-import cloudscraper
-from bs4 import BeautifulSoup
+"""
+HLTV scraper using curl_cffi (Chrome TLS fingerprint impersonation)
+for Cloudflare bypass, with cloudscraper as a secondary fallback.
+"""
+
 import re
 import time
+import random
 import logging
+from statistics import mean
+
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
 HLTV_BASE = "https://www.hltv.org"
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
+# Rotate between realistic Chrome UA strings
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+BASE_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Referer": "https://www.hltv.org/",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 
-def get_scraper():
-    scraper = cloudscraper.create_scraper(
-        browser={"browser": "chrome", "platform": "windows", "mobile": False}
-    )
-    return scraper
+def _build_headers():
+    h = dict(BASE_HEADERS)
+    h["User-Agent"] = random.choice(USER_AGENTS)
+    return h
 
 
-def search_player(player_name: str):
-    scraper = get_scraper()
-    url = f"{HLTV_BASE}/search?term={player_name.replace(' ', '+')}"
+def _get_curl_session():
+    """Create a curl_cffi session impersonating Chrome — best CF bypass."""
     try:
-        resp = scraper.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        from curl_cffi import requests as curl_requests
+        session = curl_requests.Session(impersonate="chrome124")
+        return session, "curl_cffi"
+    except ImportError:
+        logger.warning("curl_cffi not available, falling back to cloudscraper")
+        return None, None
 
-        # Try search results first
-        results = soup.select("div.result-con a[href*='/player/']")
-        if results:
-            href = results[0].get("href", "")
-            # href format: /player/7998/ZywOo
-            parts = href.strip("/").split("/")
-            if len(parts) >= 3:
-                return {"id": parts[1], "name": parts[2], "url": f"{HLTV_BASE}{href}"}
 
-        # Fallback: direct player stats page search
-        direct_url = f"{HLTV_BASE}/stats/players?name={player_name.replace(' ', '+')}"
-        resp2 = scraper.get(direct_url, headers=HEADERS, timeout=15)
-        soup2 = BeautifulSoup(resp2.text, "html.parser")
-        links = soup2.select("td.playerCol a[href*='/stats/players/']")
-        if links:
-            href = links[0].get("href", "")
-            # href: /stats/players/player/7998/ZywOo
-            parts = href.strip("/").split("/")
-            if len(parts) >= 5:
-                return {
-                    "id": parts[3],
-                    "name": parts[4],
-                    "url": f"{HLTV_BASE}/player/{parts[3]}/{parts[4]}",
-                }
-    except Exception as e:
-        logger.error(f"search_player error: {e}")
+def _get_cloudscraper_session():
+    """Fallback: cloudscraper session."""
+    try:
+        import cloudscraper
+        scraper = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "windows", "mobile": False}
+        )
+        return scraper, "cloudscraper"
+    except ImportError:
+        logger.warning("cloudscraper not available")
+        return None, None
+
+
+def _fetch(url: str, retries: int = 3, delay: float = 2.0) -> str | None:
+    """
+    Fetch a URL with Cloudflare bypass.
+    Tries curl_cffi first (Chrome TLS fingerprint), then cloudscraper.
+    Returns HTML string or None on total failure.
+    """
+    session, method = _get_curl_session()
+    if not session:
+        session, method = _get_cloudscraper_session()
+    if not session:
+        logger.error("No HTTP client available")
+        return None
+
+    headers = _build_headers()
+
+    for attempt in range(1, retries + 1):
+        try:
+            logger.info(f"[{method}] Fetching {url} (attempt {attempt}/{retries})")
+            resp = session.get(url, headers=headers, timeout=20)
+
+            # Cloudflare challenge page detection
+            if resp.status_code in (403, 503) or "Just a moment" in resp.text:
+                logger.warning(f"Cloudflare challenge on attempt {attempt}: {resp.status_code}")
+                if attempt < retries:
+                    time.sleep(delay * attempt + random.uniform(1, 3))
+                    # Switch method on retry if possible
+                    if method == "curl_cffi":
+                        fb, fb_method = _get_cloudscraper_session()
+                        if fb:
+                            session, method = fb, fb_method
+                    continue
+                return None
+
+            if resp.status_code != 200:
+                logger.warning(f"HTTP {resp.status_code} for {url}")
+                if attempt < retries:
+                    time.sleep(delay * attempt)
+                    continue
+                return None
+
+            logger.info(f"[{method}] Success ({len(resp.text)} chars)")
+            return resp.text
+
+        except Exception as e:
+            logger.error(f"[{method}] Fetch error on attempt {attempt}: {e}")
+            if attempt < retries:
+                time.sleep(delay * attempt + random.uniform(0.5, 2))
+            continue
+
     return None
 
 
-def get_player_recent_series(player_id: str, player_name: str, stat_type: str = "Kills"):
-    """
-    Fetch the last 10 BO3 series for a player and return
-    stats for Maps 1 and 2 only.
-    Returns list of dicts with map-level stats.
-    """
-    scraper = get_scraper()
+# ---------------------------------------------------------------------------
+# Player lookup
+# ---------------------------------------------------------------------------
 
-    # Get recent matches from player stats page
-    stats_url = (
-        f"{HLTV_BASE}/stats/players/matches/{player_id}/{player_name}"
+def search_player(player_name: str) -> dict | None:
+    """
+    Resolve a player name to their HLTV numeric ID and URL slug.
+    Tries the stats search endpoint first, then the global search.
+    """
+    # Approach 1: stats player list search
+    url = f"{HLTV_BASE}/stats/players?name={player_name.replace(' ', '+')}"
+    html = _fetch(url)
+    if html:
+        soup = BeautifulSoup(html, "html.parser")
+        # Links like /stats/players/player/7998/ZywOo
+        links = soup.select("td.playerCol a[href*='/stats/players/player/']")
+        if not links:
+            links = soup.select("a[href*='/stats/players/player/']")
+        for link in links:
+            href = link.get("href", "")
+            m = re.search(r"/stats/players/player/(\d+)/([^/?#]+)", href)
+            if m:
+                return {"id": m.group(1), "name": m.group(2), "url": f"{HLTV_BASE}/player/{m.group(1)}/{m.group(2)}"}
+
+    time.sleep(1.5)
+
+    # Approach 2: global search
+    url2 = f"{HLTV_BASE}/search?term={player_name.replace(' ', '+')}"
+    html2 = _fetch(url2)
+    if html2:
+        soup2 = BeautifulSoup(html2, "html.parser")
+        links2 = soup2.select("a[href*='/player/']")
+        for link in links2:
+            href = link.get("href", "")
+            m = re.search(r"/player/(\d+)/([^/?#]+)", href)
+            if m:
+                return {"id": m.group(1), "name": m.group(2), "url": f"{HLTV_BASE}/player/{m.group(1)}/{m.group(2)}"}
+
+    logger.warning(f"Could not find player: {player_name}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Match stats scraping
+# ---------------------------------------------------------------------------
+
+def _parse_stat_cell(cells: list, idx: int) -> str:
+    try:
+        return cells[idx].get_text(strip=True)
+    except IndexError:
+        return "0"
+
+
+def _safe_int(text: str) -> int:
+    cleaned = re.sub(r"[^\d]", "", text)
+    return int(cleaned) if cleaned else 0
+
+
+def _safe_float(text: str) -> float:
+    cleaned = re.sub(r"[^\d.]", "", text)
+    try:
+        return float(cleaned)
+    except ValueError:
+        return 0.0
+
+
+def get_player_recent_series(player_id: str, player_slug: str, stat_type: str = "Kills") -> list:
+    """
+    Fetch last 10 BO3 series for a player (Maps 1 & 2 only) from HLTV.
+    Returns a list of per-map stat dicts.
+
+    HLTV stats match table columns (0-indexed):
+      0: Date  1: Event  2: Match (link)  3: Map  4: Kills  5: HS
+      6: Assists  7: Deaths  8: K/D  9: ADR  10: Rating
+    """
+    url = (
+        f"{HLTV_BASE}/stats/players/matches/{player_id}/{player_slug}"
         f"?matchType=Lan&rankingFilter=Top50"
     )
-    try:
-        resp = scraper.get(stats_url, headers=HEADERS, timeout=20)
-        soup = BeautifulSoup(resp.text, "html.parser")
-    except Exception as e:
-        logger.error(f"get_player_recent_series error fetching matches: {e}")
+    html = _fetch(url, retries=3, delay=2.0)
+
+    if not html:
+        logger.warning("Failed to fetch player match stats page")
         return []
 
-    # Parse match rows
-    table = soup.select_one("table.stats-table")
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Find the stats table
+    table = (
+        soup.select_one("table.stats-table")
+        or soup.select_one("table#matchesTable")
+        or soup.select_one("div.stats-table table")
+        or soup.select_one("table")
+    )
+
     if not table:
-        # Try alternate selector
-        table = soup.select_one("table")
+        logger.warning("No stats table found on HLTV page")
+        return []
 
-    rows = []
-    if table:
-        rows = table.select("tbody tr")
+    rows = table.select("tbody tr")
+    if not rows:
+        rows = table.select("tr")[1:]  # skip header
 
-    map_stats = []
-    series_seen = {}
-    series_count = 0
+    logger.info(f"Found {len(rows)} row(s) in match stats table")
+
+    # Track series: match_id -> count of maps seen so far
+    series_map_count: dict[str, int] = {}
+    series_order: list[str] = []  # ordered list of unique match IDs seen
+    map_stats: list[dict] = []
 
     for row in rows:
-        if series_count >= 10:
-            break
-
-        try:
-            cells = row.select("td")
-            if len(cells) < 5:
-                continue
-
-            # Match link to identify series
-            match_link_el = row.select_one("td.match-col a, td a[href*='/matches/']")
-            if not match_link_el:
-                continue
-
-            match_href = match_link_el.get("href", "")
-            # Extract match ID from URL
-            match_id_match = re.search(r"/matches/(\d+)/", match_href)
-            if not match_id_match:
-                continue
-            match_id = match_id_match.group(1)
-
-            # Map name / number
-            map_el = row.select_one("td.mapCol, td.statsDetail")
-            map_name = map_el.get_text(strip=True) if map_el else "Unknown"
-
-            if match_id not in series_seen:
-                series_seen[match_id] = 0
-            series_seen[match_id] += 1
-            map_num = series_seen[match_id]
-
-            # Only use maps 1 and 2 (skip map 3+)
-            if map_num > 2:
-                continue
-
-            if map_num == 1:
-                series_count += 1
-
-            # Extract numeric stats
-            def get_cell(idx):
-                try:
-                    return cells[idx].get_text(strip=True)
-                except IndexError:
-                    return "0"
-
-            # Typical column order in HLTV stats table:
-            # Date | Event | Match | Map | Kills | HS | Assists | Deaths | KD | ADR | Rating
-            kills_text = get_cell(4)
-            hs_text = get_cell(5)
-            deaths_text = get_cell(7)
-            adr_text = get_cell(9) if len(cells) > 9 else "0"
-
-            kills = int(re.sub(r"[^\d]", "", kills_text) or 0)
-            hs = int(re.sub(r"[^\d]", "", hs_text) or 0)
-            deaths = int(re.sub(r"[^\d]", "", deaths_text) or 0)
-            adr = float(re.sub(r"[^\d.]", "", adr_text) or 0)
-
-            # Estimate rounds: typical map ~26, use deaths as proxy (deaths ≈ rounds played/fraction)
-            rounds = max(16, min(30, deaths + 5)) if deaths > 0 else 22
-
-            stat_value = kills if stat_type == "Kills" else hs
-
-            map_stats.append(
-                {
-                    "match_id": match_id,
-                    "map_num": map_num,
-                    "map_name": map_name,
-                    "kills": kills,
-                    "hs": hs,
-                    "deaths": deaths,
-                    "rounds": rounds,
-                    "adr": adr,
-                    "stat_value": stat_value,
-                }
-            )
-        except Exception as e:
-            logger.warning(f"Row parse error: {e}")
+        cells = row.select("td")
+        if len(cells) < 5:
             continue
 
+        # --- Extract match ID from any link in the row ---
+        match_id = None
+        for cell in cells:
+            link = cell.select_one("a[href*='/matches/']")
+            if link:
+                m = re.search(r"/matches/(\d+)/", link.get("href", ""))
+                if m:
+                    match_id = m.group(1)
+                    break
+
+        if not match_id:
+            continue
+
+        # Track series order
+        if match_id not in series_map_count:
+            series_map_count[match_id] = 0
+            series_order.append(match_id)
+
+        # Stop once we have 10 series
+        if len(series_order) > 10:
+            break
+
+        series_map_count[match_id] += 1
+        map_num = series_map_count[match_id]
+
+        # Only include maps 1 and 2 (exclude map 3+)
+        if map_num > 2:
+            continue
+
+        # --- Map name ---
+        map_cell = None
+        for cell in cells:
+            if cell.get("class") and any(
+                c in ["mapCol", "statsDetail", "map-td"] for c in cell.get("class", [])
+            ):
+                map_cell = cell
+                break
+        map_name = map_cell.get_text(strip=True) if map_cell else cells[3].get_text(strip=True)
+
+        # --- Stat extraction ---
+        # Try to detect column positions dynamically via header
+        header_row = table.select_one("thead tr")
+        col_map = {}
+        if header_row:
+            for i, th in enumerate(header_row.select("th")):
+                txt = th.get_text(strip=True).lower()
+                col_map[txt] = i
+
+        def get_col(keys: list[str], default_idx: int) -> str:
+            for k in keys:
+                if k in col_map:
+                    return _parse_stat_cell(cells, col_map[k])
+            return _parse_stat_cell(cells, default_idx)
+
+        kills = _safe_int(get_col(["kills", "k"], 4))
+        hs    = _safe_int(get_col(["hs", "headshots", "hsk"], 5))
+        deaths = _safe_int(get_col(["deaths", "d"], 7))
+        adr   = _safe_float(get_col(["adr"], 9))
+
+        # Estimate rounds from deaths (proxy: most players die ~0.65/round)
+        if deaths > 0:
+            rounds = max(16, min(30, int(deaths / 0.65)))
+        else:
+            rounds = 22
+
+        stat_value = kills if stat_type == "Kills" else hs
+
+        map_stats.append({
+            "match_id": match_id,
+            "map_num": map_num,
+            "map_name": map_name,
+            "kills": kills,
+            "hs": hs,
+            "deaths": deaths,
+            "rounds": rounds,
+            "adr": adr,
+            "stat_value": stat_value,
+        })
+
+    logger.info(
+        f"Parsed {len(map_stats)} maps across {len([m for m in series_order if series_map_count[m] > 0])} series"
+    )
     return map_stats
 
 
-def get_match_odds(match_name: str = ""):
+# ---------------------------------------------------------------------------
+# Match odds
+# ---------------------------------------------------------------------------
+
+def get_match_odds(player_name: str = "") -> float:
     """
-    Try to get match odds to determine round projection.
-    Returns a float representing the favorite's implied probability (0-1).
-    Defaults to 0.55 (slight favorite) if scraping fails.
+    Attempt to fetch upcoming match odds from HLTV for round projection.
+    Returns the implied probability (0–1) of the stronger side.
+    Defaults to 0.55 (slight favourite) if scraping fails.
     """
-    return 0.55  # Default: close match, use standard 22 rounds
+    try:
+        html = _fetch(f"{HLTV_BASE}/matches", retries=2, delay=1.5)
+        if not html:
+            return 0.55
+
+        soup = BeautifulSoup(html, "html.parser")
+        # Look for odds in upcoming match rows
+        # HLTV shows odds as percentages in team-rating or odds spans
+        odds_spans = soup.select("span.odd, span.oddsCell, div.odds")
+        if odds_spans:
+            values = []
+            for span in odds_spans[:6]:
+                txt = span.get_text(strip=True).replace("%", "")
+                try:
+                    v = float(txt) / 100.0
+                    if 0.4 <= v <= 0.9:
+                        values.append(v)
+                except ValueError:
+                    pass
+            if values:
+                return max(values)
+
+    except Exception as e:
+        logger.warning(f"get_match_odds error: {e}")
+
+    return 0.55
 
 
-def get_player_info_fallback(player_name: str, stat_type: str = "Kills"):
-    """
-    Fallback: generate synthetic-but-realistic sample data
-    when HLTV scraping is blocked/fails, for demonstration.
-    """
-    import random
-    random.seed(hash(player_name) % 10000)
+# ---------------------------------------------------------------------------
+# Fallback data generator
+# ---------------------------------------------------------------------------
 
-    base_kills = {
-        "ZywOo": 24, "s1mple": 26, "NiKo": 22, "device": 20,
-        "broky": 19, "electronic": 21, "ropz": 20, "gla1ve": 15,
-    }.get(player_name, 18)
+def get_player_info_fallback(player_name: str, stat_type: str = "Kills") -> list:
+    """
+    Generate realistic sample data when HLTV is unavailable.
+    Uses seeded randomness so the same player always gets the same baseline.
+    """
+    import random as rnd
 
-    base_hs = max(4, int(base_kills * 0.42))
+    rnd.seed(hash(player_name.lower()) % 100_000)
+
+    baselines = {
+        "zywoo": (23, 10), "s1mple": (25, 10), "niko": (21, 9),
+        "device": (19, 8), "broky": (18, 8), "electronic": (20, 9),
+        "ropz": (19, 8),   "gla1ve": (14, 6), "blameF": (19, 8),
+        "jame": (15, 6),   "sh1ro": (20, 9),  "ax1le": (21, 9),
+    }
+    base_kills, base_hs = baselines.get(player_name.lower(), (17, 7))
 
     map_stats = []
-    for i in range(20):
-        kills = max(5, int(random.gauss(base_kills, 4)))
-        hs = max(1, int(random.gauss(base_hs, 2)))
-        rounds = int(random.gauss(25, 3))
-        rounds = max(16, min(30, rounds))
-        adr = round(random.gauss(75, 12), 1)
+    for i in range(20):  # 10 series × 2 maps
+        kills  = max(5,  int(rnd.gauss(base_kills, 4)))
+        hs     = max(1,  int(rnd.gauss(base_hs, 2)))
+        deaths = max(8,  int(rnd.gauss(18, 3)))
+        rounds = max(16, min(30, int(rnd.gauss(25, 2))))
+        adr    = round(rnd.gauss(78, 12), 1)
+
         stat_value = kills if stat_type == "Kills" else hs
-        map_stats.append(
-            {
-                "match_id": f"demo_{i // 2}",
-                "map_num": (i % 2) + 1,
-                "map_name": ["Mirage", "Inferno", "Nuke", "Ancient", "Vertigo"][i % 5],
-                "kills": kills,
-                "hs": hs,
-                "deaths": int(random.gauss(18, 3)),
-                "rounds": rounds,
-                "adr": adr,
-                "stat_value": stat_value,
-            }
-        )
+        map_stats.append({
+            "match_id": f"est_{i // 2}",
+            "map_num": (i % 2) + 1,
+            "map_name": ["Mirage", "Inferno", "Nuke", "Ancient", "Vertigo"][i % 5],
+            "kills": kills,
+            "hs": hs,
+            "deaths": deaths,
+            "rounds": rounds,
+            "adr": adr,
+            "stat_value": stat_value,
+        })
     return map_stats
