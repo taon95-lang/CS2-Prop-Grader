@@ -144,7 +144,7 @@ def _analyze_player(player_name: str, line: float, stat_type: str) -> dict:
     logger.info(f"Player search result: {player_info}")
 
     map_stats = []
-    data_source = "HLTV Live (curl_cffi)"
+    data_source = "HLTV Live (cloudscraper)"
     used_fallback = False
 
     if player_info:

@@ -1,13 +1,12 @@
 """
-HLTV scraper using curl_cffi (Chrome TLS fingerprint impersonation)
-for Cloudflare bypass, with cloudscraper as a secondary fallback.
+HLTV scraper — cloudscraper with custom User-Agent as primary (Cloudflare bypass),
+curl_cffi Chrome impersonation as secondary fallback.
 """
 
 import re
 import time
 import random
 import logging
-from statistics import mean
 
 from bs4 import BeautifulSoup
 
@@ -15,107 +14,161 @@ logger = logging.getLogger(__name__)
 
 HLTV_BASE = "https://www.hltv.org"
 
-# Rotate between realistic Chrome UA strings
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+# Custom User-Agent strings that closely mimic real Chrome browser requests.
+# Rotating across multiple helps avoid pattern-based fingerprinting.
+CUSTOM_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.122 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.128 Safari/537.36",
 ]
 
-BASE_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+# Full browser-like headers sent alongside the custom User-Agent
+BROWSER_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Sec-Fetch-User": "?1",
     "Cache-Control": "max-age=0",
+    "DNT": "1",
 }
 
 
-def _build_headers():
-    h = dict(BASE_HEADERS)
-    h["User-Agent"] = random.choice(USER_AGENTS)
+def _build_headers() -> dict:
+    """Return a headers dict with a randomly chosen custom User-Agent."""
+    h = dict(BROWSER_HEADERS)
+    h["User-Agent"] = random.choice(CUSTOM_USER_AGENTS)
     return h
 
 
-def _get_curl_session():
-    """Create a curl_cffi session impersonating Chrome — best CF bypass."""
-    try:
-        from curl_cffi import requests as curl_requests
-        session = curl_requests.Session(impersonate="chrome124")
-        return session, "curl_cffi"
-    except ImportError:
-        logger.warning("curl_cffi not available, falling back to cloudscraper")
-        return None, None
+def _make_cloudscraper():
+    """
+    Build a cloudscraper session configured to impersonate Chrome on Windows,
+    then inject our custom User-Agent on top.
+    """
+    import cloudscraper
+    scraper = cloudscraper.create_scraper(
+        browser={
+            "browser": "chrome",
+            "platform": "windows",
+            "mobile": False,
+        },
+        delay=8,          # seconds to wait before solving JS challenge
+    )
+    # Override the UA that cloudscraper sets internally
+    scraper.headers.update({"User-Agent": random.choice(CUSTOM_USER_AGENTS)})
+    return scraper
 
 
-def _get_cloudscraper_session():
-    """Fallback: cloudscraper session."""
-    try:
-        import cloudscraper
-        scraper = cloudscraper.create_scraper(
-            browser={"browser": "chrome", "platform": "windows", "mobile": False}
-        )
-        return scraper, "cloudscraper"
-    except ImportError:
-        logger.warning("cloudscraper not available")
-        return None, None
+def _make_curl_session():
+    """Build a curl_cffi session impersonating Chrome (TLS fingerprint level)."""
+    from curl_cffi import requests as curl_requests
+    return curl_requests.Session(impersonate="chrome124")
 
 
-def _fetch(url: str, retries: int = 3, delay: float = 2.0) -> str | None:
+def _is_blocked(resp) -> bool:
+    """Return True if the response looks like a Cloudflare challenge/block."""
+    if resp.status_code in (403, 503, 429):
+        return True
+    body = resp.text or ""
+    return (
+        "Just a moment" in body
+        or "cf-browser-verification" in body
+        or "Enable JavaScript and cookies to continue" in body
+        or "Checking your browser" in body
+    )
+
+
+def _fetch(url: str, retries: int = 3, delay: float = 2.5) -> str | None:
     """
     Fetch a URL with Cloudflare bypass.
-    Tries curl_cffi first (Chrome TLS fingerprint), then cloudscraper.
-    Returns HTML string or None on total failure.
-    """
-    session, method = _get_curl_session()
-    if not session:
-        session, method = _get_cloudscraper_session()
-    if not session:
-        logger.error("No HTTP client available")
-        return None
 
+    Strategy:
+      1. cloudscraper + custom User-Agent  (primary)
+      2. curl_cffi Chrome impersonation    (fallback if CF still blocks)
+
+    Returns the HTML string or None on total failure.
+    """
     headers = _build_headers()
 
-    for attempt in range(1, retries + 1):
-        try:
-            logger.info(f"[{method}] Fetching {url} (attempt {attempt}/{retries})")
-            resp = session.get(url, headers=headers, timeout=20)
+    # --- Primary: cloudscraper + custom User-Agent ---
+    try:
+        scraper = _make_cloudscraper()
+        for attempt in range(1, retries + 1):
+            try:
+                logger.info(f"[cloudscraper] {url} (attempt {attempt}/{retries})")
+                resp = scraper.get(url, headers=headers, timeout=25)
 
-            # Cloudflare challenge page detection
-            if resp.status_code in (403, 503) or "Just a moment" in resp.text:
-                logger.warning(f"Cloudflare challenge on attempt {attempt}: {resp.status_code}")
-                if attempt < retries:
-                    time.sleep(delay * attempt + random.uniform(1, 3))
-                    # Switch method on retry if possible
-                    if method == "curl_cffi":
-                        fb, fb_method = _get_cloudscraper_session()
-                        if fb:
-                            session, method = fb, fb_method
+                if _is_blocked(resp):
+                    logger.warning(f"[cloudscraper] CF block on attempt {attempt} — status {resp.status_code}")
+                    if attempt < retries:
+                        # Rotate UA before next attempt
+                        scraper.headers.update({"User-Agent": random.choice(CUSTOM_USER_AGENTS)})
+                        time.sleep(delay * attempt + random.uniform(1.5, 4.0))
                     continue
-                return None
 
-            if resp.status_code != 200:
-                logger.warning(f"HTTP {resp.status_code} for {url}")
-                if attempt < retries:
-                    time.sleep(delay * attempt)
+                if resp.status_code != 200:
+                    logger.warning(f"[cloudscraper] HTTP {resp.status_code}")
+                    if attempt < retries:
+                        time.sleep(delay)
                     continue
-                return None
 
-            logger.info(f"[{method}] Success ({len(resp.text)} chars)")
-            return resp.text
+                logger.info(f"[cloudscraper] OK — {len(resp.text):,} chars")
+                return resp.text
 
-        except Exception as e:
-            logger.error(f"[{method}] Fetch error on attempt {attempt}: {e}")
-            if attempt < retries:
-                time.sleep(delay * attempt + random.uniform(0.5, 2))
-            continue
+            except Exception as e:
+                logger.warning(f"[cloudscraper] Error on attempt {attempt}: {e}")
+                if attempt < retries:
+                    time.sleep(delay + random.uniform(0.5, 2.0))
 
+    except ImportError:
+        logger.warning("cloudscraper not installed — skipping to curl_cffi")
+    except Exception as e:
+        logger.warning(f"cloudscraper session error: {e}")
+
+    # --- Fallback: curl_cffi Chrome TLS impersonation ---
+    try:
+        curl_session = _make_curl_session()
+        for attempt in range(1, retries + 1):
+            try:
+                logger.info(f"[curl_cffi] {url} (attempt {attempt}/{retries})")
+                resp = curl_session.get(url, headers=headers, timeout=25)
+
+                if _is_blocked(resp):
+                    logger.warning(f"[curl_cffi] CF block on attempt {attempt}")
+                    if attempt < retries:
+                        time.sleep(delay * attempt + random.uniform(1.0, 3.0))
+                    continue
+
+                if resp.status_code != 200:
+                    logger.warning(f"[curl_cffi] HTTP {resp.status_code}")
+                    if attempt < retries:
+                        time.sleep(delay)
+                    continue
+
+                logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
+                return resp.text
+
+            except Exception as e:
+                logger.warning(f"[curl_cffi] Error on attempt {attempt}: {e}")
+                if attempt < retries:
+                    time.sleep(delay + random.uniform(0.5, 2.0))
+
+    except ImportError:
+        logger.error("curl_cffi not installed either — no HTTP client available")
+    except Exception as e:
+        logger.error(f"curl_cffi session error: {e}")
+
+    logger.error(f"All fetch attempts failed for {url}")
     return None
 
 
