@@ -99,10 +99,9 @@ def _fetch(url: str, **_kwargs) -> str | None:
                 "url": url,
                 "render": "true",
                 "premium": "true",
-                "wait_for_selector": ".stats-section",
             }
             logger.info(f"[scraperapi] GET {url} (render+premium)")
-            resp = _req.get("http://api.scraperapi.com", params=params, timeout=90)
+            resp = _req.get("http://api.scraperapi.com", params=params, timeout=70)
             if resp.status_code == 200 and not _is_blocked(resp):
                 logger.info(f"[scraperapi] OK — {len(resp.text):,} chars")
                 return resp.text

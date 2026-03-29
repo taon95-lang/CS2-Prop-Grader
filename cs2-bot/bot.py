@@ -105,51 +105,87 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     if stat_type == "Hs":
         stat_type = "HS"
 
-    # Immediately send a visible acknowledgement — keeps Discord from looking dead
-    thinking_msg = await ctx.send(
-        embed=discord.Embed(
+    # Progress stages shown in the embed while the scraper and sim are running
+    _STAGES = [
+        "🌐 Connecting to residential proxy (ScraperAPI)...",
+        "🔍 Fetching HLTV player profile...",
+        "📡 Loading HLTV match stats (JS rendering, ~30–60s)...",
+        "📊 Running 10,000 Monte Carlo simulations...",
+        "⏳ Almost there — finalising results...",
+    ]
+
+    def _stage_embed(elapsed: int, stage_idx: int) -> discord.Embed:
+        bar = "▓" * min(10, elapsed // 8) + "░" * max(0, 10 - elapsed // 8)
+        return discord.Embed(
             title="⚙️ Analyzing...",
             description=(
                 f"**Player:** {player_name}\n"
                 f"**Prop:** {line_val} {stat_type}\n\n"
-                f"🔍 Fetching HLTV data (15s timeout, then falls back to Estimated)...\n"
-                f"📊 Running 25,000 Monte Carlo simulations once data is ready."
+                f"{_STAGES[stage_idx]}\n\n"
+                f"`[{bar}]` ⏱️ {elapsed}s elapsed"
             ),
             color=0x7289DA,
         )
+
+    # Send the initial embed immediately — bot is visibly "alive" from the start
+    thinking_msg = await ctx.send(embed=_stage_embed(0, 0))
+
+    # Launch the blocking analysis in a thread so the event loop stays free
+    import time as _time
+    loop = asyncio.get_running_loop()
+    fut = asyncio.ensure_future(
+        loop.run_in_executor(
+            None,
+            lambda: _analyze_player(player_name, line_val, stat_type),
+        )
     )
 
-    # Run all blocking work in a thread executor — event loop stays free
-    loop = asyncio.get_running_loop()
-    try:
-        result = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                lambda: _analyze_player(player_name, line_val, stat_type),
-            ),
-            timeout=120,
-        )
-    except asyncio.TimeoutError:
-        logger.error("Analysis timed out after 120s")
-        await thinking_msg.edit(
-            embed=discord.Embed(
-                title="❌ Timed Out",
-                description="The analysis took longer than 120 seconds and was cancelled. Try again shortly.",
-                color=0xFF4136,
+    start = _time.monotonic()
+    TOTAL_TIMEOUT = 150  # ScraperAPI render can take up to 70s + sim time
+    result = None
+
+    while True:
+        elapsed = int(_time.monotonic() - start)
+
+        # Hard ceiling — give up after TOTAL_TIMEOUT seconds
+        if elapsed >= TOTAL_TIMEOUT:
+            fut.cancel()
+            logger.error(f"Analysis timed out after {TOTAL_TIMEOUT}s")
+            await thinking_msg.edit(
+                embed=discord.Embed(
+                    title="❌ Timed Out",
+                    description=(
+                        f"Analysis exceeded {TOTAL_TIMEOUT}s and was cancelled.\n"
+                        "HLTV data is loading slowly — try again in a moment."
+                    ),
+                    color=0xFF4136,
+                )
             )
-        )
-        return
-    except Exception as e:
-        err_name = type(e).__name__
-        logger.error(f"Executor error ({err_name}): {e}")
-        await thinking_msg.edit(
-            embed=discord.Embed(
-                title="❌ Analysis Error",
-                description=f"**Simulation Error: {err_name}**\n```{str(e)[:300]}```",
-                color=0xFF4136,
+            return
+
+        # Poll the future every 20 seconds; update the embed on each tick
+        try:
+            result = await asyncio.wait_for(asyncio.shield(fut), timeout=20)
+            break  # Analysis finished — exit the loop
+        except asyncio.TimeoutError:
+            # Still running — update the progress embed
+            elapsed = int(_time.monotonic() - start)
+            stage_idx = min(len(_STAGES) - 1, elapsed // 25)
+            try:
+                await thinking_msg.edit(embed=_stage_embed(elapsed, stage_idx))
+            except Exception:
+                pass
+        except Exception as e:
+            err_name = type(e).__name__
+            logger.error(f"Executor error ({err_name}): {e}")
+            await thinking_msg.edit(
+                embed=discord.Embed(
+                    title="❌ Analysis Error",
+                    description=f"**Simulation Error: {err_name}**\n```{str(e)[:300]}```",
+                    color=0xFF4136,
+                )
             )
-        )
-        return
+            return
 
     # Simulation-level error (returned as dict, not raised)
     if "sim_error" in result:
