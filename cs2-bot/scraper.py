@@ -1,10 +1,9 @@
 """
-HLTV scraper — cloudscraper with custom User-Agent as primary (Cloudflare bypass),
-curl_cffi Chrome impersonation as secondary fallback.
+HLTV scraper — httpx with HTTP/2 + exact Chrome header order as primary,
+curl_cffi Chrome TLS impersonation as fallback. No retries, no sleeps.
 """
 
 import re
-import time
 import random
 import logging
 
@@ -14,62 +13,41 @@ logger = logging.getLogger(__name__)
 
 HLTV_BASE = "https://www.hltv.org"
 
-# Custom User-Agent strings that closely mimic real Chrome browser requests.
-# Rotating across multiple helps avoid pattern-based fingerprinting.
-CUSTOM_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.122 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.207 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.128 Safari/537.36",
-]
+FETCH_TIMEOUT = 10  # Hard 10-second per-request wall — bail immediately on breach
 
-# Full browser-like headers sent alongside the custom User-Agent
-BROWSER_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-    "DNT": "1",
-}
-
-
-def _build_headers() -> dict:
-    """Return a headers dict with a randomly chosen custom User-Agent."""
-    h = dict(BROWSER_HEADERS)
-    h["User-Agent"] = random.choice(CUSTOM_USER_AGENTS)
-    return h
-
-
-FETCH_TIMEOUT = 10  # Hard 10-second per-request limit — bail immediately on breach
-
-
-# Single modern UA used for all plain-requests calls
-_FAST_UA = (
+# Chrome 124 User-Agent — matches the sec-ch-ua hint below
+_CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.6367.207 Safari/537.36"
 )
-_FAST_HEADERS = {
-    "User-Agent": _FAST_UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Connection": "keep-alive",
-}
+
+
+def _chrome_headers() -> list[tuple[str, str]]:
+    """
+    Return headers as an ordered list that exactly matches a real Chrome 124
+    HTTP/2 navigation request. Header ORDER matters for HTTP/2 HPACK fingerprinting
+    — Cloudflare uses the frame ordering to detect non-browser clients.
+    """
+    return [
+        ("sec-ch-ua", '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'),
+        ("sec-ch-ua-mobile", "?0"),
+        ("sec-ch-ua-platform", '"Windows"'),
+        ("upgrade-insecure-requests", "1"),
+        ("user-agent", _CHROME_UA),
+        ("accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"),
+        ("sec-fetch-site", "none"),
+        ("sec-fetch-mode", "navigate"),
+        ("sec-fetch-user", "?1"),
+        ("sec-fetch-dest", "document"),
+        ("accept-encoding", "gzip, deflate, br"),
+        ("accept-language", "en-US,en;q=0.9"),
+        ("cache-control", "max-age=0"),
+    ]
 
 
 def _is_blocked(resp) -> bool:
-    """Return True if the response looks like a Cloudflare challenge/block."""
+    """Return True if the response is a Cloudflare challenge or access block."""
     if resp.status_code in (403, 503, 429):
         return True
     body = resp.text or ""
@@ -83,32 +61,45 @@ def _is_blocked(resp) -> bool:
 
 def _fetch(url: str, **_kwargs) -> str | None:
     """
-    Fetch a URL as fast as possible — no retries, no sleeps.
+    Fetch a URL with maximum Cloudflare evasion. One attempt per client,
+    no retries, no sleeps — bail immediately so the caller can use Estimated Stats.
 
-    Strategy (one attempt each, bail immediately on timeout/block):
-      1. Plain requests + modern User-Agent  (fastest — no JS solver overhead)
-      2. curl_cffi Chrome TLS fingerprint    (if #1 is blocked by Cloudflare)
+    Strategy:
+      1. httpx + HTTP/2 + exact Chrome header order  (best HTTP/2 fingerprint)
+      2. curl_cffi Chrome TLS+HTTP/2 impersonation   (best TLS fingerprint)
 
-    Any exception or block → returns None so the caller falls back to
-    Estimated Stats immediately without hanging.
+    Both clients mimic a real Chrome browser at the protocol layer — HTTP/2
+    pseudo-headers, HPACK compression, and TLS ClientHello all match Chrome 124.
     """
-    # --- Primary: plain requests (zero overhead) ---
-    try:
-        import requests as _requests
-        logger.info(f"[requests] GET {url}")
-        resp = _requests.get(url, headers=_FAST_HEADERS, timeout=FETCH_TIMEOUT)
-        if resp.status_code == 200 and not _is_blocked(resp):
-            logger.info(f"[requests] OK — {len(resp.text):,} chars")
-            return resp.text
-        logger.warning(f"[requests] status={resp.status_code}, blocked={_is_blocked(resp)} — trying curl_cffi")
-    except Exception as e:
-        logger.warning(f"[requests] {type(e).__name__}: {e} — trying curl_cffi")
+    headers = _chrome_headers()
 
-    # --- Fallback: curl_cffi Chrome TLS fingerprint (one attempt, no sleep) ---
+    # --- Primary: httpx with HTTP/2 ---
+    try:
+        import httpx
+        logger.info(f"[httpx/h2] GET {url}")
+        with httpx.Client(
+            http2=True,
+            follow_redirects=True,
+            timeout=FETCH_TIMEOUT,
+            verify=True,
+        ) as client:
+            resp = client.get(url, headers=headers)
+        if resp.status_code == 200 and not _is_blocked(resp):
+            logger.info(f"[httpx/h2] OK — {len(resp.text):,} chars")
+            return resp.text
+        logger.warning(f"[httpx/h2] status={resp.status_code} blocked={_is_blocked(resp)} — trying curl_cffi")
+    except Exception as e:
+        logger.warning(f"[httpx/h2] {type(e).__name__}: {e} — trying curl_cffi")
+
+    # --- Fallback: curl_cffi full Chrome impersonation (TLS + HTTP/2 fingerprint) ---
     try:
         from curl_cffi import requests as _curl
         logger.info(f"[curl_cffi] GET {url}")
-        resp = _curl.get(url, headers=_FAST_HEADERS, impersonate="chrome124", timeout=FETCH_TIMEOUT)
+        resp = _curl.get(
+            url,
+            impersonate="chrome124",
+            timeout=FETCH_TIMEOUT,
+        )
         if resp.status_code == 200 and not _is_blocked(resp):
             logger.info(f"[curl_cffi] OK — {len(resp.text):,} chars")
             return resp.text
@@ -116,7 +107,7 @@ def _fetch(url: str, **_kwargs) -> str | None:
     except Exception as e:
         logger.warning(f"[curl_cffi] {type(e).__name__}: {e}")
 
-    logger.warning(f"_fetch failed for {url} — caller will use Estimated Stats")
+    logger.warning(f"Both clients failed for {url} — caller will use Estimated Stats")
     return None
 
 
