@@ -66,48 +66,60 @@ async def on_ready():
     await bot.change_presence(
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="CS2 props | /grade [Player] [Line] [Kills/HS]",
+            name="CS2 props | !grade [Player] [Line] [Kills/HS]",
         )
     )
 
 
 # ---------------------------------------------------------------------------
-# Slash command: /grade
+# Prefix command: !grade
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(
-    name="grade",
-    description="Grade a CS2 player prop using HLTV data + 25,000-run Monte Carlo simulation",
-)
-@app_commands.describe(
-    player_name="Player name (e.g. ZywOo, s1mple, NiKo)",
-    line="The prop line number (e.g. 38.5)",
-    stat_type="Stat to grade — Kills or Headshots",
-)
-async def grade(
-    interaction: discord.Interaction,
-    player_name: str,
-    line: str,
-    stat_type: Literal["Kills", "HS"] = "Kills",
-):
-    # --- Fix 1: Immediate defer — prevents Discord's 3-second timeout ---
-    await interaction.response.defer(thinking=True)
-
-    # Validate the line value
-    try:
-        line_val = float(line)
-    except ValueError:
-        await interaction.followup.send(
+@bot.command(name="grade")
+async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: str = "Kills"):
+    if not player_name or not line:
+        await ctx.send(
             embed=discord.Embed(
-                title="❌ Invalid Line",
-                description=f"`{line}` is not a valid number. Example: `/grade ZywOo 38.5 Kills`",
+                title="❌ Usage Error",
+                description=(
+                    "**Correct usage:**\n"
+                    "`!grade [Player Name] [Line] [Kills/HS]`\n\n"
+                    "**Examples:**\n"
+                    "`!grade ZywOo 38.5 Kills`\n"
+                    "`!grade s1mple 14.5 HS`"
+                ),
                 color=0xFF4136,
             )
         )
         return
 
-    # Run all blocking work (scraping + simulation) in a thread so the event loop
-    # stays free and Discord's connection remains alive
+    try:
+        line_val = float(line)
+    except ValueError:
+        await ctx.send(f"❌ Invalid line `{line}`. Please provide a number, e.g. `38.5`.")
+        return
+
+    stat_type = stat_type.capitalize()
+    if stat_type not in ("Kills", "Hs"):
+        stat_type = "Kills"
+    if stat_type == "Hs":
+        stat_type = "HS"
+
+    # Immediately send a visible acknowledgement — keeps Discord from looking dead
+    thinking_msg = await ctx.send(
+        embed=discord.Embed(
+            title="⚙️ Analyzing...",
+            description=(
+                f"**Player:** {player_name}\n"
+                f"**Prop:** {line_val} {stat_type}\n\n"
+                f"🔍 Fetching HLTV data (15s timeout, then falls back to Estimated)...\n"
+                f"📊 Running 25,000 Monte Carlo simulations once data is ready."
+            ),
+            color=0x7289DA,
+        )
+    )
+
+    # Run all blocking work in a thread executor — event loop stays free
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
@@ -119,7 +131,7 @@ async def grade(
         )
     except asyncio.TimeoutError:
         logger.error("Analysis timed out after 60s")
-        await interaction.followup.send(
+        await thinking_msg.edit(
             embed=discord.Embed(
                 title="❌ Timed Out",
                 description="The analysis took longer than 60 seconds and was cancelled. Try again shortly.",
@@ -130,7 +142,7 @@ async def grade(
     except Exception as e:
         err_name = type(e).__name__
         logger.error(f"Executor error ({err_name}): {e}")
-        await interaction.followup.send(
+        await thinking_msg.edit(
             embed=discord.Embed(
                 title="❌ Analysis Error",
                 description=f"**Simulation Error: {err_name}**\n```{str(e)[:300]}```",
@@ -143,7 +155,7 @@ async def grade(
     if "sim_error" in result:
         err_name = result["sim_error"]
         logger.error(f"Simulation returned error: {err_name}")
-        await interaction.followup.send(
+        await thinking_msg.edit(
             embed=discord.Embed(
                 title="❌ Simulation Error",
                 description=f"**Simulation Error: {err_name}**\n{result.get('error', '')}",
@@ -153,7 +165,7 @@ async def grade(
         return
 
     if "error" in result:
-        await interaction.followup.send(
+        await thinking_msg.edit(
             embed=discord.Embed(
                 title="❌ Error",
                 description=result["error"],
@@ -162,9 +174,8 @@ async def grade(
         )
         return
 
-    # --- Fix 2: Final result delivered via followup.send ---
     embed = build_result_embed(player_name, line_val, stat_type, result)
-    await interaction.followup.send(embed=embed)
+    await thinking_msg.edit(embed=embed)
 
 
 # ---------------------------------------------------------------------------
@@ -181,15 +192,15 @@ async def help_cmd(interaction: discord.Interaction):
     )
     embed.add_field(
         name="Command",
-        value="`/grade [player_name] [line] [stat_type]`",
+        value="`!grade [Player Name] [Line] [Kills/HS]`",
         inline=False,
     )
     embed.add_field(
         name="Examples",
         value=(
-            "`/grade ZywOo 38.5 Kills`\n"
-            "`/grade s1mple 14.5 HS`\n"
-            "`/grade NiKo 22.5 Kills`"
+            "`!grade ZywOo 38.5 Kills`\n"
+            "`!grade s1mple 14.5 HS`\n"
+            "`!grade NiKo 22.5 Kills`"
         ),
         inline=False,
     )
