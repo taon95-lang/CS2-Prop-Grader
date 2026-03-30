@@ -367,12 +367,37 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
     return {
         'player': display_name,
         'player_id': player_id,
+        'player_slug': player_slug,
+        'match_ids': match_ids,          # full list — used for H2H filtering
         'map_kills': map_kills,
         'mean': round(mean, 2),
         'std': round(std, 2),
         'sample_size': len(map_kills),
         'source': 'HLTV Live',
     }
+
+
+# ---------------------------------------------------------------------------
+# Player team lookup (from player profile page)
+# ---------------------------------------------------------------------------
+
+def get_player_team(player_id: str, player_slug: str) -> tuple[str, str] | None:
+    """
+    Fetch the player's profile page and extract their current team ID + slug.
+    Returns (team_id, team_slug) or None.
+    """
+    url = f"{HLTV_BASE}/player/{player_id}/{player_slug}"
+    html = _fetch(url)
+    if not html:
+        return None
+
+    matches = re.findall(r'/team/(\d+)/([\w-]+)', html)
+    if not matches:
+        return None
+
+    tid, tslug = matches[0]
+    logger.info(f"[player_team] player={player_slug} → team_id={tid} slug={tslug}")
+    return tid, tslug
 
 
 # ---------------------------------------------------------------------------

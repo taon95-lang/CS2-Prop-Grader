@@ -8,8 +8,8 @@ import logging
 from scraper import (
     get_player_info,
     get_player_info_fallback,
-    get_matchup_adjustment,
 )
+from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
 
@@ -120,9 +120,9 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     _STAGES_OPP = [
         "🔍 Searching HLTV for player profile...",
         "📡 Fetching recent match pages (Maps 1 & 2)...",
-        f"🛡️ Fetching {opponent}'s defensive profile...",
-        "📊 Applying matchup adjustment + running simulations...",
-        "⏳ Almost there — finalising results...",
+        f"🛡️ Analysing {opponent}'s defensive profile (10 matches)...",
+        f"🔎 Pulling H2H records vs {opponent} + ranking comparison...",
+        "📊 Applying deep adjustments + running 25,000 simulations...",
     ]
     _STAGES = _STAGES_OPP if opponent else _STAGES_BASE
 
@@ -316,6 +316,7 @@ def _analyze_player(
     map_stats = []
     data_source = "HLTV Live"
     used_fallback = False
+    info: dict = {}  # populated on success; used for player_id / match_ids in step 3
 
     try:
         info = get_player_info(player_name, stat_type=internal_stat)
@@ -347,27 +348,46 @@ def _analyze_player(
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
-    # --- Step 3 (optional): Opponent matchup adjustment ---
-    matchup_info: dict | None = None
+    # --- Step 3 (optional): Deep opponent analysis ---
+    deep: dict | None = None
     if opponent:
-        try:
-            matchup_info = get_matchup_adjustment(opponent)
-            if matchup_info:
-                adj = matchup_info["adjustment"]
-                map_stats = [round(k * adj, 2) for k in map_stats]
-                logger.info(
-                    f"Matchup adjustment for '{opponent}': "
-                    f"×{adj} ({matchup_info['label']}) — "
-                    f"{matchup_info['sample_maps']} sample maps"
+        player_id   = info.get("player_id")   if not used_fallback else None
+        player_slug = info.get("player_slug")  if not used_fallback else None
+        match_ids   = info.get("match_ids", []) if not used_fallback else []
+        baseline_avg = info.get("mean", sum(map_stats) / len(map_stats)) if map_stats else 0
+
+        if player_id and player_slug:
+            try:
+                deep = run_deep_analysis(
+                    player_id=player_id,
+                    player_slug=player_slug,
+                    player_match_ids=match_ids,
+                    opponent_name=opponent,
+                    stat_type=stat_type,
+                    baseline_avg=baseline_avg,
                 )
-            else:
-                logger.warning(f"Could not fetch defensive stats for '{opponent}' — no adjustment applied")
-        except Exception as e:
-            logger.warning(f"Matchup adjustment failed ({type(e).__name__}): {e}")
-            matchup_info = None
+                if deep and not deep.get("error"):
+                    adj = deep["combined_multiplier"]
+                    map_stats = [round(k * adj, 2) for k in map_stats]
+                    total_pct = round((adj - 1) * 100, 1)
+                    sign = "+" if total_pct >= 0 else ""
+                    logger.info(
+                        f"Deep analysis for '{opponent}': "
+                        f"combined multiplier ×{adj} ({sign}{total_pct}%)"
+                    )
+                else:
+                    logger.warning(
+                        f"Deep analysis returned error for '{opponent}': "
+                        f"{deep.get('error') if deep else 'None'}"
+                    )
+            except Exception as e:
+                logger.warning(f"Deep analysis failed ({type(e).__name__}): {e}")
+                deep = None
+        else:
+            logger.warning("Cannot run deep analysis without player_id (fallback data in use)")
 
     # --- Step 4: Monte Carlo simulation ---
-    favorite_prob = 0.55  # default edge assumption
+    favorite_prob = 0.55
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
@@ -384,7 +404,7 @@ def _analyze_player(
     sim_result["used_fallback"] = used_fallback
     sim_result["player_name"] = player_name
     sim_result["line"] = line
-    sim_result["matchup"] = matchup_info  # None if no opponent given
+    sim_result["deep"] = deep  # full deep analysis dict or None
     return sim_result
 
 
@@ -400,8 +420,8 @@ def build_result_embed(
     grade = result.get("grade", "N/A")
     emoji = grade_emoji(grade)
 
-    matchup = result.get("matchup")
-    opp_display = matchup["team_display"] if matchup else None
+    deep = result.get("deep")
+    opp_display = deep["opponent_display"] if deep and deep.get("opponent_display") else None
 
     title = f"{emoji} CS2 Prop Grade — {player_name}"
     if opp_display:
@@ -414,23 +434,109 @@ def build_result_embed(
 
     embed = discord.Embed(title=title, description=description, color=color)
 
-    # Matchup section (only when opponent was provided)
-    if matchup:
-        adj = matchup["adjustment"]
-        adj_pct = round((adj - 1) * 100, 1)
-        adj_sign = "+" if adj_pct >= 0 else ""
-        label = matchup["label"]
-        label_emoji = {"tough": "🛡️ Tough", "average": "⚖️ Average", "soft": "💨 Soft"}.get(label, label)
+    # ── Deep Opponent Analysis (only when opponent was provided) ──────────────
+    if deep and not deep.get("error") and opp_display:
+        combined     = deep.get("combined_multiplier", 1.0)
+        total_pct    = round((combined - 1) * 100, 1)
+        total_sign   = "+" if total_pct >= 0 else ""
+        components   = deep.get("components", {})
+
+        def fmt_comp(key, label):
+            v = components.get(key)
+            if v is None:
+                return None
+            p = round((v - 1) * 100, 1)
+            s = "+" if p >= 0 else ""
+            return f"`{label}` {s}{p}%"
+
+        comp_parts = list(filter(None, [
+            fmt_comp("defensive",      "Defense"),
+            fmt_comp("t_side",         "T-Side"),
+            fmt_comp("rank",           "Ranking"),
+            fmt_comp("map_pool",       "Map Pool"),
+            fmt_comp("h2h",            "H2H"),
+            fmt_comp("hs_vulnerability","HS Vuln"),
+        ]))
+
+        # Summary section
+        bullets = deep.get("summary_bullets", [])
+        bullet_text = "\n".join(f"• {b}" for b in bullets[:4]) if bullets else "_No significant factors detected_"
+
         embed.add_field(
-            name=f"🎯 Matchup — vs {opp_display}",
+            name=f"🔬 Deep Opponent Analysis — {opp_display}",
             value=(
-                f"**Defense:** {label_emoji}\n"
-                f"**Avg Kills Allowed/Map:** `{matchup['avg_allowed']}`\n"
-                f"**Adjustment:** `{adj_sign}{adj_pct}%` applied to kill distribution\n"
-                f"**Sample:** {matchup['sample_maps']} maps"
+                f"**Combined Adjustment:** `{total_sign}{total_pct}%`\n"
+                f"{chr(10).join(comp_parts) if comp_parts else '_No component adjustments_'}\n\n"
+                f"**Key Factors:**\n{bullet_text}"
             ),
             inline=False,
         )
+
+        # Defensive Profile
+        def_profile = deep.get("defensive_profile", {})
+        rank_info   = deep.get("rank_info", {})
+        map_pool    = deep.get("map_pool", {})
+
+        def_val_parts = [f"**{def_profile.get('label','?')}**"]
+        if def_profile.get("avg_kills_allowed"):
+            def_val_parts.append(f"Avg kills allowed/map: `{def_profile['avg_kills_allowed']}`")
+        if def_profile.get("ct_win_pct") is not None:
+            def_val_parts.append(f"CT win %: `{def_profile['ct_win_pct']}%`")
+        if def_profile.get("t_win_pct") is not None:
+            def_val_parts.append(f"T win %: `{def_profile['t_win_pct']}%`")
+        if def_profile.get("sample"):
+            def_val_parts.append(f"Sample: {def_profile['sample']} player-maps")
+
+        embed.add_field(
+            name="🛡️ Defensive Profile",
+            value="\n".join(def_val_parts) or "No data",
+            inline=True,
+        )
+
+        # Ranking & Map Pool
+        rank_label    = rank_info.get("label", "Unknown")
+        stomp_text    = " ⚠️" if rank_info.get("stomp_risk") else ""
+        most_played   = map_pool.get("most_played", [])
+        permaban_hint = map_pool.get("permaban_hint")
+
+        map_val = f"**{map_pool.get('label','?')}**"
+        if most_played:
+            map_val += f"\nMost Played: `{', '.join(m.title() for m in most_played[:3])}`"
+        if permaban_hint:
+            map_val += f"\nPermaban Hint: `{permaban_hint.title()}`"
+
+        embed.add_field(
+            name="🗺️ Ranking & Map Pool",
+            value=f"**{rank_label}{stomp_text}**\n{map_val}",
+            inline=True,
+        )
+
+        # H2H
+        h2h_records = deep.get("h2h", [])
+        h2h_label   = deep.get("h2h_label", "No H2H data")
+        if h2h_records:
+            h2h_lines = []
+            for i, rec in enumerate(h2h_records, 1):
+                maps_str = " / ".join(str(k) for k in rec.get("kills_by_map", []))
+                h2h_lines.append(f"Match {i}: `{maps_str}` kills → avg `{rec['avg_kills']}`")
+            h2h_val = f"{h2h_label}\n" + "\n".join(h2h_lines)
+        else:
+            h2h_val = h2h_label
+
+        embed.add_field(
+            name="🆚 Head-to-Head (Last 3)",
+            value=h2h_val,
+            inline=False,
+        )
+
+        # HS Vulnerability (only for HS props)
+        hs_info = deep.get("hs_vulnerability", {})
+        if hs_info.get("label") and hs_info["label"] != "N/A (Kills prop)":
+            embed.add_field(
+                name="💥 HS Vulnerability Index",
+                value=f"**{hs_info['label']}**\nModifier: `×{hs_info['modifier']}`",
+                inline=True,
+            )
 
     n_series = result.get("n_series", 0)
     n_maps = result.get("n_samples", 0)
