@@ -248,19 +248,54 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             continue
 
         # Extract K-D from the row — format is "22-14"
-        kd_match = re.search(r'(\d+)-(\d+)', player_row.get_text())
+        row_text = player_row.get_text()
+        kd_match = re.search(r'(\d+)-(\d+)', row_text)
         if not kd_match:
             continue
 
-        kills = int(kd_match.group(1))
+        kills  = int(kd_match.group(1))
         deaths = int(kd_match.group(2))
+
+        # Extract Rating 2.0 — it's a decimal like 1.15 in [0.40, 3.00]
+        # found in td cells, typically the rightmost decimal value
+        rating = None
+        cells = player_row.find_all('td')
+        for cell in reversed(cells):
+            m = re.match(r'^\s*(\d+\.\d{2})\s*$', cell.get_text())
+            if m:
+                val = float(m.group(1))
+                if 0.40 <= val <= 3.00:
+                    rating = val
+                    break
+
+        # Extract FK (First Kills) — integer cell BEFORE the rating
+        # FK-FD columns appear on some pages as standalone integers (0-20)
+        fk = None
+        fd = None
+        int_cells = []
+        for cell in cells:
+            ct = cell.get_text(strip=True)
+            if re.match(r'^\d+$', ct) and 0 <= int(ct) <= 40:
+                int_cells.append(int(ct))
+        # int_cells typically: [kills, deaths, fk, fd, ...]
+        # K-D cell shows "22-14" so we skip that; standalone int cells after K-D are fk/fd
+        if len(int_cells) >= 2:
+            fk = int_cells[0]
+            fd = int_cells[1]
+
         maps_result.append({
-            'map_name': map_name,
-            'kills': kills,
-            'deaths': deaths,
+            'map_name':   map_name,
+            'kills':      kills,
+            'deaths':     deaths,
+            'rating':     rating,
+            'fk':         fk,
+            'fd':         fd,
             'map_number': map_num,
         })
-        logger.info(f"[parse] Map {map_num} ({map_name}): {player_slug} — {kills}K/{deaths}D")
+        logger.info(
+            f"[parse] Map {map_num} ({map_name}): {player_slug} — "
+            f"{kills}K/{deaths}D rating={rating} fk={fk}"
+        )
 
     if not maps_result:
         return None
@@ -347,9 +382,13 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         for m in maps[:2]:
             map_kills.append({
                 'stat_value': m['kills'],
-                'rounds': 22,
-                'match_id': match_id,
-                'map_name':  m['map_name'].lower(),
+                'rounds':     22,
+                'match_id':   match_id,
+                'map_name':   m['map_name'].lower(),
+                'rating':     m.get('rating'),        # Rating 2.0 (may be None)
+                'fk':         m.get('fk'),             # First Kills (may be None)
+                'fd':         m.get('fd'),             # First Deaths (may be None)
+                'deaths':     m.get('deaths'),
             })
 
         bo3_series_count += 1

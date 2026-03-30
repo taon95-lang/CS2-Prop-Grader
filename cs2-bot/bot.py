@@ -397,9 +397,11 @@ def _analyze_player(
     # --- Step 4: Monte Carlo simulation ---
     favorite_prob = 0.55
     likely_maps: list = []
+    rank_gap: int | None = None
     if deep:
         mp = deep.get("map_pool", {})
         likely_maps = mp.get("most_played", []) or []
+        rank_gap = deep.get("rank_info", {}).get("rank_gap")
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
@@ -407,6 +409,7 @@ def _analyze_player(
             stat_type=stat_type,
             favorite_prob=favorite_prob,
             likely_maps=likely_maps if likely_maps else None,
+            rank_gap=rank_gap,
         )
     except Exception as e:
         err_name = type(e).__name__
@@ -440,6 +443,76 @@ def _analyze_player(
         # Recalculate edge if present
         if "edge" in sim_result:
             sim_result["edge"] = round(sim_result["over_prob"] - 50, 1)
+
+    # --- Step 5: Impact Profile (from Rating 2.0 scraped off match scorecards) ---
+    ratings = [m["rating"] for m in map_stats if m.get("rating") is not None]
+    avg_rating = round(sum(ratings) / len(ratings), 2) if ratings else None
+
+    if avg_rating is not None:
+        if avg_rating >= 1.20:
+            impact_label = "🏆 Clutch Performer"
+            # Boost Over slightly in coinflip matches where skill floors matter
+            if favorite_prob <= 0.58:
+                over_p = sim_result.get("over_prob", 50)
+                sim_result["over_prob"]  = round(min(95, over_p + 2.5), 1)
+                sim_result["under_prob"] = round(max(5, sim_result.get("under_prob", 50) - 2.5), 1)
+                sim_result["impact_adjusted"] = True
+        elif avg_rating < 0.95:
+            impact_label = "🚪 Exit Fragger"
+            impact_note  = "⚠️ Low rating despite kills — caution on Over"
+        else:
+            impact_label = "📊 Standard Entry"
+        if avg_rating >= 1.20:
+            impact_note = f"Rating {avg_rating} → boosted Over (+2.5% in coinflip)" if favorite_prob <= 0.58 else f"Rating {avg_rating}"
+        elif avg_rating < 0.95:
+            impact_note = f"Rating {avg_rating} → dying early / exits"
+        else:
+            impact_note = f"Rating {avg_rating}"
+    else:
+        impact_label = "❓ No Rating Data"
+        impact_note  = "_Rating not available on these match pages_"
+
+    sim_result["impact_label"]  = impact_label
+    sim_result["impact_note"]   = impact_note
+    sim_result["avg_rating"]    = avg_rating
+
+    # --- Opening Duel Profile (from FK/FD scraped off match scorecards) ---
+    fk_vals = [m["fk"] for m in map_stats if m.get("fk") is not None]
+    fd_vals = [m["fd"] for m in map_stats if m.get("fd") is not None]
+
+    if len(fk_vals) >= 4 and len(fd_vals) >= 4:
+        avg_fk = sum(fk_vals) / len(fk_vals)
+        avg_fd = sum(fd_vals) / len(fd_vals)
+        rounds_used = 22  # default rounds per map
+        fk_attempt_rate = avg_fk / rounds_used
+        total_duels = avg_fk + avg_fd
+        fk_success_rate = avg_fk / total_duels if total_duels > 0 else 0
+
+        if fk_attempt_rate > 0.25 and fk_success_rate > 0.55:
+            duel_label = "🎯 High-Impact Opener"
+            duel_note  = f"FK rate {fk_attempt_rate:.0%} | Win rate {fk_success_rate:.0%} → high ceiling"
+        elif fk_attempt_rate > 0.25 and fk_success_rate < 0.45:
+            duel_label = "⚡ Volatility Risk"
+            duel_note  = f"FK rate {fk_attempt_rate:.0%} | Win rate {fk_success_rate:.0%} → dies early on bad maps"
+        elif fk_attempt_rate <= 0.10:
+            duel_label = "🤫 Passive / Support"
+            duel_note  = f"FK rate {fk_attempt_rate:.0%} | Win rate {fk_success_rate:.0%} → accumulates late kills"
+        else:
+            duel_label = "📋 Standard Fragger"
+            duel_note  = f"FK rate {fk_attempt_rate:.0%} | Win rate {fk_success_rate:.0%}"
+    else:
+        duel_label = "❓ No Opening Duel Data"
+        duel_note  = "_FK/FD not available on these match pages_"
+        avg_fk = avg_fd = None
+
+    sim_result["duel_label"]  = duel_label
+    sim_result["duel_note"]   = duel_note
+    sim_result["avg_fk"]      = round(avg_fk, 1) if avg_fk is not None else None
+    sim_result["avg_fd"]      = round(avg_fd, 1) if avg_fd is not None else None
+
+    # Stomp + high line warning
+    if rank_gap is not None and rank_gap > 50 and line > 35.5:
+        sim_result["stomp_high_line_warning"] = True
 
     return sim_result
 
@@ -676,6 +749,35 @@ def build_result_embed(
             f"**Std Dev (series):** `±{stab_std}` kills  —  {stab_label}\n"
             f"**Ceiling:** `{ceiling}` kills  |  **Floor:** `{floor_v}` kills\n"
             f"**Per-Map KPR:**\n{map_kpr_lines}"
+        ),
+        inline=False,
+    )
+
+    # ── ⚔️ Impact & Opening Duel Profile ─────────────────────────────────────
+    impact_label = result.get("impact_label", "❓ No Rating Data")
+    impact_note  = result.get("impact_note", "")
+    duel_label   = result.get("duel_label",  "❓ No Opening Duel Data")
+    duel_note    = result.get("duel_note",   "")
+    avg_fk       = result.get("avg_fk")
+    avg_fd       = result.get("avg_fd")
+    avg_rating   = result.get("avg_rating")
+
+    impact_adj_tag = "  _(impact-adjusted)_" if result.get("impact_adjusted") else ""
+    fk_stat_line = f"Avg FK: `{avg_fk}` / FD: `{avg_fd}`" if avg_fk is not None else ""
+
+    stomp_warning = ""
+    if result.get("stomp_high_line_warning"):
+        stomp_warning = "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
+
+    embed.add_field(
+        name="⚔️ Impact & Opening Duel",
+        value=(
+            f"**Impact Profile:** {impact_label}{impact_adj_tag}\n"
+            f"_{impact_note}_\n"
+            f"**Opening Duels:** {duel_label}\n"
+            f"_{duel_note}_"
+            + (f"\n{fk_stat_line}" if fk_stat_line else "")
+            + stomp_warning
         ),
         inline=False,
     )

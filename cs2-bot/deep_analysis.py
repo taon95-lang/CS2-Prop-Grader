@@ -454,11 +454,16 @@ def run_deep_analysis(
         components['rank'] = round(rank_adj, 4)
     combined *= rank_adj
 
+    raw_gap: int | None = None
+    if opp_rank and player_rank:
+        raw_gap = abs(opp_rank - player_rank)
+
     out['rank_info'] = {
         'player_rank': player_rank,
         'opp_rank':    opp_rank,
         'label':       rank_label,
         'stomp_risk':  stomp,
+        'rank_gap':    raw_gap,
     }
 
     # ── [D] Map pool ─────────────────────────────────────────────────────────

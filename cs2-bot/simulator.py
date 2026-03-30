@@ -51,6 +51,7 @@ def run_simulation(
     stat_type: str = "Kills",
     favorite_prob: float = 0.55,
     likely_maps: list = None,
+    rank_gap: int = None,
 ) -> dict:
     """
     Run 100,000 Monte Carlo simulations using Negative Binomial distribution.
@@ -81,8 +82,29 @@ def run_simulation(
     else:
         stability_label = "🎯 Consistent"
 
-    # --- Round Projection ---
-    if favorite_prob >= 0.70:
+    # --- Round Projection (rank_gap takes priority over favorite_prob) ---
+    stomp_via_rank = False
+    close_via_rank = False
+
+    if rank_gap is not None:
+        if rank_gap > 50:
+            rounds_per_map_projected = 18
+            match_context = f"Stomp Mismatch (Rank gap {rank_gap}) — short match risk"
+            stomp_via_rank = True
+        elif rank_gap < 15:
+            rounds_per_map_projected = 24
+            match_context = f"Tight Clash (Rank gap {rank_gap}) — OT risk"
+            close_via_rank = True
+        elif favorite_prob >= 0.70:
+            rounds_per_map_projected = 19
+            match_context = "Heavy Favorite (short match risk)"
+        elif favorite_prob <= 0.55:
+            rounds_per_map_projected = 23
+            match_context = "Coinflip Match (full maps likely)"
+        else:
+            rounds_per_map_projected = 22
+            match_context = "Moderate Favorite"
+    elif favorite_prob >= 0.70:
         rounds_per_map_projected = 19
         match_context = "Heavy Favorite (short match risk)"
     elif favorite_prob <= 0.55:
@@ -214,6 +236,9 @@ def run_simulation(
         "floor":                  floor_val,
         "map_projection_note":    map_projection_note,
         "map_kpr":                {k: round(mean(v), 3) for k, v in map_kpr.items()},
+        "stomp_via_rank":         stomp_via_rank,
+        "close_via_rank":         close_via_rank,
+        "rank_gap":               rank_gap,
     }
 
 
