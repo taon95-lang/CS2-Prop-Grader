@@ -396,12 +396,17 @@ def _analyze_player(
 
     # --- Step 4: Monte Carlo simulation ---
     favorite_prob = 0.55
+    likely_maps: list = []
+    if deep:
+        mp = deep.get("map_pool", {})
+        likely_maps = mp.get("most_played", []) or []
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
             line=line,
             stat_type=stat_type,
             favorite_prob=favorite_prob,
+            likely_maps=likely_maps if likely_maps else None,
         )
     except Exception as e:
         err_name = type(e).__name__
@@ -412,7 +417,7 @@ def _analyze_player(
     sim_result["used_fallback"] = used_fallback
     sim_result["player_name"] = player_name
     sim_result["line"] = line
-    sim_result["deep"] = deep  # full deep analysis dict or None
+    sim_result["deep"] = deep
 
     # Apply +5% Over bonus for confirmed matchup favorites
     if deep and deep.get("matchup_favorite_bonus"):
@@ -421,7 +426,17 @@ def _analyze_player(
         push_p  = sim_result.get("push_prob",   0)
         sim_result["over_prob"]  = min(95, over_p + 5)
         sim_result["under_prob"] = max(5,  under_p - 5)
-        sim_result["push_prob"]  = push_p  # unchanged
+        sim_result["push_prob"]  = push_p
+
+    # Apply Economy Impact probability adjustment
+    if deep:
+        economy_delta = deep.get("economy_prob_delta", 0.0)
+        if economy_delta:
+            over_p  = sim_result.get("over_prob",  50)
+            under_p = sim_result.get("under_prob", 50)
+            sim_result["over_prob"]  = round(min(95, max(5, over_p + economy_delta)), 1)
+            sim_result["under_prob"] = round(min(95, max(5, under_p - economy_delta)), 1)
+            sim_result["economy_adjusted"] = True
         # Recalculate edge if present
         if "edge" in sim_result:
             sim_result["edge"] = round(sim_result["over_prob"] - 50, 1)
@@ -573,12 +588,16 @@ def build_result_embed(
         else:
             h2h_line_txt = "_No H2H data for line check_"
 
+        econ_sc  = scouting.get("economy_impact", {})
+        econ_line = econ_sc.get("label") or "⚖️ No Economy Data"
+
         embed.add_field(
             name="🛡️ Opponent Scouting",
             value=(
                 f"**HS Vulnerability:** {hs_line}\n"
                 f"**Role Suppression:** {role_line}\n"
-                f"**H2H vs Line:** {h2h_line_txt}"
+                f"**H2H vs Line:** {h2h_line_txt}\n"
+                f"**Economy Impact:** {econ_line}"
             ),
             inline=False,
         )
@@ -604,12 +623,14 @@ def build_result_embed(
         inline=True,
     )
 
+    map_note = result.get("map_projection_note", "Overall average")
     embed.add_field(
         name="🎯 Projection",
         value=(
             f"**Rounds/Map:** `{result.get('rounds_per_map', 22)}`\n"
             f"**Total Rounds:** `{result.get('total_projected_rounds', 44)}`\n"
             f"**Expected {stat_type}:** `{result.get('expected_total', 'N/A')}`\n"
+            f"**Basis:** {map_note}\n"
             f"**Context:** {result.get('match_context', 'Standard')}"
         ),
         inline=True,
@@ -628,13 +649,46 @@ def build_result_embed(
 
     over_p = result.get("over_prob", 0)
     under_p = result.get("under_prob", 0)
+    econ_adj_tag = "  _(economy-adjusted)_" if result.get("economy_adjusted") else ""
     over_bar = build_prob_bar(over_p / 100)
     embed.add_field(
         name="📈 Simulated Probabilities",
         value=(
-            f"**Over {line}:** `{over_p}%` {over_bar}\n"
+            f"**Over {line}:** `{over_p}%`{econ_adj_tag} {over_bar}\n"
             f"**Under {line}:** `{under_p}%`\n"
             f"**Push:** `{result.get('push_prob', 0)}%`"
+        ),
+        inline=False,
+    )
+
+    # ── 📉 Stability Score ────────────────────────────────────────────────────
+    stab_std   = result.get("stability_std", 0)
+    stab_label = result.get("stability_label", "🎯 Consistent")
+    ceiling    = result.get("ceiling", "N/A")
+    floor_v    = result.get("floor", "N/A")
+    map_kpr    = result.get("map_kpr", {})
+    map_kpr_lines = "\n".join(
+        f"  `{mn.title()}`: {v} KPR" for mn, v in sorted(map_kpr.items())
+    ) if map_kpr else "  _No map-specific data_"
+    embed.add_field(
+        name="📉 Stability Score",
+        value=(
+            f"**Std Dev (series):** `±{stab_std}` kills  —  {stab_label}\n"
+            f"**Ceiling:** `{ceiling}` kills  |  **Floor:** `{floor_v}` kills\n"
+            f"**Per-Map KPR:**\n{map_kpr_lines}"
+        ),
+        inline=False,
+    )
+
+    # ── 💰 Fair Line Analysis ──────────────────────────────────────────────────
+    fair_line_val  = result.get("fair_line", result.get("sim_median", "N/A"))
+    misprice_label = result.get("misprice_label", "✅ Fair Line")
+    embed.add_field(
+        name="💰 Fair Line Analysis",
+        value=(
+            f"**Fair Line (50/50):** `{fair_line_val}` kills\n"
+            f"**Sportsbook Line:** `{line}` kills\n"
+            f"**Assessment:** {misprice_label}"
         ),
         inline=False,
     )

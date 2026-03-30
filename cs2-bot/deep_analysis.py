@@ -609,6 +609,25 @@ def run_deep_analysis(
 
     out['matchup_favorite_bonus'] = matchup_fav
 
+    # ── [I] Economy Impact (Pistol proxy via CT/T win rates) ──────────────────
+    ct_pct_val = opp_data.get('ct_win_pct')
+    economy_label    = "⚖️ Standard Economy"
+    economy_prob_delta = 0.0  # additive % to over_prob (after simulation)
+
+    if ct_pct_val is not None:
+        if ct_pct_val < 38:
+            economy_label     = "💸 Economy Weak (CT win <38%) → +5% Over"
+            economy_prob_delta = +5.0
+            bullets.append(f"Weak CT economy ({ct_pct_val}% CT win rate) → eco rounds likely → +5% Over")
+        elif ct_pct_val > 58:
+            economy_label     = "💪 Economy Elite (CT win >58%) → −5% Over"
+            economy_prob_delta = -5.0
+            bullets.append(f"Elite CT economy ({ct_pct_val}% CT win rate) → stacks well → −5% Over")
+        else:
+            economy_label = f"⚖️ Standard Economy (CT {ct_pct_val}%)"
+
+    out['economy_prob_delta'] = economy_prob_delta
+
     # ── Build Opponent Scouting block ─────────────────────────────────────────
     out['scouting'] = {
         'hs_vulnerability': {
@@ -624,6 +643,11 @@ def run_deep_analysis(
             'matches_cleared':   h2h_cleared,
             'of_n':              h2h_of_n,
             'matchup_favorite':  matchup_fav,
+        },
+        'economy_impact': {
+            'label':       economy_label,
+            'prob_delta':  economy_prob_delta,
+            'ct_win_pct':  ct_pct_val,
         },
     }
 

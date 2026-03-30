@@ -347,8 +347,9 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         for m in maps[:2]:
             map_kills.append({
                 'stat_value': m['kills'],
-                'rounds': 22,        # CS2 default; exact round count not on match page
+                'rounds': 22,
                 'match_id': match_id,
+                'map_name':  m['map_name'].lower(),
             })
 
         bo3_series_count += 1
