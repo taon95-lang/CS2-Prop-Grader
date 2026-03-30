@@ -157,85 +157,78 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     )
 
     start = _time.monotonic()
-    TOTAL_TIMEOUT = 150  # HLTV scraping (multiple pages) + simulation time
+    TOTAL_TIMEOUT = 150
     result = None
+    logger.info(f"[grade] Started analysis: {player_name} {line_val} {stat_type} opp={opponent}")
 
     while True:
         elapsed = int(_time.monotonic() - start)
 
-        # Hard ceiling — give up after TOTAL_TIMEOUT seconds
         if elapsed >= TOTAL_TIMEOUT:
             fut.cancel()
-            logger.error(f"Analysis timed out after {TOTAL_TIMEOUT}s")
+            logger.error(f"[grade] Timed out after {TOTAL_TIMEOUT}s for {player_name}")
             await thinking_msg.edit(
                 embed=discord.Embed(
                     title="❌ Timed Out",
                     description=(
                         f"Analysis exceeded {TOTAL_TIMEOUT}s and was cancelled.\n"
-                        "HLTV data is loading slowly — try again in a moment."
+                        "HLTV may be slow — try again in a moment."
                     ),
                     color=0xFF4136,
                 )
             )
             return
 
-        # Poll the future every 5 seconds; update the embed on each tick
         try:
             result = await asyncio.wait_for(asyncio.shield(fut), timeout=5)
-            break  # Analysis finished — exit the loop
+            logger.info(f"[grade] Analysis finished in {elapsed}s for {player_name}")
+            break
         except asyncio.TimeoutError:
-            # Still running — update the progress embed
             elapsed = int(_time.monotonic() - start)
             stage_idx = min(len(_STAGES) - 1, elapsed // 15)
+            logger.info(f"[grade] Still running — {elapsed}s elapsed (stage {stage_idx})")
             try:
                 await thinking_msg.edit(embed=_stage_embed(elapsed, stage_idx))
-            except Exception:
-                pass
+            except Exception as edit_err:
+                logger.warning(f"[grade] Progress edit failed: {edit_err}")
         except Exception as e:
-            err_name = type(e).__name__
-            logger.error(f"Executor error ({err_name}): {e}")
+            logger.error(f"[grade] Executor error ({type(e).__name__}): {e}", exc_info=True)
             await thinking_msg.edit(
                 embed=discord.Embed(
                     title="❌ Analysis Error",
-                    description=f"**Simulation Error: {err_name}**\n```{str(e)[:300]}```",
+                    description=f"**{type(e).__name__}**\n```{str(e)[:300]}```",
                     color=0xFF4136,
                 )
             )
             return
 
-    # Simulation-level error (returned as dict, not raised)
-    if "sim_error" in result:
-        err_name = result["sim_error"]
-        logger.error(f"Simulation returned error: {err_name}")
+    # Handle error dicts
+    if result and ("sim_error" in result or "error" in result):
+        err_msg = result.get("error") or result.get("sim_error", "Unknown error")
+        logger.error(f"[grade] Result error for {player_name}: {err_msg}")
         await thinking_msg.edit(
-            embed=discord.Embed(
-                title="❌ Simulation Error",
-                description=f"**Simulation Error: {err_name}**\n{result.get('error', '')}",
-                color=0xFF4136,
-            )
+            embed=discord.Embed(title="❌ Error", description=str(err_msg), color=0xFF4136)
         )
         return
 
-    if "error" in result:
-        await thinking_msg.edit(
-            embed=discord.Embed(
-                title="❌ Error",
-                description=result["error"],
-                color=0xFF4136,
-            )
-        )
-        return
-
+    # Build and deliver the result embed
+    logger.info(f"[grade] Building embed for {player_name}...")
     try:
         embed = build_result_embed(player_name, line_val, stat_type, result)
-        await thinking_msg.edit(embed=embed)
-        logger.info(f"Grade delivered for {player_name} {line_val} {stat_type}")
+        # Delete the progress message and send a fresh one (triggers notification)
+        try:
+            await thinking_msg.delete()
+        except Exception:
+            pass
+        await ctx.reply(embed=embed, mention_author=False)
+        logger.info(f"[grade] ✅ Grade delivered — {player_name} {line_val} {stat_type} "
+                    f"over={result.get('over_prob')}% grade={result.get('grade')}")
     except Exception as e:
-        logger.error(f"Embed build/send failed ({type(e).__name__}): {e}", exc_info=True)
-        await thinking_msg.edit(
+        logger.error(f"[grade] Embed failed ({type(e).__name__}): {e}", exc_info=True)
+        await ctx.send(
             embed=discord.Embed(
                 title="❌ Display Error",
-                description=f"Analysis completed but failed to display results.\n```{type(e).__name__}: {str(e)[:300]}```",
+                description=f"Analysis done but display failed.\n```{type(e).__name__}: {str(e)[:300]}```",
                 color=0xFF4136,
             )
         )
