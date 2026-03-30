@@ -343,9 +343,13 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         if len(maps) < 2:
             continue  # Not enough map data — skip
 
-        # Take maps 1 and 2 only
+        # Take maps 1 and 2 only — store dicts so simulator has stat_value + match_id
         for m in maps[:2]:
-            map_kills.append(m['kills'])
+            map_kills.append({
+                'stat_value': m['kills'],
+                'rounds': 22,        # CS2 default; exact round count not on match page
+                'match_id': match_id,
+            })
 
         bo3_series_count += 1
         logger.info(
@@ -360,8 +364,9 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         )
 
     import statistics
-    mean = statistics.mean(map_kills)
-    std = statistics.stdev(map_kills) if len(map_kills) > 1 else 4.0
+    kill_values = [m['stat_value'] for m in map_kills]
+    mean = statistics.mean(kill_values)
+    std = statistics.stdev(kill_values) if len(kill_values) > 1 else 4.0
     std = max(std, 2.0)  # floor to avoid degenerate distributions
 
     return {
@@ -424,14 +429,16 @@ def get_player_info_fallback(player_name: str, stat_type: str = "Kills") -> dict
 
     std = rng.uniform(3.5, 5.5)
     n = 20  # simulate 20 map samples (10 BO3 series × 2 maps)
+    raw_kills = [max(5, int(rng.gauss(base_mean, std))) for _ in range(n)]
+    # Store as dicts to match the live scraper format expected by the simulator
     map_kills = [
-        max(5, int(rng.gauss(base_mean, std)))
-        for _ in range(n)
+        {'stat_value': k, 'rounds': 22, 'match_id': f'fallback_{i // 2}'}
+        for i, k in enumerate(raw_kills)
     ]
 
     import statistics
-    mean = statistics.mean(map_kills)
-    real_std = statistics.stdev(map_kills)
+    mean = statistics.mean(raw_kills)
+    real_std = statistics.stdev(raw_kills)
 
     return {
         'player': player_name,

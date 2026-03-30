@@ -354,7 +354,7 @@ def _analyze_player(
         player_id   = info.get("player_id")   if not used_fallback else None
         player_slug = info.get("player_slug")  if not used_fallback else None
         match_ids   = info.get("match_ids", []) if not used_fallback else []
-        baseline_avg = info.get("mean", sum(map_stats) / len(map_stats)) if map_stats else 0
+        baseline_avg = info.get("mean", sum(m["stat_value"] for m in map_stats) / len(map_stats)) if map_stats else 0
 
         if player_id and player_slug:
             try:
@@ -369,7 +369,7 @@ def _analyze_player(
                 )
                 if deep and not deep.get("error"):
                     adj = deep["combined_multiplier"]
-                    map_stats = [round(k * adj, 2) for k in map_stats]
+                    map_stats = [{**m, "stat_value": round(m["stat_value"] * adj, 2)} for m in map_stats]
                     total_pct = round((adj - 1) * 100, 1)
                     sign = "+" if total_pct >= 0 else ""
                     logger.info(
