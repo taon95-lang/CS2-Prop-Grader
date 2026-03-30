@@ -178,12 +178,11 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
 
     # Aggregation buckets
     opp_kills: list[int] = []          # kills scored AGAINST target team per player per map
+    star_kills: list[int] = []         # top-killer's count per map (star suppression metric)
     ct_wins, ct_total = 0, 0           # target team's CT rounds won / played
     t_wins, t_total   = 0, 0           # target team's T rounds won / played
     map_counter: dict[str, int] = {}
     rounds_per_map: list[int] = []
-
-    soup_cache = BeautifulSoup('', 'html.parser')  # dummy, reused per page
 
     for match_id, slug in match_list:
         time.sleep(0.35)
@@ -194,7 +193,7 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
         soup = BeautifulSoup(page_html, 'html.parser')
         matchstats = soup.find(id='match-stats')
 
-        # --- Kill data ---
+        # --- Kill data + star suppression ---
         if matchstats:
             raw = str(matchstats)
             map_ids = re.findall(r'id="(\d{5,7})-content"', raw)
@@ -205,13 +204,18 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
                 tables = content.find_all('table', class_='totalstats')
                 for table in tables:
                     if table.find('a', href=re.compile(rf'/team/{team_id}/')):
-                        continue  # skip target team table; want opponent kills
+                        continue  # skip target team; collect opponent's kills
+                    map_kills_this_table: list[int] = []
                     for tr in table.find_all('tr')[1:]:
                         m = re.search(r'(\d+)\s*-\s*\d+', tr.get_text())
                         if m:
                             k = int(m.group(1))
                             if 3 <= k <= 60:
                                 opp_kills.append(k)
+                                map_kills_this_table.append(k)
+                    # Star suppression: track the highest kill by any player per map
+                    if map_kills_this_table:
+                        star_kills.append(max(map_kills_this_table))
 
         # --- CT/T half scores ---
         half_scores = _extract_half_scores(page_html)
@@ -231,7 +235,8 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
             map_counter[name] = map_counter.get(name, 0) + 1
 
     # Compile results
-    avg_allowed = round(_stats.mean(opp_kills), 1) if len(opp_kills) >= 5 else None
+    avg_allowed   = round(_stats.mean(opp_kills),  1) if len(opp_kills)  >= 5 else None
+    avg_star_kill = round(_stats.mean(star_kills), 1) if len(star_kills) >= 3 else None
     ct_pct = round(ct_wins / ct_total * 100, 1) if ct_total > 0 else None
     t_pct  = round(t_wins  / t_total  * 100, 1) if t_total  > 0 else None
     avg_rounds = round(_stats.mean(rounds_per_map), 1) if rounds_per_map else 22.0
@@ -242,6 +247,8 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
 
     data = {
         'avg_kills_allowed': avg_allowed,
+        'avg_star_kill':     avg_star_kill,   # top-killer per map average
+        'star_suppression':  (avg_star_kill is not None and avg_star_kill < 15.0),
         'sample_kills': len(opp_kills),
         'ct_win_pct': ct_pct,
         't_win_pct':  t_pct,
@@ -312,39 +319,30 @@ def run_deep_analysis(
     opponent_name: str,
     stat_type: str,
     baseline_avg: float,
+    line: float = 0.0,
 ) -> dict:
     """
     Orchestrate all analysis dimensions.
 
-    Returns a dict:
-      {
-        'opponent_display':    'Natus Vincere',
-        'combined_multiplier': 0.93,
-        'components': { 'defensive': 0.89, 'rank': 1.04, 'map': 1.07, 'h2h': 0.98, 'hs_vuln': 1.0 },
-
-        'defensive_profile':   { avg_kills_allowed, label, ct_win_pct, t_win_pct, ... },
-        'rank_info':           { player_rank, opp_rank, label, stomp_risk },
-        'map_pool':            { most_played, least_played, map_label },
-        'h2h':                 [ {avg_kills, kills_by_map, match_id}, ... ],
-        'h2h_label':           '✅ Farms This Team',
-        'hs_vulnerability':    { label, modifier },
-        'summary_bullets':     [ str, ... ],
-
-        'error':               None | str,  (set only if critical failure)
-      }
+    Returns a dict including a 'scouting' sub-dict with:
+      - hs_vulnerability:  { rating, label, pct_proxy }
+      - role_suppression:  { avg_star_kill, label, clamp_active }
+      - h2h_line:          { matches_cleared, of_n, matchup_favorite }
     """
     out: dict = {
-        'opponent_display':    None,
-        'combined_multiplier': 1.0,
-        'components':          {},
-        'defensive_profile':   {},
-        'rank_info':           {},
-        'map_pool':            {},
-        'h2h':                 [],
-        'h2h_label':           'No H2H data',
-        'hs_vulnerability':    {},
-        'summary_bullets':     [],
-        'error':               None,
+        'opponent_display':       None,
+        'combined_multiplier':    1.0,
+        'components':             {},
+        'defensive_profile':      {},
+        'rank_info':              {},
+        'map_pool':               {},
+        'h2h':                    [],
+        'h2h_label':              'No H2H data',
+        'hs_vulnerability':       {},
+        'scouting':               {},
+        'matchup_favorite_bonus': False,
+        'summary_bullets':        [],
+        'error':                  None,
     }
 
     # ── Find opponent team ──────────────────────────────────────────────────
@@ -520,41 +518,113 @@ def run_deep_analysis(
 
     out['h2h_label'] = h2h_label
 
-    # ── [F] HS Vulnerability Index ────────────────────────────────────────────
-    hs_adj   = 1.0
-    hs_label = 'N/A (Kills prop)'
+    # ── [F] Role Suppression / Defensive Clamp ───────────────────────────────
+    avg_star_kill  = opp_data.get('avg_star_kill')
+    star_clamp     = opp_data.get('star_suppression', False)
+    clamp_label    = '❓ No Data'
+    clamp_active   = False
+
+    if avg_star_kill is not None:
+        if star_clamp:  # avg star kill < 15
+            clamp_active = True
+            # Express -1.5 kills as a multiplicative factor relative to baseline
+            if baseline_avg > 1.5:
+                clamp_factor = (baseline_avg - 1.5) / baseline_avg
+                clamp_factor = max(0.80, round(clamp_factor, 4))
+            else:
+                clamp_factor = 0.88
+            components['star_clamp'] = clamp_factor
+            combined *= clamp_factor
+            clamp_label = f"⚠️ Defensive Clamp (avg top killer held to {avg_star_kill}K/map)"
+            bullets.append(
+                f"Opponent clamps star players — avg top kill {avg_star_kill}/map "
+                f"(↓1.5K projection applied)"
+            )
+        elif avg_star_kill >= 22:
+            clamp_label = f"✅ Star-Friendly — top killers avg {avg_star_kill}K/map"
+        elif avg_star_kill >= 18:
+            clamp_label = f"⚖️ Average Suppression — top killers avg {avg_star_kill}K/map"
+        else:
+            clamp_label = f"🛡️ Moderate Clamp — top killers avg {avg_star_kill}K/map"
+
+    # ── [G] HS Vulnerability Index (all props show rating; mult only for HS) ──
+    hs_adj      = 1.0
+    hs_rating   = '❓ No Data'
+    hs_pct_proxy = None
+
+    if avg_allowed is not None:
+        avg_rounds_val = opp_data.get('avg_rounds_per_map', 22.0) or 22.0
+        # HS proxy: kills allowed per round × 100; typical is ~40-50%
+        # We bucket: ≥21 kills/map ≈ "50%+ HS rate" (High); ≤15 ≈ "<42%" (Low)
+        if avg_allowed >= 21:
+            hs_rating    = '💀 High Vulnerability (50%+ HS rate proxy)'
+            hs_pct_proxy = '50%+'
+        elif avg_allowed >= 18:
+            hs_rating    = '⚠️ Moderate Vulnerability (42–50% proxy)'
+            hs_pct_proxy = '42–50%'
+        elif avg_allowed >= 15:
+            hs_rating    = '⚖️ Average (38–42% proxy)'
+            hs_pct_proxy = '38–42%'
+        else:
+            hs_rating    = '🛡️ Utility Heavy / Low Vulnerability (<38% proxy)'
+            hs_pct_proxy = '<38%'
 
     if stat_type in ('HS', 'hs'):
+        # Apply multiplier only for HS props
         if avg_allowed is not None:
             if avg_allowed >= 21:
-                hs_adj   = 1.12
-                hs_label = '💀 Frag Mine — High Vulnerability (50%+ HS rate proxy)'
+                hs_adj = 1.12
                 bullets.append("Opponent is HS-vulnerable — boosting HS projection (↑12%)")
             elif avg_allowed >= 19:
-                hs_adj   = 1.04
-                hs_label = '⚠️ Moderate HS Vulnerability'
+                hs_adj = 1.04
                 bullets.append("Moderate HS vulnerability detected (↑4%)")
             elif avg_allowed <= 15:
-                hs_adj   = 0.92
-                hs_label = '🛡️ Low HS Vulnerability'
-                bullets.append("Opponent gives up few kills — HS projection down (↓8%)")
-            else:
-                hs_label = '⚖️ Average HS Vulnerability'
-
-            # T-side aggression bonus for entry fraggers (HS prop)
+                hs_adj = 0.92
+                bullets.append("Opponent utility-heavy — HS projection down (↓8%)")
+            # T-side aggression bonus for entry fraggers
             if t_pct and t_pct >= 55:
                 hs_adj = min(1.25, hs_adj * 1.10)
-                bullets.append("Aggressive T-side feeds entry kills → +10% HS bonus for Entry fraggers")
-        else:
-            hs_label = '❓ Insufficient data'
-
+                bullets.append("Aggressive T-side feeds opening kills → +10% HS bonus")
         if hs_adj != 1.0:
             components['hs_vulnerability'] = round(hs_adj, 4)
         combined *= hs_adj
 
-    out['hs_vulnerability'] = {
-        'label':    hs_label,
-        'modifier': round(hs_adj, 4),
+    out['hs_vulnerability'] = {'label': hs_rating, 'modifier': round(hs_adj, 4)}
+
+    # ── [H] H2H line clearing — Matchup Favorite check ───────────────────────
+    h2h_cleared   = 0
+    h2h_of_n      = min(2, len(h2h))
+    matchup_fav   = False
+
+    if h2h and line > 0:
+        for rec in h2h[:2]:
+            total = sum(rec.get('kills_by_map', []))
+            if total >= line:
+                h2h_cleared += 1
+        matchup_fav = (h2h_cleared >= 2)
+        if matchup_fav:
+            bullets.append(
+                f"Matchup Favorite: cleared {line} line in both recent H2H matches → +5% Over"
+            )
+
+    out['matchup_favorite_bonus'] = matchup_fav
+
+    # ── Build Opponent Scouting block ─────────────────────────────────────────
+    out['scouting'] = {
+        'hs_vulnerability': {
+            'rating':    hs_rating,
+            'pct_proxy': hs_pct_proxy,
+        },
+        'role_suppression': {
+            'avg_star_kill': avg_star_kill,
+            'label':         clamp_label,
+            'clamp_active':  clamp_active,
+        },
+        'h2h_line': {
+            'matches_cleared':   h2h_cleared,
+            'of_n':              h2h_of_n,
+            'matchup_favorite':  matchup_fav,
+        },
     }
 
     # ── Final clamp ───────────────────────────────────────────────────────────
@@ -567,6 +637,6 @@ def run_deep_analysis(
     sign = '+' if total_pct >= 0 else ''
     logger.info(
         f"[deep_analysis] {opp_display}: multiplier={combined} ({sign}{total_pct}%) "
-        f"components={components}"
+        f"components={components} matchup_fav={matchup_fav}"
     )
     return out

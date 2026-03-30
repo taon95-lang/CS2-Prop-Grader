@@ -365,6 +365,7 @@ def _analyze_player(
                     opponent_name=opponent,
                     stat_type=stat_type,
                     baseline_avg=baseline_avg,
+                    line=line,
                 )
                 if deep and not deep.get("error"):
                     adj = deep["combined_multiplier"]
@@ -405,6 +406,19 @@ def _analyze_player(
     sim_result["player_name"] = player_name
     sim_result["line"] = line
     sim_result["deep"] = deep  # full deep analysis dict or None
+
+    # Apply +5% Over bonus for confirmed matchup favorites
+    if deep and deep.get("matchup_favorite_bonus"):
+        over_p  = sim_result.get("over_prob",  50)
+        under_p = sim_result.get("under_prob", 50)
+        push_p  = sim_result.get("push_prob",   0)
+        sim_result["over_prob"]  = min(95, over_p + 5)
+        sim_result["under_prob"] = max(5,  under_p - 5)
+        sim_result["push_prob"]  = push_p  # unchanged
+        # Recalculate edge if present
+        if "edge" in sim_result:
+            sim_result["edge"] = round(sim_result["over_prob"] - 50, 1)
+
     return sim_result
 
 
@@ -450,11 +464,12 @@ def build_result_embed(
             return f"`{label}` {s}{p}%"
 
         comp_parts = list(filter(None, [
-            fmt_comp("defensive",      "Defense"),
-            fmt_comp("t_side",         "T-Side"),
-            fmt_comp("rank",           "Ranking"),
-            fmt_comp("map_pool",       "Map Pool"),
-            fmt_comp("h2h",            "H2H"),
+            fmt_comp("defensive",       "Defense"),
+            fmt_comp("t_side",          "T-Side"),
+            fmt_comp("rank",            "Ranking"),
+            fmt_comp("map_pool",        "Map Pool"),
+            fmt_comp("h2h",             "H2H"),
+            fmt_comp("star_clamp",      "Role Clamp"),
             fmt_comp("hs_vulnerability","HS Vuln"),
         ]))
 
@@ -529,14 +544,37 @@ def build_result_embed(
             inline=False,
         )
 
-        # HS Vulnerability (only for HS props)
-        hs_info = deep.get("hs_vulnerability", {})
-        if hs_info.get("label") and hs_info["label"] != "N/A (Kills prop)":
-            embed.add_field(
-                name="💥 HS Vulnerability Index",
-                value=f"**{hs_info['label']}**\nModifier: `×{hs_info['modifier']}`",
-                inline=True,
-            )
+        # ── 🛡️ Opponent Scouting ──────────────────────────────────────────────
+        scouting = deep.get("scouting", {})
+        hs_sc   = scouting.get("hs_vulnerability", {})
+        role_sc = scouting.get("role_suppression", {})
+        h2h_sc  = scouting.get("h2h_line", {})
+
+        hs_line = hs_sc.get("rating") or "❓ No Data"
+        if hs_sc.get("pct_proxy"):
+            hs_line += f"  `({hs_sc['pct_proxy']})`"
+
+        role_line = role_sc.get("label") or "❓ No Data"
+
+        cleared   = h2h_sc.get("matches_cleared", 0)
+        of_n      = h2h_sc.get("of_n", 0)
+        fav       = h2h_sc.get("matchup_favorite", False)
+        if of_n > 0:
+            h2h_line_txt = f"`{cleared}/{of_n}` H2H matches cleared `{line}` line"
+            if fav:
+                h2h_line_txt += "  ✅ **+5% Over bonus applied**"
+        else:
+            h2h_line_txt = "_No H2H data for line check_"
+
+        embed.add_field(
+            name="🛡️ Opponent Scouting",
+            value=(
+                f"**HS Vulnerability:** {hs_line}\n"
+                f"**Role Suppression:** {role_line}\n"
+                f"**H2H vs Line:** {h2h_line_txt}"
+            ),
+            inline=False,
+        )
 
     n_series = result.get("n_series", 0)
     n_maps = result.get("n_samples", 0)
