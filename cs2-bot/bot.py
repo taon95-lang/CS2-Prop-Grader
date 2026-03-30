@@ -223,8 +223,19 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         )
         return
 
-    embed = build_result_embed(player_name, line_val, stat_type, result)
-    await thinking_msg.edit(embed=embed)
+    try:
+        embed = build_result_embed(player_name, line_val, stat_type, result)
+        await thinking_msg.edit(embed=embed)
+        logger.info(f"Grade delivered for {player_name} {line_val} {stat_type}")
+    except Exception as e:
+        logger.error(f"Embed build/send failed ({type(e).__name__}): {e}", exc_info=True)
+        await thinking_msg.edit(
+            embed=discord.Embed(
+                title="❌ Display Error",
+                description=f"Analysis completed but failed to display results.\n```{type(e).__name__}: {str(e)[:300]}```",
+                color=0xFF4136,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +678,25 @@ def build_prob_bar(prob: float, length: int = 10) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Error handler for prefix commands
+# ---------------------------------------------------------------------------
+
+@bot.event
+async def on_command_error(ctx, error):
+    err_name = type(error).__name__
+    logger.error(f"Prefix command error ({err_name}): {error}", exc_info=True)
+    try:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Command Error",
+                description=f"**{err_name}:** {str(error)[:300]}",
+                color=0xFF4136,
+            )
+        )
+    except Exception:
+        pass
+
+
 # Error handler for app commands
 # ---------------------------------------------------------------------------
 
