@@ -126,8 +126,11 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     ]
     _STAGES = _STAGES_OPP if opponent else _STAGES_BASE
 
+    ETA = "~35s" if not opponent else "~45s"
+
     def _stage_embed(elapsed: int, stage_idx: int) -> discord.Embed:
-        bar = "▓" * min(10, elapsed // 8) + "░" * max(0, 10 - elapsed // 8)
+        filled = min(10, elapsed // 4)
+        bar = "▓" * filled + "░" * (10 - filled)
         matchup_line = f" vs **{opponent}**" if opponent else ""
         return discord.Embed(
             title="⚙️ Analyzing...",
@@ -135,7 +138,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
                 f"**Player:** {player_name}{matchup_line}\n"
                 f"**Prop:** {line_val} {stat_type}\n\n"
                 f"{_STAGES[stage_idx]}\n\n"
-                f"`[{bar}]` ⏱️ {elapsed}s elapsed"
+                f"`[{bar}]` ⏱️ {elapsed}s elapsed  _(ETA {ETA} — please wait)_"
             ),
             color=0x7289DA,
         )
@@ -176,14 +179,14 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
             )
             return
 
-        # Poll the future every 20 seconds; update the embed on each tick
+        # Poll the future every 5 seconds; update the embed on each tick
         try:
-            result = await asyncio.wait_for(asyncio.shield(fut), timeout=20)
+            result = await asyncio.wait_for(asyncio.shield(fut), timeout=5)
             break  # Analysis finished — exit the loop
         except asyncio.TimeoutError:
             # Still running — update the progress embed
             elapsed = int(_time.monotonic() - start)
-            stage_idx = min(len(_STAGES) - 1, elapsed // 25)
+            stage_idx = min(len(_STAGES) - 1, elapsed // 15)
             try:
                 await thinking_msg.edit(embed=_stage_embed(elapsed, stage_idx))
             except Exception:
