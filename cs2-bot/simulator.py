@@ -132,6 +132,7 @@ def run_simulation(
     # --- Map-Weighted Projection ---
     map_projection_note = "Overall average"
     avg_kpr = mean(kpr_values) if kpr_values else (mean(stat_values) / 22)
+    overall_avg_kpr = avg_kpr  # preserve pre-map-weighted baseline for trend calc
 
     if likely_maps:
         weighted: list = []
@@ -145,7 +146,28 @@ def run_simulation(
             avg_kpr = mean(weighted)
             map_projection_note = f"Map-weighted ({', '.join(matched_maps)})"
 
-    expected_total = avg_kpr * total_projected_rounds
+    # --- Recency Weighting (60% recent / 40% historical) ---
+    # kpr_values are ordered newest-first (scraper fetches results in reverse chron order)
+    # Take the most recent 4 map samples (~2 series) as "recent form"
+    n_kpr = len(kpr_values)
+    recent_n = max(2, min(4, n_kpr // 3 + 1))
+    recent_kpr_vals = kpr_values[:recent_n] if n_kpr >= recent_n else kpr_values
+    recent_avg_kpr = mean(recent_kpr_vals)
+
+    # Blend: 60% recent form, 40% map-weighted (or overall) avg
+    blended_kpr = 0.60 * recent_avg_kpr + 0.40 * avg_kpr
+
+    # Trend signal (vs overall average, not map-weighted)
+    trend_pct = round((recent_avg_kpr - overall_avg_kpr) / max(overall_avg_kpr, 0.01) * 100, 1)
+    recent_avg_kills = round(recent_avg_kpr * 22, 1)  # per-map kills equivalent
+    if trend_pct >= 12:
+        trend_label = f"📈 Hot Form (+{trend_pct:.0f}% vs avg)"
+    elif trend_pct <= -12:
+        trend_label = f"📉 Cold Form ({trend_pct:.0f}% vs avg)"
+    else:
+        trend_label = f"➡️ Neutral ({trend_pct:+.0f}% vs avg)"
+
+    expected_total = blended_kpr * total_projected_rounds
 
     # --- NB Fit + Simulation ---
     r_param, p_param = fit_negative_binomial(per_map_values)
@@ -201,6 +223,7 @@ def run_simulation(
         favorite_prob=favorite_prob,
         stat_type=stat_type,
         stability_std=stability_std,
+        trend_pct=trend_pct,
     )
 
     return {
@@ -239,6 +262,11 @@ def run_simulation(
         "stomp_via_rank":         stomp_via_rank,
         "close_via_rank":         close_via_rank,
         "rank_gap":               rank_gap,
+        # --- Recency / trend ---
+        "trend_pct":              trend_pct,
+        "trend_label":            trend_label,
+        "recent_avg_kills":       recent_avg_kills,
+        "recent_n_maps":          recent_n,
     }
 
 
@@ -252,6 +280,7 @@ def calculate_grade(
     favorite_prob: float,
     stat_type: str,
     stability_std: float = 0.0,
+    trend_pct: float = 0.0,
 ) -> tuple:
     """
     Apply grading scale and decision logic.
@@ -263,18 +292,29 @@ def calculate_grade(
     median_above = hist_median > line
     strong_hit_rate = hit_rate >= 0.60
     weak_hit_rate = hit_rate < 0.40
+    hot_form  = trend_pct >= 12   # recent 4 maps running 12%+ above average
+    cold_form = trend_pct <= -12  # recent 4 maps running 12%+ below average
 
     if avg_above and median_above and strong_hit_rate and not stomp_trap:
         decision = "OVER"
-    elif not avg_above and not median_above and weak_hit_rate:
+    elif not avg_above and not median_above and weak_hit_rate and not hot_form:
+        # Don't call UNDER if player is trending hot — could be a line timing issue
         decision = "UNDER"
     elif stomp_trap and avg_above:
         decision = "PASS"
     else:
-        # Edge-based decision
-        if edge > 0.08:
+        # Edge-based decision — lower threshold when trend confirms direction
+        over_threshold  = 0.05 if hot_form  else 0.08
+        under_threshold = 0.05 if cold_form else 0.08
+        if edge > over_threshold:
             decision = "OVER"
-        elif edge < -0.08:
+        elif edge < -under_threshold:
+            decision = "UNDER"
+        elif hot_form and edge >= 0:
+            # Player on a hot streak and edge is non-negative → lean OVER
+            decision = "OVER"
+        elif cold_form and edge <= 0:
+            # Player on a cold streak and edge is non-positive → lean UNDER
             decision = "UNDER"
         elif abs(line - hist_avg) / max(hist_avg, 1) > 0.12:
             decision = "MISPRICED"

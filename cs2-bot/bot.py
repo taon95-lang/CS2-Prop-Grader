@@ -686,6 +686,23 @@ def build_result_embed(
         inline=False,
     )
 
+    # ── 🔥 Recent Form ────────────────────────────────────────────────────────
+    trend_label      = result.get("trend_label", "➡️ Neutral")
+    recent_avg_kills = result.get("recent_avg_kills", "N/A")
+    recent_n_maps    = result.get("recent_n_maps", 4)
+    trend_pct        = result.get("trend_pct", 0)
+    hist_avg_kills   = round(result.get("hist_avg", 0) / 2, 1)  # per-map from series total
+    embed.add_field(
+        name="🔥 Recent Form",
+        value=(
+            f"**Trend:** {trend_label}\n"
+            f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` kills/map\n"
+            f"**Overall avg per map:** `{hist_avg_kills}` kills/map\n"
+            f"_Simulation is 60% weighted to recent form_"
+        ),
+        inline=False,
+    )
+
     embed.add_field(
         name="📊 Historical Stats (2-map totals)",
         value=(
