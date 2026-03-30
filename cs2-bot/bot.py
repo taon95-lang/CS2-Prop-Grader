@@ -422,6 +422,14 @@ def _analyze_player(
     sim_result["line"] = line
     sim_result["deep"] = deep
 
+    # If using estimated fallback data — override to PASS, never make directional calls
+    # on invented stats. The grade stays for context but direction is unreliable.
+    if used_fallback:
+        sim_result["decision"] = "PASS"
+        sim_result["recommendation"] = "⚠️ PASS — Using estimated stats (HLTV unavailable)"
+        sim_result["grade"] = "N/A"
+        logger.info(f"[grade] Fallback data → forced PASS for {player_name}")
+
     # Apply +5% Over bonus for confirmed matchup favorites
     if deep and deep.get("matchup_favorite_bonus"):
         over_p  = sim_result.get("over_prob",  50)

@@ -154,8 +154,8 @@ def run_simulation(
     recent_kpr_vals = kpr_values[:recent_n] if n_kpr >= recent_n else kpr_values
     recent_avg_kpr = mean(recent_kpr_vals)
 
-    # Blend: 60% recent form, 40% map-weighted (or overall) avg
-    blended_kpr = 0.60 * recent_avg_kpr + 0.40 * avg_kpr
+    # Blend: 70% recent form, 30% map-weighted (or overall) avg
+    blended_kpr = 0.70 * recent_avg_kpr + 0.30 * avg_kpr
 
     # Trend signal (vs overall average, not map-weighted)
     trend_pct = round((recent_avg_kpr - overall_avg_kpr) / max(overall_avg_kpr, 0.01) * 100, 1)
@@ -290,10 +290,11 @@ def calculate_grade(
     stomp_trap = favorite_prob >= 0.72 and stat_type == "Kills"
     avg_above = hist_avg > line
     median_above = hist_median > line
-    strong_hit_rate = hit_rate >= 0.60
-    weak_hit_rate = hit_rate < 0.40
     hot_form  = trend_pct >= 12   # recent 4 maps running 12%+ above average
     cold_form = trend_pct <= -12  # recent 4 maps running 12%+ below average
+    # Sportsbooks shade lines slightly low — lower OVER bar, tighten UNDER bar
+    strong_hit_rate = hit_rate >= 0.55   # was 0.60
+    weak_hit_rate   = hit_rate < 0.35    # was 0.40 — need stronger evidence for UNDER
 
     if avg_above and median_above and strong_hit_rate and not stomp_trap:
         decision = "OVER"
