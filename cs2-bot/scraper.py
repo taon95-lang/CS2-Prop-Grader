@@ -188,9 +188,11 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
     team_scores = re.findall(r'>\s*(\d)\s*<', html[:50000])
     bo_type = 1
     if team_scores:
-        max_score = max(int(s) for s in team_scores if int(s) <= 3)
-        if max_score >= 2:
-            bo_type = 3
+        filtered = [int(s) for s in team_scores if int(s) <= 3]
+        if filtered:
+            max_score = max(filtered)
+            if max_score >= 2:
+                bo_type = 3
 
     matchstats = soup.find(id='match-stats')
     if not matchstats:
