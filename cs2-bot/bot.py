@@ -154,7 +154,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     )
 
     start = _time.monotonic()
-    TOTAL_TIMEOUT = 150  # ScraperAPI render can take up to 70s + sim time
+    TOTAL_TIMEOUT = 150  # HLTV scraping (multiple pages) + simulation time
     result = None
 
     while True:
