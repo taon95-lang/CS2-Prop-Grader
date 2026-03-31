@@ -80,14 +80,21 @@ def _rotate_session() -> "_cffi_req.Session | None":
     """
     Drop the current session and open a new one using the next profile in the
     rotation list.  Called when the current profile starts returning 403.
+
+    Also resets the stats-page circuit-breaker so the new profile gets a clean
+    chance to reach /stats/matches/mapstatsid/ pages (they may be accessible
+    under a profile that the previous one couldn't use).
     """
     global _HLTV_SESSION, _HLTV_SESSION_WARMED, _HLTV_SESSION_PROFILE, _profile_idx
+    global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
     _profile_idx = (_profile_idx + 1) % len(_PROFILES)
     new_profile = _PROFILES[_profile_idx]
     logger.warning(f"[session] Rotating profile → {new_profile}")
     _HLTV_SESSION = _make_session(new_profile)
     _HLTV_SESSION_PROFILE = new_profile
-    _HLTV_SESSION_WARMED = False   # re-warm with the new session
+    _HLTV_SESSION_WARMED = False        # re-warm homepage with new session
+    _STATS_SESSION_WARMED = False       # re-warm stats referer with new session
+    _STATS_PAGES_BLOCKED = False        # give stats pages a fresh chance
     return _HLTV_SESSION
 
 
@@ -299,42 +306,59 @@ def _warm_stats_session(match_url: str) -> bool:
 
 def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     """
-    Attempt to fetch an HLTV /stats/matches/mapstatsid/ page using a
-    cookie-warmed session.  Returns HTML string or None on failure.
+    Attempt to fetch an HLTV /stats/matches/mapstatsid/ page.
 
-    A module-level circuit-breaker (_STATS_PAGES_BLOCKED) stops retrying
-    after the first confirmed 403, so we never waste time on pages that
-    are blocked in this environment.
+    On the first 403 we rotate the session profile (same logic as _fetch) and
+    retry once.  Only if BOTH attempts 403 do we trip the circuit-breaker.
+    This prevents a stale profile from permanently blocking real HS counts.
     """
     global _STATS_PAGES_BLOCKED
     if _STATS_PAGES_BLOCKED:
         return None
-    sess = _get_stats_session()
-    if sess is None:
-        return None
-    _warm_stats_session(match_url)
-    try:
-        logger.info(f"[stats_fetch] GET {stats_url}")
-        resp = sess.get(
-            stats_url,
-            headers={"Referer": match_url},
-            timeout=12,  # shorter timeout so blocked requests don't stall the bot
-        )
-        if resp.status_code == 200 and len(resp.text) > 5000 and "Just a moment" not in resp.text:
-            logger.info(f"[stats_fetch] OK — {len(resp.text):,} chars")
-            return resp.text
-        if resp.status_code == 403:
-            logger.warning(
-                "[stats_fetch] 403 received — stats pages are Cloudflare-blocked in this "
-                "environment. Activating circuit-breaker; HS will use calibrated fallback rates."
+
+    for attempt in range(2):   # attempt 0 = current profile, attempt 1 = rotated profile
+        sess = _get_stats_session()
+        if sess is None:
+            return None
+        _warm_stats_session(match_url)
+        try:
+            logger.info(
+                f"[stats_fetch] GET {stats_url} [{_HLTV_SESSION_PROFILE}]"
+                + (" (retry after rotate)" if attempt else "")
             )
-            _STATS_PAGES_BLOCKED = True
-        else:
-            logger.warning(f"[stats_fetch] status={resp.status_code} len={len(resp.text)} — skipping")
-        return None
-    except Exception as e:
-        logger.warning(f"[stats_fetch] {type(e).__name__}: {e}")
-        return None
+            resp = sess.get(
+                stats_url,
+                headers={"Referer": match_url},
+                timeout=12,
+            )
+            if resp.status_code == 200 and len(resp.text) > 5000 and "Just a moment" not in resp.text:
+                logger.info(f"[stats_fetch] OK — {len(resp.text):,} chars [{_HLTV_SESSION_PROFILE}]")
+                return resp.text
+            if resp.status_code == 403:
+                if attempt == 0:
+                    logger.warning(
+                        f"[stats_fetch] 403 on profile={_HLTV_SESSION_PROFILE} — "
+                        "rotating and retrying"
+                    )
+                    _rotate_session()
+                    time.sleep(0.8)
+                    continue
+                # Both profiles returned 403 — trip the circuit-breaker
+                logger.warning(
+                    "[stats_fetch] 403 on both profiles — activating circuit-breaker. "
+                    "HS will use calibrated fallback rates for this session."
+                )
+                _STATS_PAGES_BLOCKED = True
+            else:
+                logger.warning(
+                    f"[stats_fetch] status={resp.status_code} len={len(resp.text)} — skipping"
+                )
+            return None
+        except Exception as e:
+            logger.warning(f"[stats_fetch] {type(e).__name__}: {e} [{_HLTV_SESSION_PROFILE}]")
+            return None
+
+    return None
 
 
 def _parse_map_stats_hs(html: str, player_slug: str) -> tuple[int | None, int | None]:

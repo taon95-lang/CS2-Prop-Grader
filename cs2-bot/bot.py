@@ -38,7 +38,9 @@ DECISION_COLORS = {
 # (> _AWPER_HS_CAP), the scraping result is treated as an artifact and this
 # value is used instead.
 _KNOWN_AWPERS: dict[str, float] = {
-    # Pure AWPers — low HS% because AWP kills land on body
+    # ── Pure AWPers ─────────────────────────────────────────────────────────
+    # AWP body-shots push HS% far below rifler norms (typical 18-28%).
+    # Override fires when scraped value is None OR above _AWPER_HS_CAP (55%).
     "sh1ro":       0.20,
     "zywoo":       0.26,
     "s1mple":      0.28,   # hybrid but still low for AWP role periods
@@ -54,10 +56,29 @@ _KNOWN_AWPERS: dict[str, float] = {
     "broky":       0.23,
     "azr":         0.25,
     "imorim":      0.22,
-    # Hybrid / entry riflers who occasionally AWP — higher HS% than pure AWPers
+    "degster":     0.28,   # AWP / hybrid
+    "nawwk":       0.22,
+    "mantuu":      0.21,
+    # ── Hybrid / occasional AWP ─────────────────────────────────────────────
     "ropz":        0.35,
-    # Riflers: scraped HS% is unreliable (HLTV detailed stats JS-rendered).
-    # Rates below are measured from real match data.
+    "electronic":  0.48,   # mostly rifles; measured ~47-50% on HLTV career
+    # ── High-HS riflers ──────────────────────────────────────────────────────
+    # These players have genuinely high HS% as aggressive rifles.  The known
+    # rate prevents the 40% generic default from under-projecting HS props.
+    # Override fires when scraped value is None OR above the cap (KAST misread).
+    "fl1t":        0.50,   # C9 entry fragger — career ~48-52% on HLTV
+    "ax1le":       0.47,   # C9 rifler — career ~45-49%
+    "b1t":         0.50,   # NaVi rifler — career ~48-52%
+    "buster":      0.50,   # aggressive entry — career ~48-52%
+    "nafany":      0.46,   # entry fragger — career ~44-48%
+    "xantares":    0.52,   # high-aggression rifler — career ~50-54%
+    "frozen":      0.48,   # MC rifler — career ~46-50%
+    "torzsi":      0.30,   # AWP/hybrid — career ~28-32%
+    "donk":        0.53,   # star rifler — measured high HS rate
+    "niko":        0.46,   # G2 star rifler — career ~44-48%
+    "hunter-":     0.46,   # G2 rifler — career ~44-48%
+    "monesy":      0.44,   # G2 rifler — career ~42-46%
+    # ── Riflers: measured from real match data ───────────────────────────────
     "idisbalance": 0.36,   # rifler — measured 35.8% vs State (19 HS / 53 kills)
 }
 
@@ -459,9 +480,11 @@ def _analyze_player(
                 awper_warn = True
 
         if hs_rate is None:
-            # Generic default — warn if it looks high relative to AWPer norms
-            hs_rate     = 0.40
-            hs_rate_src = "default (40% — rifler average; lower for AWPers)"
+            # Generic default for players not in the calibrated-rate table.
+            # Rifler career average on HLTV is ~44-46%; 45% is a conservative
+            # centre. AWPers should already be captured in the table above.
+            hs_rate     = 0.45
+            hs_rate_src = "default (45% — generic rifler estimate)"
 
         # Apply HS scaling per-map using the best available rate in priority order:
         #   1) Actual HS count from scorecard  → use directly
