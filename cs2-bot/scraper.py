@@ -35,22 +35,94 @@ except ImportError:
     logger.warning("curl_cffi not available — install it for HLTV access")
 
 
-def _fetch(url: str) -> str | None:
-    """Fetch a URL using curl_cffi Chrome impersonation. Returns None on failure."""
+_FETCH_RETRY_DELAYS = [0.6, 1.5, 3.0]   # seconds between retries on 403/CF block
+
+
+def _fetch(url: str, max_retries: int = 3) -> str | None:
+    """
+    Fetch a URL using curl_cffi Chrome impersonation.
+    Retries up to max_retries times with increasing delays on 403 / CF block.
+    Returns None only after all retries are exhausted.
+    """
     if not _CFFI_OK:
         logger.warning(f"[fetch] curl_cffi not available, skipping {url}")
         return None
-    try:
-        logger.info(f"[fetch] GET {url}")
-        resp = _cffi_req.get(url, impersonate="chrome120", timeout=FETCH_TIMEOUT)
-        if resp.status_code == 200 and "Just a moment" not in resp.text:
-            logger.info(f"[fetch] OK — {len(resp.text):,} chars")
-            return resp.text
-        logger.warning(f"[fetch] status={resp.status_code} or CF block — skipping")
-        return None
-    except Exception as e:
-        logger.warning(f"[fetch] {type(e).__name__}: {e}")
-        return None
+
+    for attempt in range(max_retries):
+        try:
+            tag = f" (retry {attempt})" if attempt else ""
+            logger.info(f"[fetch] GET {url}{tag}")
+            resp = _cffi_req.get(url, impersonate="chrome120", timeout=FETCH_TIMEOUT)
+            if resp.status_code == 200 and "Just a moment" not in resp.text:
+                logger.info(f"[fetch] OK — {len(resp.text):,} chars")
+                return resp.text
+            # Non-200 or CF challenge
+            if attempt < max_retries - 1:
+                delay = _FETCH_RETRY_DELAYS[attempt]
+                logger.warning(
+                    f"[fetch] status={resp.status_code} — "
+                    f"retrying in {delay}s (attempt {attempt+1}/{max_retries})"
+                )
+                time.sleep(delay)
+            else:
+                logger.warning(f"[fetch] status={resp.status_code} or CF block — giving up")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                delay = _FETCH_RETRY_DELAYS[attempt]
+                logger.warning(f"[fetch] {type(e).__name__}: {e} — retrying in {delay}s")
+                time.sleep(delay)
+            else:
+                logger.warning(f"[fetch] {type(e).__name__}: {e}")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Player ID cache — avoids re-running HLTV search on every command
+# ---------------------------------------------------------------------------
+# Pre-seeded with verified HLTV IDs for commonly graded CS2 players.
+# Keys are lowercase normalised nicknames for robust matching.
+# Cache grows automatically when new players are successfully looked up.
+
+_PLAYER_ID_CACHE: dict[str, tuple[str, str, str]] = {
+    # key            player_id   slug              display_name
+    "lake":         ("22921",   "lake",            "Lake"),
+    "zywoo":        ("11893",   "zywoo",           "ZywOo"),
+    "donk":         ("21202",   "donk",            "donk"),
+    "niko":         ("3741",    "niko",            "NiKo"),
+    "m0nesy":       ("18943",   "m0nesy",          "m0NESY"),
+    "sh1ro":        ("15096",   "sh1ro",           "sh1ro"),
+    "b1t":          ("18936",   "b1t",             "b1t"),
+    "simple":       ("7998",    "simple",          "s1mple"),
+    "s1mple":       ("7998",    "simple",          "s1mple"),
+    "twistzz":      ("10394",   "twistzz",         "Twistzz"),
+    "elige":        ("9816",    "elige",           "EliGE"),
+    "ropz":         ("11816",   "ropz",            "ropz"),
+    "yekindar":     ("16957",   "yekindar",        "YEKINDAR"),
+    "naf":          ("9176",    "naf",             "NAF"),
+    "perfecto":     ("18872",   "perfecto",        "Perfecto"),
+    "electronic":   ("8649",    "electronic",      "electronic"),
+    "broky":        ("15513",   "broky",           "broky"),
+    "rain":         ("3728",    "rain",            "rain"),
+    "karrigan":     ("429",     "karrigan",        "karrigan"),
+    "frozen":       ("13586",   "frozen",          "frozen"),
+    "degster":      ("17072",   "degster",         "degster"),
+    "torzsi":       ("17376",   "torzsi",          "torzsi"),
+    "idisbalance":  ("22434",   "idisbalance",     "iDISBALANCE"),
+    "xant3r":       ("20838",   "xant3r",          "xant3r"),
+    "jl":           ("17668",   "jl",              "jL"),
+    "malbsmd":      ("21208",   "malbsmd",         "malbsMd"),
+    "grim":         ("14119",   "grim",            "Grim"),
+    "coldzera":     ("4344",    "coldzera",        "coldzera"),
+    "fallen":       ("2023",    "fallen",          "FalleN"),
+    "device":       ("1550",    "device",          "dev1ce"),
+    "dupreeh":      ("1291",    "dupreeh",         "dupreeh"),
+    "magisk":       ("9547",    "magisk",          "Magisk"),
+}
+
+
+def _normalise_player_key(name: str) -> str:
+    """Normalise a player name to a cache key (lowercase, alphanumeric only)."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 # ---------------------------------------------------------------------------
@@ -309,7 +381,23 @@ def _score_player_match(name: str, pid: str, slug: str) -> int:
 
 
 def search_player_v2(name: str) -> tuple[str, str, str] | None:
-    """Improved player search with better matching."""
+    """
+    Improved player search with cache-first lookup.
+
+    Order:
+      1. Check _PLAYER_ID_CACHE (instant — no HTTP).
+      2. Fall through to HLTV /search?query={name} with retry.
+      3. On success, populate cache so future lookups skip the search.
+    """
+    key = _normalise_player_key(name)
+
+    # 1. Cache hit — skip search entirely
+    if key in _PLAYER_ID_CACHE:
+        pid, slug, display = _PLAYER_ID_CACHE[key]
+        logger.info(f"[search] Cache hit: {display} (id={pid}, slug={slug})")
+        return pid, slug, display
+
+    # 2. Live HLTV search
     url = f"{HLTV_BASE}/search?query={name}"
     html = _fetch(url)
     if not html:
@@ -337,6 +425,14 @@ def search_player_v2(name: str) -> tuple[str, str, str] | None:
 
     display = best_slug.replace("-", " ").title()
     logger.info(f"[search] Best match: {display} (id={best_pid}, slug={best_slug}, score={best_score})")
+
+    # 3. Populate cache for future lookups
+    _PLAYER_ID_CACHE[key] = (best_pid, best_slug, display)
+    slug_key = _normalise_player_key(best_slug)
+    if slug_key != key:
+        _PLAYER_ID_CACHE[slug_key] = (best_pid, best_slug, display)
+    logger.info(f"[search] Cached {name!r} → {display} (id={best_pid})")
+
     return best_pid, best_slug, display
 
 
