@@ -459,6 +459,19 @@ def _analyze_player(
     else:
         hs_rate_src = None
 
+    # Build per-series breakdown (kills or estimated HS) for the embed.
+    # Groups maps back into their original series (2 maps per series).
+    _series_breakdown: list[dict] = []
+    _seen_series: dict[str, list] = {}
+    for _m in map_stats:
+        _seen_series.setdefault(_m["match_id"], []).append(_m)
+    for _mid, _maps in _seen_series.items():
+        _series_breakdown.append({
+            "match_id": _mid,
+            "total":    round(sum(m["stat_value"] for m in _maps), 1),
+            "per_map":  [f"{m['map_name']} {round(m['stat_value'], 1)}" for m in _maps],
+        })
+
     # --- Step 3 (optional): Deep opponent analysis ---
     deep: dict | None = None
     if opponent:
@@ -527,8 +540,9 @@ def _analyze_player(
     sim_result["deep"]         = deep
     sim_result["opponent"]     = opponent     # raw user input — None if not supplied
     sim_result["hs_rate_src"]  = hs_rate_src  # None for kills props, str for HS props
-    sim_result["is_awper"]     = is_awper
-    sim_result["awper_warn"]   = awper_warn
+    sim_result["is_awper"]          = is_awper
+    sim_result["awper_warn"]        = awper_warn
+    sim_result["series_breakdown"]  = _series_breakdown   # per-series stat totals
 
     # If using estimated fallback data — override to PASS, never make directional calls
     # on invented stats. The grade stays for context but direction is unreliable.
@@ -1065,8 +1079,36 @@ def build_result_embed(
         inline=False,
     )
 
+    # Per-series breakdown (compact — one entry per series)
+    _breakdown   = result.get("series_breakdown", [])
+    _is_hs_prop  = stat_type == "HS"
+    _hs_rate_val = result.get("hs_rate_src", "")   # e.g. "AWPer role estimate (22%...)"
+    if _breakdown:
+        _series_lines = []
+        for i, s in enumerate(_breakdown, 1):
+            _maps_str = " + ".join(s["per_map"])
+            _total_str = f"`{s['total']}`"
+            # Mark series that beat the prop line
+            _hit = "✅" if s["total"] > line else "❌"
+            _series_lines.append(f"S{i}: {_maps_str} = **{s['total']}** {_hit}")
+        _breakdown_str = "\n".join(_series_lines)
+        try:
+            _hs_pct_num = round(float(str(_hs_rate_val).split('(')[1].split('%')[0]))
+            _breakdown_note = f"\n_Estimated from kills × {_hs_pct_num}% HS rate_" if _is_hs_prop else ""
+        except (IndexError, ValueError):
+            _breakdown_note = "\n_HS estimates applied_" if _is_hs_prop else ""
+    else:
+        _breakdown_str = "_No breakdown available_"
+        _breakdown_note = ""
+
     embed.add_field(
-        name="📊 Historical Stats (2-map totals)",
+        name=f"📊 Per-Series {stat_unit} Totals (last {len(_breakdown)} series)",
+        value=_breakdown_str + _breakdown_note,
+        inline=False,
+    )
+
+    embed.add_field(
+        name="📈 Historical Stats (2-map totals)",
         value=(
             f"**Average:** `{result.get('hist_avg', 'N/A')}`\n"
             f"**Median:** `{result.get('hist_median', 'N/A')}`\n"
