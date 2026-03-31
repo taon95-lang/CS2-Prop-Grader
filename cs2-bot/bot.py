@@ -522,6 +522,98 @@ def _analyze_player(
     if rank_gap is not None and rank_gap > 50 and line > 35.5:
         sim_result["stomp_high_line_warning"] = True
 
+    # --- Step 6: Survival Rate vs Win Rate → Exit Fragger Analysis ---
+    survival_vals = [m["survival_rate"] for m in map_stats if m.get("survival_rate") is not None]
+    deaths_vals   = [m["deaths"]        for m in map_stats if m.get("deaths")        is not None]
+    kills_vals    = [m["stat_value"]    for m in map_stats]
+
+    if len(survival_vals) >= 4:
+        avg_survival = round(sum(survival_vals) / len(survival_vals), 3)
+        total_kills  = sum(kills_vals)
+        total_deaths = sum(deaths_vals) if deaths_vals else 1
+        avg_kd_ratio = round(total_kills / max(total_deaths, 1), 2)
+
+        # Exit Fragger: survives often but doesn't win duels (dying late in rounds)
+        is_exit_fragger = avg_survival > 0.60 and avg_kd_ratio < 1.05
+
+        if is_exit_fragger:
+            ef_label = "🚪 Exit Fragger"
+            # In blowout scenarios the passive player still racks up late kills
+            if rank_gap is not None and rank_gap > 50:
+                over_p = sim_result.get("over_prob", 50)
+                sim_result["over_prob"]  = round(min(95, over_p + 3.0), 1)
+                sim_result["under_prob"] = round(max(5, sim_result.get("under_prob", 50) - 3.0), 1)
+                ef_note = (f"Survival {avg_survival:.0%} | K/D {avg_kd_ratio} → "
+                           f"passive style helps in blowouts (+3% Over)")
+            elif rank_gap is not None and rank_gap < 15:
+                over_p = sim_result.get("over_prob", 50)
+                sim_result["over_prob"]  = round(max(5, over_p - 2.0), 1)
+                sim_result["under_prob"] = round(min(95, sim_result.get("under_prob", 50) + 2.0), 1)
+                ef_note = (f"Survival {avg_survival:.0%} | K/D {avg_kd_ratio} → "
+                           f"tight rounds limit late-kill opps (-2% Over)")
+            else:
+                ef_note = f"Survival {avg_survival:.0%} | K/D {avg_kd_ratio} → passive accumulator"
+        else:
+            ef_label = "⚔️ Active Fragger"
+            ef_note  = f"Survival {avg_survival:.0%} | K/D {avg_kd_ratio}"
+
+        sim_result["exit_fragger_label"] = ef_label
+        sim_result["exit_fragger_note"]  = ef_note
+        sim_result["avg_survival_rate"]  = avg_survival
+        sim_result["avg_kd_ratio"]       = avg_kd_ratio
+    else:
+        sim_result["exit_fragger_label"] = "❓ Survival Data Unavailable"
+        sim_result["exit_fragger_note"]  = "_deaths data not scraped on these pages_"
+        sim_result["avg_survival_rate"]  = None
+        sim_result["avg_kd_ratio"]       = None
+
+    # --- Step 7: Pistol Round KPR → Floor & Security Buffer ---
+    pistol_vals = [m["pistol_kills"] for m in map_stats if m.get("pistol_kills") is not None]
+    # Determine if values are real (integer from scrape) or estimated (float from formula)
+    real_pistol = [v for v in pistol_vals if isinstance(v, int)]
+    est_pistol  = [v for v in pistol_vals if isinstance(v, float)]
+    pistol_source = "scraped" if real_pistol else ("estimated" if est_pistol else None)
+
+    if pistol_vals:
+        avg_pistol_kpr = round(sum(pistol_vals) / len(pistol_vals), 2)
+        # Real data threshold: >1.5 kills/pistol round pair
+        # Estimated threshold: >0.18 (equivalent to ~2 kills per 22-round map)
+        threshold = 1.5 if pistol_source == "scraped" else 0.18
+        strong_pistol = avg_pistol_kpr > threshold
+
+        if strong_pistol:
+            pistol_label = "🔫 Strong Pistol Player"
+            # Security Buffer: +1.5 kills to expected total if team CT win% > 55%
+            ct_win_pct = None
+            if deep:
+                def_profile = deep.get("defensive_profile", {})
+                ct_win_pct  = def_profile.get("ct_win_pct") if def_profile else None
+                # Also check opponent's CT win (attacker's T side vs opponent's CT)
+                opp_ct = deep.get("scouting", {}).get("economy_impact", {}).get("ct_win_pct")
+
+            pistol_win_proxy = ct_win_pct and ct_win_pct > 55
+            if pistol_win_proxy:
+                old_exp = sim_result.get("expected_total", 0)
+                sim_result["expected_total"] = round(old_exp + 1.5, 2)
+                sim_result["pistol_buffer_applied"] = True
+                pistol_note = (f"Avg pistol KPR: `{avg_pistol_kpr}` ({pistol_source}) | "
+                               f"CT win {ct_win_pct}% → +1.5 Security Buffer applied")
+            else:
+                sim_result["pistol_buffer_applied"] = False
+                pistol_note = (f"Avg pistol KPR: `{avg_pistol_kpr}` ({pistol_source}) | "
+                               f"Pistol CT% unavailable — buffer not applied")
+        else:
+            pistol_label = "📉 Weak/Average Pistol"
+            pistol_note  = f"Avg pistol KPR: `{avg_pistol_kpr}` ({pistol_source}) — below floor threshold"
+    else:
+        avg_pistol_kpr = None
+        pistol_label   = "❓ No Pistol Data"
+        pistol_note    = "_Pistol round stats not available_"
+
+    sim_result["pistol_label"]   = pistol_label
+    sim_result["pistol_note"]    = pistol_note
+    sim_result["avg_pistol_kpr"] = avg_pistol_kpr
+
     return sim_result
 
 
@@ -805,6 +897,35 @@ def build_result_embed(
             + stomp_warning
         ),
         inline=False,
+    )
+
+    # ── 🏃 Survival Rate / Exit Fragger ──────────────────────────────────────
+    ef_label = result.get("exit_fragger_label", "❓ No Data")
+    ef_note  = result.get("exit_fragger_note",  "")
+    avg_surv = result.get("avg_survival_rate")
+    avg_kd   = result.get("avg_kd_ratio")
+    surv_line = f"Avg Survival: `{avg_surv:.0%}` | K/D: `{avg_kd}`" if avg_surv is not None else ""
+    embed.add_field(
+        name="🏃 Survival Profile",
+        value=(
+            f"**Style:** {ef_label}\n"
+            + (f"{surv_line}\n" if surv_line else "")
+            + f"_{ef_note}_"
+        ),
+        inline=True,
+    )
+
+    # ── 🔫 Pistol Floor ───────────────────────────────────────────────────────
+    pistol_label  = result.get("pistol_label",  "❓ No Pistol Data")
+    pistol_note   = result.get("pistol_note",   "")
+    buffer_tag    = "  ✅ **+1.5 buffer applied**" if result.get("pistol_buffer_applied") else ""
+    embed.add_field(
+        name="🔫 Pistol Floor",
+        value=(
+            f"**{pistol_label}**{buffer_tag}\n"
+            f"_{pistol_note}_"
+        ),
+        inline=True,
     )
 
     # ── 💰 Fair Line Analysis ──────────────────────────────────────────────────

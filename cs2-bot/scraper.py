@@ -270,6 +270,39 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
                     rating = val
                     break
 
+        # Extract KAST% — shown as "72%" or "0.72" in a td cell
+        kast_pct = None
+        for cell in cells:
+            ct = cell.get_text(strip=True)
+            m = re.match(r'^(\d{2,3})%$', ct)
+            if m:
+                val = int(m.group(1))
+                if 20 <= val <= 100:
+                    kast_pct = val
+                    break
+            # Some pages show as decimal 0.XX
+            m2 = re.match(r'^(0\.\d{2})$', ct)
+            if m2:
+                val = round(float(m2.group(1)) * 100)
+                if 20 <= val <= 100:
+                    kast_pct = val
+                    break
+
+        # Extract ADR — float in range 20-150
+        adr = None
+        for cell in cells:
+            ct = cell.get_text(strip=True)
+            m = re.match(r'^(\d{2,3})\.?\d*$', ct)
+            if m:
+                val = float(ct)
+                if 20.0 <= val <= 150.0 and '.' in ct:
+                    adr = round(val, 1)
+                    break
+
+        # Compute survival rate from deaths (rounds - deaths) / rounds
+        rounds_on_map = 22  # default; refined per-map if parseable
+        survival_rate = round((rounds_on_map - deaths) / rounds_on_map, 3)
+
         # Extract FK (First Kills) — integer cell BEFORE the rating
         # FK-FD columns appear on some pages as standalone integers (0-20)
         fk = None
@@ -286,13 +319,16 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             fd = int_cells[1]
 
         maps_result.append({
-            'map_name':   map_name,
-            'kills':      kills,
-            'deaths':     deaths,
-            'rating':     rating,
-            'fk':         fk,
-            'fd':         fd,
-            'map_number': map_num,
+            'map_name':      map_name,
+            'kills':         kills,
+            'deaths':        deaths,
+            'rating':        rating,
+            'kast_pct':      kast_pct,
+            'adr':           adr,
+            'survival_rate': survival_rate,
+            'fk':            fk,
+            'fd':            fd,
+            'map_number':    map_num,
         })
         logger.info(
             f"[parse] Map {map_num} ({map_name}): {player_slug} — "
@@ -303,6 +339,66 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
         return None
 
     return {'bo_type': bo_type, 'maps': maps_result}
+
+
+def _parse_pistol_stats(html: str, player_slug: str) -> dict:
+    """
+    Try to extract per-map pistol round kill counts for a player.
+    HLTV shows pistol round stats in a separate section within match-stats.
+    Returns {map_number: pistol_kills} or {} if not found.
+
+    Fallback: if pistol section not found, estimate from overall kills/rounds
+    (2 pistol rounds per half → ~2/22 of total kills per map).
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    matchstats = soup.find(id='match-stats')
+    if not matchstats:
+        return {}
+
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+    result = {}
+
+    # Strategy 1: Look for dedicated pistol-round sections
+    # HLTV renders pistol stats in divs with class containing 'pistol'
+    pistol_sections = matchstats.find_all(
+        lambda tag: tag.name in ('div', 'section') and
+        any('pistol' in cls.lower() for cls in tag.get('class', []))
+    )
+
+    for i, section in enumerate(pistol_sections[:2], start=1):
+        for tr in section.find_all('tr'):
+            row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm and slug_norm in row_text:
+                kd = re.search(r'(\d+)\s*[-–]\s*(\d+)', tr.get_text())
+                if kd:
+                    result[i] = int(kd.group(1))
+                    break
+
+    if result:
+        logger.info(f"[pistol] Scraped pistol kills for {player_slug}: {result}")
+        return result
+
+    # Strategy 2: Estimate from overall per-map kill rate
+    # ~2 pistol rounds per 22-round map → estimated pistol contribution
+    # Walk main stats to get per-map kills and compute estimate
+    raw = str(matchstats)
+    map_ids = re.findall(r'id="(\d{5,7})-content"', raw)
+    for map_num, map_id in enumerate(map_ids[:2], start=1):
+        content_div = matchstats.find(id=f'{map_id}-content')
+        if not content_div:
+            continue
+        for tr in content_div.find_all('tr'):
+            row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm and slug_norm in row_text:
+                kd = re.search(r'(\d+)-(\d+)', tr.get_text())
+                if kd:
+                    kills = int(kd.group(1))
+                    # Estimate: pistol rounds are ~9% of rounds (2/22)
+                    est = round(kills * 2 / 22, 2)
+                    result[map_num] = est
+                    break
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -380,17 +476,25 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         if len(maps) < 2:
             continue  # Not enough map data — skip
 
+        # Attempt pistol round parse for this match
+        pistol_data = _parse_pistol_stats(html, player_slug)
+
         # Take maps 1 and 2 only — store dicts so simulator has stat_value + match_id
         for m in maps[:2]:
+            map_num = m.get('map_number', 1)
             map_kills.append({
-                'stat_value': m['kills'],
-                'rounds':     22,
-                'match_id':   match_id,
-                'map_name':   m['map_name'].lower(),
-                'rating':     m.get('rating'),        # Rating 2.0 (may be None)
-                'fk':         m.get('fk'),             # First Kills (may be None)
-                'fd':         m.get('fd'),             # First Deaths (may be None)
-                'deaths':     m.get('deaths'),
+                'stat_value':    m['kills'],
+                'rounds':        22,
+                'match_id':      match_id,
+                'map_name':      m['map_name'].lower(),
+                'rating':        m.get('rating'),
+                'kast_pct':      m.get('kast_pct'),
+                'adr':           m.get('adr'),
+                'survival_rate': m.get('survival_rate'),
+                'fk':            m.get('fk'),
+                'fd':            m.get('fd'),
+                'deaths':        m.get('deaths'),
+                'pistol_kills':  pistol_data.get(map_num),
             })
 
         bo3_series_count += 1
