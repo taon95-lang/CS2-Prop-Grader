@@ -242,70 +242,139 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             _tbl_classes = [str(t.get('class', '')) for t in content_div.find_all('table')]
             logger.info(f"[hs_locate] Table classes in content_div: {_tbl_classes}")
 
-        # Find ALL player rows (overview row + per-half row may both exist)
-        player_rows = []
-        for tr in content_div.find_all('tr'):
-            row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
-            if slug_norm in row_text and slug_norm:
-                player_rows.append(tr)
+        # ── Extract kills, headshots, deaths ──────────────────────────────────
+        # HLTV has two stat tables per map inside the content div:
+        #
+        #   1) OVERVIEW table  — columns: K | A | D | ADR | KAST | Swing | Rating
+        #      Player cells are plain integers (e.g. "15", "10", "14").
+        #
+        #   2) DETAILED STATS table — columns: Op K-D | MKs | KAST | 1vsX |
+        #      K (hs) | A (f) | D (t) | ADR | Swing | Rating
+        #      The "K (hs)" cell contains e.g. "15 (4)" — kills and headshots.
+        #
+        # Strategy A: find the detailed-stats table by its "K (hs)" header.
+        # Strategy B: find the overview table by its plain "K" header.
+        # Strategy C: regex scan on any row containing the player — last resort.
 
-        # Prefer the row that contains a kills(HS)-deaths cell; fall back to first row found
+        headshots  = None
+        kills      = None
+        deaths     = None
         player_row = None
-        for tr in player_rows:
-            for td in tr.find_all('td'):
-                if re.search(r'\d+\s*\(\d+\)\s*[-–]\s*\d+', td.get_text()):
-                    player_row = tr
-                    break
-            if player_row:
+
+        # ─ Strategy A: Detailed-stats table ───────────────────────────────────
+        for table in content_div.find_all('table'):
+            first_tr = table.find('tr')
+            if not first_tr:
+                continue
+            header_cells = first_tr.find_all(['th', 'td'])
+
+            k_hs_col = None  # column index for "K (hs)"
+            d_col    = None  # column index for deaths "D (t)"
+            for ci, hc in enumerate(header_cells):
+                ht = re.sub(r'\s+', '', hc.get_text().lower())
+                if k_hs_col is None and 'k' in ht and ('hs' in ht or 'head' in ht):
+                    k_hs_col = ci
+                if d_col is None and 'd' in ht and 't' in ht:
+                    d_col = ci
+
+            if k_hs_col is None:
+                continue  # not the detailed-stats table
+
+            for tr in table.find_all('tr')[1:]:
+                row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                if slug_norm not in row_norm:
+                    continue
+                cells_td = tr.find_all('td')
+                if k_hs_col < len(cells_td):
+                    ct = cells_td[k_hs_col].get_text(strip=True)
+                    m = re.search(r'(\d+)\s*\((\d+)\)', ct)
+                    if m:
+                        kills     = int(m.group(1))
+                        headshots = int(m.group(2))
+                        player_row = tr
+                        if d_col is not None and d_col < len(cells_td):
+                            dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
+                            if dm:
+                                deaths = int(dm.group(1))
+                        logger.info(
+                            f"[parse_row] Detail-table K(hs) map{map_num}: "
+                            f"{kills}K {headshots}HS D={deaths}"
+                        )
+                        break
+            if kills is not None:
                 break
-        if player_row is None and player_rows:
-            player_row = player_rows[0]
 
-        if player_row is None:
-            # Try partial match (first 4 chars of slug)
-            short = slug_norm[:4]
-            for tr in content_div.find_all('tr'):
-                row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
-                if len(short) >= 3 and short in row_text:
-                    player_row = tr
+        # ─ Strategy B: Overview table (plain K | A | D columns) ───────────────
+        if kills is None:
+            for table in content_div.find_all('table'):
+                first_tr = table.find('tr')
+                if not first_tr:
+                    continue
+                header_cells = first_tr.find_all(['th', 'td'])
+                k_col = None
+                d_col = None
+                for ci, hc in enumerate(header_cells):
+                    ht = hc.get_text(strip=True).upper().strip()
+                    if ht == 'K' and k_col is None:
+                        k_col = ci
+                    if ht == 'D' and d_col is None:
+                        d_col = ci
+                if k_col is None:
+                    continue
+                for tr in table.find_all('tr')[1:]:
+                    row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                    if slug_norm not in row_norm:
+                        continue
+                    cells_td = tr.find_all('td')
+                    if k_col < len(cells_td):
+                        km = re.search(r'(\d+)', cells_td[k_col].get_text(strip=True))
+                        if km:
+                            kills = int(km.group(1))
+                            player_row = tr
+                        if d_col is not None and d_col < len(cells_td):
+                            dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
+                            if dm:
+                                deaths = int(dm.group(1))
+                        if kills:
+                            logger.info(
+                                f"[parse_row] Overview-table K map{map_num}: {kills}K D={deaths}"
+                            )
+                        break
+                if kills is not None:
                     break
 
-        if player_row is None:
+        # ─ Strategy C: Regex scan (per-half fallback) ─────────────────────────
+        if kills is None:
+            candidate_rows = []
+            for tr in content_div.find_all('tr'):
+                rn = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                if slug_norm in rn:
+                    candidate_rows.append(tr)
+            if not candidate_rows:
+                short = slug_norm[:4]
+                for tr in content_div.find_all('tr'):
+                    rn = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                    if len(short) >= 3 and short in rn:
+                        candidate_rows.append(tr)
+                        break
+            for pr in candidate_rows:
+                pr_text = pr.get_text()
+                kd = re.search(r'(\d+)\s*[-–]\s*(\d+)', pr_text)
+                if kd:
+                    kills  = int(kd.group(1))
+                    deaths = int(kd.group(2))
+                    player_row = pr
+                    logger.info(
+                        f"[parse_row] Regex-fallback K-D map{map_num}: {kills}K {deaths}D"
+                    )
+                    break
+
+        if kills is None:
             logger.debug(f"[parse] Player '{player_slug}' not found on map {map_num} ({map_name})")
             continue
 
-        # Extract K, optional HS count, and D.
-        # HLTV match stats have two rows per player per map:
-        #   1) Overview row: "22 (8) - 14"  (total kills, HS in parens, total deaths)
-        #   2) Per-half row: "11-16\n11-18" (CT kills-deaths \n T kills-deaths)
-        # player_row selection above already prefers the overview row when available.
-        row_text = player_row.get_text()
-        logger.info(f"[parse_row] Map {map_num} ({map_name}) row text: {row_text[:300]!r}")
-
-        headshots = None
-        kills     = None
-        deaths    = None
-
-        # Strategy A: check each <td> individually for "kills(HS)-deaths" format.
-        # This appears in the overview/scorecard row on newer HLTV match pages.
-        for td in player_row.find_all('td'):
-            cell_text = td.get_text(strip=True)
-            m = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', cell_text)
-            if m:
-                kills     = int(m.group(1))
-                headshots = int(m.group(2))
-                deaths    = int(m.group(3))
-                logger.info(f"[parse_row] HS found in td: {cell_text!r} → K={kills} HS={headshots} D={deaths}")
-                break
-
-        # Strategy B: plain K-D from row text (first match only — total kills, not per-half sum)
-        if kills is None:
-            kd_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', row_text)
-            if kd_match:
-                kills  = int(kd_match.group(1))
-                deaths = int(kd_match.group(2))
-            else:
-                continue
+        row_text = player_row.get_text() if player_row else ""
+        logger.info(f"[parse_row] Map {map_num} ({map_name}) row: {row_text[:200]!r}")
 
         # Extract Rating 2.0 — it's a decimal like 1.15 in [0.40, 3.00]
         # found in td cells, typically the rightmost decimal value
@@ -535,40 +604,63 @@ def _parse_match_hs_pct(html: str, player_slug: str) -> float | None:
         return vals
 
     # ── Step 1: look in the all-maps overview section (id="all-content") ────────
+    # HLTV's all-maps detailed stats table has the same columns as per-map:
+    #   Op K-D | MKs | KAST | 1vsX | K (hs) | A (f) | D (t) | ADR | Swing | Rating
+    # The "K (hs)" cell = "53 (19)" → 53 total kills, 19 headshots across all maps.
+    # HS% = HS / kills (then applied per-map as an estimate).
     all_content = soup.find(id='all-content')
     search_scope = all_content if all_content else soup  # fallback to full page
 
+    # Strategy A: find the table with "K (hs)" column in the all-content section
+    for table in search_scope.find_all('table'):
+        first_tr = table.find('tr')
+        if not first_tr:
+            continue
+        header_cells = first_tr.find_all(['th', 'td'])
+        k_hs_col = None
+        for ci, hc in enumerate(header_cells):
+            ht = re.sub(r'\s+', '', hc.get_text().lower())
+            if 'k' in ht and ('hs' in ht or 'head' in ht):
+                k_hs_col = ci
+                break
+        if k_hs_col is None:
+            continue
+
+        for tr in table.find_all('tr')[1:]:
+            row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm not in row_norm:
+                continue
+            cells_td = tr.find_all('td')
+            if k_hs_col < len(cells_td):
+                ct = cells_td[k_hs_col].get_text(strip=True)
+                m = re.search(r'(\d+)\s*\((\d+)\)', ct)
+                if m:
+                    kills = int(m.group(1))
+                    hs    = int(m.group(2))
+                    if kills > 0:
+                        rate = round(hs / kills, 3)
+                        logger.info(
+                            f"[hs_pct] all-content K(hs) for {player_slug}: "
+                            f"{kills}K {hs}HS → {round(rate*100, 1)}% "
+                            f"({'all-content' if all_content else 'full-page'})"
+                        )
+                        return rate
+
+    # Strategy B: percentage columns in any player row of the all-content scope.
+    # KAST (50-100) is listed before HS (10-70) in HLTV columns.
+    # The LAST percentage in 10-70% range should be HS%.
     for row in search_scope.find_all('tr'):
         row_norm = re.sub(r'[^a-z0-9]', '', row.get_text().lower())
         if slug_norm not in row_norm:
             continue
-
-        # Strategy A: find "kills(HS)-deaths" cell → compute HS% directly
-        for td in row.find_all('td'):
-            cell_text = td.get_text(strip=True)
-            m = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', cell_text)
-            if m:
-                kills = int(m.group(1))
-                hs    = int(m.group(2))
-                if kills > 0:
-                    rate = round(hs / kills, 3)
-                    logger.info(
-                        f"[hs_pct] All-maps K(HS)-D for {player_slug}: "
-                        f"{kills}K {hs}HS → {round(rate*100, 1)}%"
-                    )
-                    return rate
-
-        # Strategy B: percentage columns — KAST (50-100) comes before HS (10-70)
         pcts = _row_pcts(row)
         if not pcts:
             continue
-        # Use upper bound 70 to capture riflers; AWPers well below that
         hs_candidates = [p for p in pcts if 10 <= p <= 70]
         if hs_candidates:
-            # The LAST candidate is typically HS% (KAST is listed first in HLTV columns)
             val = hs_candidates[-1]
             logger.info(
-                f"[hs_pct] All-maps pct for {player_slug}: pcts={pcts} → HS≈{val}%"
+                f"[hs_pct] pct-scan for {player_slug}: pcts={pcts} → HS≈{val}%"
                 + (" (all-content)" if all_content else " (full-page fallback)")
             )
             return round(val / 100, 3)
