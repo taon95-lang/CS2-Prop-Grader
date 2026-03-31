@@ -253,6 +253,9 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
         # HLTV scorecard format: "22 (8) - 14"  (detailed stats tab)
         #                    or: "22-14"          (abbreviated view)
         row_text = player_row.get_text()
+        # Debug: log the raw row HTML and text to diagnose HS format
+        logger.info(f"[parse_row] Map {map_num} ({map_name}) row HTML: {str(player_row)[:400]!r}")
+        logger.info(f"[parse_row] Map {map_num} row text: {row_text[:200]!r}")
         kd_hs_match = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', row_text)
         if kd_hs_match:
             kills     = int(kd_hs_match.group(1))
