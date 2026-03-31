@@ -759,44 +759,27 @@ _TEAM_ALIASES: dict[str, str] = {
     "fnatic": "fnatic",
     "eg": "evil-geniuses",
     "evil geniuses": "evil-geniuses",
+    # "ex-TEAM" aliases — user may type "exruby", "ex-ruby", "ex ruby", etc.
+    "exruby": "ruby",
+    "ex-ruby": "ruby",
+    "ex ruby": "ruby",
+    "exgambit": "gambit-esports",
+    "ex-gambit": "gambit-esports",
+    "exnavi": "natus-vincere",
+    "ex-navi": "natus-vincere",
 }
 
 _SECONDARY_MARKERS = ('junior', 'academy', 'youth', '-2', '-b-team', 'b-team', 'female', 'women')
 
 
-def search_team(name: str) -> tuple | None:
+def _score_team_candidates(candidates: dict[str, str], name_norm: str) -> tuple[str | None, str | None, int]:
     """
-    Search HLTV for a team by name or alias.
-    Returns (team_id, team_slug, display_name) or None if not found.
+    Score a {team_id: slug} dict against a normalised target name.
+    Returns (best_tid, best_slug, best_score).
     """
-    # Resolve known aliases first so the search query is more accurate
-    query = _TEAM_ALIASES.get(name.lower().strip(), name)
-
-    url = f"{HLTV_BASE}/search?query={query}"
-    html = _fetch(url)
-    if not html:
-        logger.warning(f"[search_team] fetch failed for '{name}'")
-        return None
-
-    matches = re.findall(r'/team/(\d+)/([\w-]+)', html)
-    if not matches:
-        logger.warning(f"[search_team] no /team/ links found for '{name}'")
-        return None
-
-    # Deduplicate while preserving order
-    seen: dict[str, str] = {}
-    for tid, slug in matches:
-        if tid not in seen:
-            seen[tid] = slug
-
-    # Scoring: exact slug match → contains → partial → penalise junior/academy squads
-    name_norm = re.sub(r'[^a-z0-9]', '', query.lower())
     best_tid, best_slug, best_score = None, None, -1000
-
-    for tid, slug in seen.items():
+    for tid, slug in candidates.items():
         slug_norm = re.sub(r'[^a-z0-9]', '', slug.lower())
-
-        # Base match score
         if slug_norm == name_norm:
             score = 200
         elif slug_norm.startswith(name_norm):
@@ -807,16 +790,67 @@ def search_team(name: str) -> tuple | None:
             score = 50
         else:
             score = 0
-
-        # Heavy penalty for junior/academy/female rosters
         if any(marker in slug.lower() for marker in _SECONDARY_MARKERS):
             score -= 120
-
         if score > best_score:
             best_score, best_tid, best_slug = score, tid, slug
+    return best_tid, best_slug, best_score
 
-    if not best_tid:
-        best_tid, best_slug = next(iter(seen.items()))
+
+def search_team(name: str) -> tuple | None:
+    """
+    Search HLTV for a team by name or alias.
+    Returns (team_id, team_slug, display_name) or None if not found.
+    """
+    name_clean = name.lower().strip()
+
+    # 1) Resolve explicit aliases first
+    query = _TEAM_ALIASES.get(name_clean, name)
+
+    # 2) Auto-normalise "ex-TEAM" / "exTEAM" input that isn't in the alias table.
+    #    Strips the leading "ex-" or "ex" prefix and uses the remainder as the query.
+    if query == name:   # alias table didn't fire
+        m = re.match(r'^ex[-\s]?(.+)$', name_clean)
+        if m:
+            query = m.group(1)   # e.g. "exruby" → "ruby", "ex natus vincere" → "natus vincere"
+
+    def _search_query(q: str) -> dict[str, str]:
+        url = f"{HLTV_BASE}/search?query={q}"
+        html = _fetch(url)
+        if not html:
+            return {}
+        seen: dict[str, str] = {}
+        for tid, slug in re.findall(r'/team/(\d+)/([\w-]+)', html):
+            if tid not in seen:
+                seen[tid] = slug
+        return seen
+
+    # First attempt with resolved query
+    seen = _search_query(query)
+    if not seen:
+        logger.warning(f"[search_team] no /team/ links found for '{name}' (query='{query}')")
+        return None
+
+    name_norm = re.sub(r'[^a-z0-9]', '', query.lower())
+    best_tid, best_slug, best_score = _score_team_candidates(seen, name_norm)
+
+    # If no meaningful match, try again with the raw user input as the query
+    if best_score <= 0 and query != name:
+        seen2 = _search_query(name)
+        if seen2:
+            raw_norm = re.sub(r'[^a-z0-9]', '', name.lower())
+            t2, s2, sc2 = _score_team_candidates(seen2, raw_norm)
+            if sc2 > best_score:
+                best_tid, best_slug, best_score = t2, s2, sc2
+                logger.info(f"[search_team] Retry with raw query improved score to {sc2}")
+
+    # Refuse to return a result when there's no string overlap at all — it would be wrong
+    if best_score <= 0:
+        logger.warning(
+            f"[search_team] '{name}' (query='{query}') — best score was {best_score} "
+            f"(slug='{best_slug}'). Refusing to return a mismatched team."
+        )
+        return None
 
     display = best_slug.replace('-', ' ').title()
     logger.info(f"[search_team] '{name}' (query='{query}') → team_id={best_tid} slug={best_slug} score={best_score}")

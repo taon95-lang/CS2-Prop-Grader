@@ -466,6 +466,7 @@ def _analyze_player(
     sim_result["player_name"]  = player_name
     sim_result["line"]         = line
     sim_result["deep"]         = deep
+    sim_result["opponent"]     = opponent     # raw user input — None if not supplied
     sim_result["hs_rate_src"]  = hs_rate_src  # None for kills props, str for HS props
 
     # If using estimated fallback data — override to PASS, never make directional calls
@@ -830,6 +831,18 @@ def build_result_embed(
     )
 
     embed = discord.Embed(title=title, description=description, color=color)
+
+    # ── Warn user when the opponent team name was not found on HLTV ────────────
+    if deep and deep.get("error") and result.get("opponent"):
+        embed.add_field(
+            name="⚠️ Opponent Not Found",
+            value=(
+                f"Could not locate **{result['opponent']}** on HLTV — "
+                f"opponent analysis was skipped.\n"
+                f"Try the exact team name (e.g. `!grade {player_name} {line} {stat_type} Team-Liquid`)."
+            ),
+            inline=False,
+        )
 
     # ── Deep Opponent Analysis (only when opponent was provided) ──────────────
     if deep and not deep.get("error") and opp_display:
