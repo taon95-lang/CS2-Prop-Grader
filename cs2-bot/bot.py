@@ -614,6 +614,146 @@ def _analyze_player(
     sim_result["pistol_note"]    = pistol_note
     sim_result["avg_pistol_kpr"] = avg_pistol_kpr
 
+    # --- Step 8: KAST% Consistency Engine + ADR Kill Conversion ---
+    kast_vals = [m["kast_pct"] for m in map_stats if m.get("kast_pct") is not None]
+    adr_vals  = [m["adr"]      for m in map_stats if m.get("adr")      is not None]
+
+    avg_kast   = None
+    kill_eff   = None
+    avg_adr    = None
+    kast_adj_applied = False
+
+    if len(kast_vals) >= 3:
+        avg_kast = round(sum(kast_vals) / len(kast_vals), 1)
+        if avg_kast >= 72:
+            kast_label = "📊 Consistent Contributor"
+            # High KAST = player impacts rounds reliably → tighter kill floor → lean Over
+            over_p = sim_result.get("over_prob", 50)
+            sim_result["over_prob"]  = round(min(95, over_p + 2.0), 1)
+            sim_result["under_prob"] = round(max(5, sim_result.get("under_prob", 50) - 2.0), 1)
+            kast_note = f"Avg KAST `{avg_kast}%` → reliable impact (+2% Over floor)"
+            kast_adj_applied = True
+        elif avg_kast < 58:
+            kast_label = "⚠️ Round-Dependent"
+            kast_note  = f"Avg KAST `{avg_kast}%` → inconsistent impact, high variance"
+        else:
+            kast_label = "🎮 Standard KAST"
+            kast_note  = f"Avg KAST `{avg_kast}%`"
+    else:
+        kast_label = "❓ KAST Not Available"
+        kast_note  = "_KAST% not found on these match pages_"
+
+    if len(adr_vals) >= 3:
+        avg_adr = round(sum(adr_vals) / len(adr_vals), 1)
+        total_kills_all  = sum(m["stat_value"] for m in map_stats)
+        total_rounds_all = max(len(map_stats) * 22, 1)
+        avg_kpr_all      = total_kills_all / total_rounds_all
+        kill_eff         = round(avg_kpr_all / (avg_adr / 100), 3) if avg_adr > 0 else None
+
+        if kill_eff and kill_eff > 0.28:
+            conv_label = "🎯 Clean Finisher"
+            conv_note  = f"ADR `{avg_adr}` | Efficiency `{kill_eff:.2f}` → kills damage efficiently"
+        elif kill_eff and kill_eff < 0.18:
+            conv_label = "💥 Damage Dealer"
+            conv_note  = f"ADR `{avg_adr}` | Efficiency `{kill_eff:.2f}` → chunks but under-converts on kills"
+        else:
+            conv_label = "📋 Standard Converter"
+            conv_note  = f"ADR `{avg_adr}` | Efficiency `{kill_eff:.2f}`" if kill_eff else f"ADR `{avg_adr}`"
+    else:
+        conv_label = "❓ No ADR Data"
+        conv_note  = "_ADR not available on these match pages_"
+
+    sim_result["kast_label"]       = kast_label
+    sim_result["kast_note"]        = kast_note
+    sim_result["avg_kast"]         = avg_kast
+    sim_result["kast_adj_applied"] = kast_adj_applied
+    sim_result["conv_label"]       = conv_label
+    sim_result["conv_note"]        = conv_note
+    sim_result["avg_adr"]          = avg_adr
+    sim_result["kill_eff"]         = kill_eff
+
+    # --- Step 9: Confidence Score (A–F) + Unit Sizing ---
+    conf_score = 50  # baseline
+
+    n_series_val = sim_result.get("n_series", 0)
+    if n_series_val >= 8:    conf_score += 15
+    elif n_series_val >= 6:  conf_score += 8
+    elif n_series_val < 4:   conf_score -= 15
+
+    stab_std_val = sim_result.get("stability_std", 0)
+    if stab_std_val < 4:     conf_score += 10
+    elif stab_std_val > 8:   conf_score -= 12
+    elif stab_std_val > 6:   conf_score -= 5
+
+    if avg_kast is not None:
+        if avg_kast >= 72:   conf_score += 8
+        elif avg_kast < 58:  conf_score -= 8
+
+    decision_val = sim_result.get("decision", "PASS")
+    trend_pct_val = sim_result.get("trend_pct", 0)
+    hot_form_val  = trend_pct_val >= 12
+    cold_form_val = trend_pct_val <= -12
+    if (decision_val == "OVER"  and hot_form_val)  or (decision_val == "UNDER" and cold_form_val):
+        conf_score += 10
+    elif (decision_val == "OVER" and cold_form_val) or (decision_val == "UNDER" and hot_form_val):
+        conf_score -= 10
+
+    fair_line_num = sim_result.get("fair_line", line)
+    try:
+        misprice_gap = abs(float(fair_line_num) - line)
+    except (TypeError, ValueError):
+        misprice_gap = 0
+    if misprice_gap > 4:     conf_score += 12
+    elif misprice_gap > 2:   conf_score += 6
+
+    if kill_eff is not None:
+        if kill_eff > 0.28:  conf_score += 5
+        elif kill_eff < 0.18: conf_score -= 5
+
+    if used_fallback:
+        conf_score = 0
+
+    conf_score = max(0, min(100, conf_score))
+
+    if conf_score >= 80:     conf_grade = "A"
+    elif conf_score >= 65:   conf_grade = "B"
+    elif conf_score >= 50:   conf_grade = "C"
+    elif conf_score >= 35:   conf_grade = "D"
+    else:                    conf_grade = "F"
+
+    _conf_labels = {
+        "A": "🟢 High Confidence",
+        "B": "🟡 Moderate Confidence",
+        "C": "🟠 Fair Confidence",
+        "D": "🔴 Low Confidence",
+        "F": "⚫ Unreliable",
+    }
+    conf_label_final = _conf_labels[conf_grade]
+
+    # Unit Sizing: only for directional calls with enough conviction
+    grade_str_val = sim_result.get("grade", "0/10")
+    try:
+        grade_num_val = int(str(grade_str_val).split("/")[0]) if "/" in str(grade_str_val) else 0
+    except (ValueError, TypeError):
+        grade_num_val = 0
+
+    if decision_val in ("OVER", "UNDER"):
+        if grade_num_val >= 8 and conf_grade == "A":
+            unit_rec = "💰 2u — Strong Play"
+        elif grade_num_val >= 6 and conf_grade in ("A", "B"):
+            unit_rec = "💵 1u — Value Play"
+        elif grade_num_val >= 4 and conf_grade in ("A", "B", "C"):
+            unit_rec = "🪙 0.5u — Marginal"
+        else:
+            unit_rec = "🚫 0u — Skip (low grade or confidence)"
+    else:
+        unit_rec = "🚫 0u — Pass"
+
+    sim_result["confidence_score"] = conf_score
+    sim_result["confidence_grade"] = conf_grade
+    sim_result["confidence_label"] = conf_label_final
+    sim_result["unit_recommendation"] = unit_rec
+
     return sim_result
 
 
@@ -798,7 +938,7 @@ def build_result_embed(
             f"**Trend:** {trend_label}\n"
             f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` kills/map\n"
             f"**Overall avg per map:** `{hist_avg_kills}` kills/map\n"
-            f"_Simulation is 60% weighted to recent form_"
+            f"_Simulation is 70% weighted to recent form_"
         ),
         inline=False,
     )
@@ -857,15 +997,17 @@ def build_result_embed(
     ceiling    = result.get("ceiling", "N/A")
     floor_v    = result.get("floor", "N/A")
     map_kpr    = result.get("map_kpr", {})
+    # Show kills/map (KPR × 22) alongside KPR so it's human-readable
     map_kpr_lines = "\n".join(
-        f"  `{mn.title()}`: {v} KPR" for mn, v in sorted(map_kpr.items())
+        f"  `{mn.title()}`: `{round(v * 22, 1)}` kills/map  ({v} KPR)"
+        for mn, v in sorted(map_kpr.items(), key=lambda x: -x[1])
     ) if map_kpr else "  _No map-specific data_"
     embed.add_field(
         name="📉 Stability Score",
         value=(
             f"**Std Dev (series):** `±{stab_std}` kills  —  {stab_label}\n"
             f"**Ceiling:** `{ceiling}` kills  |  **Floor:** `{floor_v}` kills\n"
-            f"**Per-Map KPR:**\n{map_kpr_lines}"
+            f"**Per-Map Avg:**\n{map_kpr_lines}"
         ),
         inline=False,
     )
@@ -928,27 +1070,56 @@ def build_result_embed(
         inline=True,
     )
 
+    # ── 🎮 KAST% Consistency + ADR Kill Conversion ───────────────────────────
+    kast_label_e = result.get("kast_label",  "❓ KAST Not Available")
+    kast_note_e  = result.get("kast_note",   "")
+    conv_label_e = result.get("conv_label",  "❓ No ADR Data")
+    conv_note_e  = result.get("conv_note",   "")
+    kast_adj_tag = "  _(+2% Over applied)_" if result.get("kast_adj_applied") else ""
+    embed.add_field(
+        name="🎮 KAST & ADR Conversion",
+        value=(
+            f"**Consistency:** {kast_label_e}{kast_adj_tag}\n"
+            f"_{kast_note_e}_\n"
+            f"**Kill Conversion:** {conv_label_e}\n"
+            f"_{conv_note_e}_"
+        ),
+        inline=False,
+    )
+
     # ── 💰 Fair Line Analysis ──────────────────────────────────────────────────
     fair_line_val  = result.get("fair_line", result.get("sim_median", "N/A"))
     misprice_label = result.get("misprice_label", "✅ Fair Line")
+    line_pct       = result.get("line_percentile")
+    if line_pct is not None:
+        pct_direction = "⬆️ Lean OVER" if line_pct < 50 else ("⬇️ Lean UNDER" if line_pct > 50 else "⚖️ Coin Flip")
+        pct_line = f"**Line Percentile:** `{line_pct}%` of simulations fell at/below this line — {pct_direction}"
+    else:
+        pct_line = ""
     embed.add_field(
         name="💰 Fair Line Analysis",
         value=(
             f"**Fair Line (50/50):** `{fair_line_val}` kills\n"
             f"**Sportsbook Line:** `{line}` kills\n"
-            f"**Assessment:** {misprice_label}"
+            f"**Assessment:** {misprice_label}\n"
+            + (f"{pct_line}" if pct_line else "")
         ),
         inline=False,
     )
 
-    edge_val = result.get("edge", 0)
-    edge_sign = "+" if edge_val >= 0 else ""
+    conf_grade  = result.get("confidence_grade", "?")
+    conf_label  = result.get("confidence_label", "❓ Unknown")
+    conf_score  = result.get("confidence_score", 0)
+    unit_rec    = result.get("unit_recommendation", "🚫 0u — Pass")
+    edge_val    = result.get("edge", 0)
+    edge_sign   = "+" if edge_val >= 0 else ""
     embed.add_field(
         name="💡 Edge & Verdict",
         value=(
-            f"**Edge vs Line:** `{edge_sign}{edge_val}%` (vs 50% implied)\n"
+            f"**Edge vs Line:** `{edge_sign}{edge_val}%`\n"
             f"**Grade:** `{grade}` {emoji}\n"
-            f"**Decision:** `{decision}`"
+            f"**Decision:** `{decision}`\n"
+            f"**Confidence:** {conf_label} `({conf_score}/100)`"
         ),
         inline=True,
     )
@@ -956,7 +1127,10 @@ def build_result_embed(
     rec = result.get("recommendation", "N/A")
     embed.add_field(
         name="✅ Recommendation",
-        value=f"**{rec}**",
+        value=(
+            f"**{rec}**\n"
+            f"**Unit Size:** {unit_rec}"
+        ),
         inline=True,
     )
 

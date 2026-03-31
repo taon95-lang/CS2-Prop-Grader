@@ -189,6 +189,9 @@ def run_simulation(
     over_prob  = float(np.mean(samples > line))
     under_prob = float(np.mean(samples < line))
     push_prob  = float(np.mean(samples == int(line)))
+    # Percentile: what % of simulated totals fall AT OR BELOW the line
+    # < 50 → model says lean OVER (line is below median projection)
+    line_percentile = round(float(np.mean(samples <= line)) * 100, 1)
 
     # --- Fair Line & Misprice ---
     fair_line  = round(sim_median, 1)
@@ -267,6 +270,8 @@ def run_simulation(
         "trend_label":            trend_label,
         "recent_avg_kills":       recent_avg_kills,
         "recent_n_maps":          recent_n,
+        # --- Line context ---
+        "line_percentile":        line_percentile,
     }
 
 
