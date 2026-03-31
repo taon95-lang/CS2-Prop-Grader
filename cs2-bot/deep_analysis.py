@@ -490,7 +490,13 @@ def run_deep_analysis(
     # ── [A] Defensive kills allowed ──────────────────────────────────────────
     avg_allowed = opp_data.get('avg_kills_allowed')
     if avg_allowed:
-        def_adj = avg_allowed / BASELINE_KILLS
+        # Use the player's own per-map average as the denominator so the
+        # adjustment is relative to what THIS player typically scores, not
+        # the global tier-1/2 pro baseline (18.5).  A tier-3/4 player who
+        # averages 13 kills/map and faces an opponent that allows 12.2 should
+        # only get a -6% penalty, not a -25% penalty from 12.2/18.5.
+        _def_baseline = baseline_avg if (baseline_avg and baseline_avg > 5) else BASELINE_KILLS
+        def_adj = avg_allowed / _def_baseline
         def_adj = max(0.75, min(1.25, def_adj))
         components['defensive'] = round(def_adj, 4)
         combined *= def_adj
@@ -498,10 +504,13 @@ def run_deep_analysis(
         def_pct = round((def_adj - 1) * 100, 1)
         sign = '+' if def_pct >= 0 else ''
 
-        if avg_allowed < 16.5:
+        # Label thresholds as percentages of the player baseline
+        _tough_thresh = _def_baseline * 0.85   # >15% below player avg = tough
+        _soft_thresh  = _def_baseline * 1.10   # >10% above player avg = soft
+        if avg_allowed < _tough_thresh:
             def_label = '🛡️ Tough Defense'
             bullets.append(f"Tough defense — only {avg_allowed} kills/player/map allowed ({sign}{def_pct}%)")
-        elif avg_allowed > 20.5:
+        elif avg_allowed > _soft_thresh:
             def_label = '💨 Soft Defense'
             bullets.append(f"Soft defense — {avg_allowed} kills/player/map allowed ({sign}{def_pct}%)")
         else:

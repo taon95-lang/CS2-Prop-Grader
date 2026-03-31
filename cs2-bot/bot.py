@@ -515,7 +515,16 @@ def _analyze_player(
         parts = []
         if n_actual:     parts.append(f"{n_actual} actual scorecard")
         if n_match_pct:  parts.append(f"{n_match_pct} per-match HS%")
-        if n_global:     parts.append(f"{n_global} AWPer/default estimate")
+        if n_global:
+            # Describe what the global hs_rate actually came from
+            if awper_warn:
+                parts.append(f"{n_global} AWPer measured rate ({round(hs_rate*100)}%)")
+            elif hs_rate_src and "career profile" in hs_rate_src:
+                parts.append(f"{n_global} career HS% ({round(hs_rate*100)}%)")
+            elif hs_rate_src and "last " in hs_rate_src:
+                parts.append(f"{n_global} recent avg HS% ({round(hs_rate*100)}%)")
+            else:
+                parts.append(f"{n_global} default estimate ({round(hs_rate*100)}%)")
         hs_rate_src = " + ".join(parts) if parts else hs_rate_src
         logger.info(f"[hs_scale] HS sources: {hs_rate_src}")
     else:
