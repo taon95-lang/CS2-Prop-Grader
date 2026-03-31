@@ -457,15 +457,64 @@ def get_player_hs_pct(player_id: str, player_slug: str) -> float | None:
 # Step 4 — Get HS kills specifically (from per-round headshot data if available)
 # ---------------------------------------------------------------------------
 
+def _parse_match_hs_pct(html: str, player_slug: str) -> float | None:
+    """
+    Extract the player's HS% from a match page's all-maps overview table.
+
+    HLTV match pages show per-player all-map stats (kills, deaths, rating,
+    ADR, KAST%, HS%) in a summary section separate from per-map scorecards.
+
+    Strategy: find any row that contains the player's slug, then pull
+    percentage cells. KAST% is typically 50-100, HS% is 10-65.
+    We take the LAST percentage in the row (KAST tends to be listed before HS).
+    Returns a float in [0.0, 1.0] or None.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+
+    def _row_pcts(row) -> list[int]:
+        """Return all XX% integer values from a <tr> row."""
+        vals = []
+        for cell in row.find_all(['td', 'th']):
+            ct = cell.get_text(strip=True)
+            m = re.match(r'^(\d{1,3})%$', ct)
+            if m:
+                vals.append(int(m.group(1)))
+        return vals
+
+    # Strategy 1: scan every table row for the player name
+    for row in soup.find_all('tr'):
+        row_norm = re.sub(r'[^a-z0-9]', '', row.get_text().lower())
+        if slug_norm not in row_norm:
+            continue
+        pcts = _row_pcts(row)
+        if not pcts:
+            continue
+        # HLTV column order (typical): ...KAST(50-100)...HS(10-65)
+        # Take the last percentage that fits the HS range
+        hs_candidates = [p for p in pcts if 10 <= p <= 65]
+        if hs_candidates:
+            val = hs_candidates[-1]
+            logger.debug(f"[hs_pct] Row match for {player_slug}: pcts={pcts} → HS={val}%")
+            return round(val / 100, 3)
+
+    # Strategy 2: Scan anchors — the player's profile link often has a data-attribute
+    # or appears near their stats; look for HS% in siblings
+    for a_tag in soup.find_all('a', href=re.compile(rf'/player/\d+/{re.escape(player_slug)}', re.I)):
+        row = a_tag.find_parent('tr')
+        if row:
+            pcts = _row_pcts(row)
+            hs_candidates = [p for p in pcts if 10 <= p <= 65]
+            if hs_candidates:
+                val = hs_candidates[-1]
+                logger.debug(f"[hs_pct] Anchor match for {player_slug}: HS={val}%")
+                return round(val / 100, 3)
+
+    return None
+
+
 def _parse_hs_kills(html: str, player_slug: str) -> dict | None:
-    """
-    Try to extract headshot kills per map. HLTV doesn't show HS per map
-    in the matchstats section directly, so we derive a HS% from the ADR
-    pattern or fall back to None (caller will use overall HS% from profile).
-    Returns same format as _parse_match_kills but kills = headshot kills only.
-    """
-    # HS data is not reliably available per-map on HLTV match pages.
-    # We return None and let the caller handle HS via overall stats.
+    """Legacy stub — HS data not available per-map; handled via _parse_match_hs_pct."""
     return None
 
 
@@ -504,6 +553,7 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
     map_kills = []
     bo3_series_count = 0
     errors = 0
+    hs_pct_samples: list[float] = []   # per-match HS% — averaged for recent_hs_pct
 
     for match_id, slug in match_ids:
         if bo3_series_count >= 10:
@@ -527,6 +577,13 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         maps = parsed.get('maps', [])
         if len(maps) < 2:
             continue  # Not enough map data — skip
+
+        # Collect HS% from the match-level overview (all-maps combined stats row)
+        # This is parsed from the same page we already fetched — no extra requests.
+        match_hs = _parse_match_hs_pct(html, player_slug)
+        if match_hs is not None:
+            hs_pct_samples.append(match_hs)
+            logger.info(f"[hs_pct] Match {match_id}: {player_slug} HS%={round(match_hs*100)}%")
 
         # Attempt pistol round parse for this match
         pistol_data = _parse_pistol_stats(html, player_slug)
@@ -567,16 +624,27 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
     std = statistics.stdev(kill_values) if len(kill_values) > 1 else 4.0
     std = max(std, 2.0)  # floor to avoid degenerate distributions
 
+    # Compute recent HS% from the match-level samples we collected above
+    recent_hs_pct = None
+    if hs_pct_samples:
+        recent_hs_pct = round(sum(hs_pct_samples) / len(hs_pct_samples), 3)
+        logger.info(
+            f"[hs_pct] Recent HS% for {player_slug}: {round(recent_hs_pct*100, 1)}% "
+            f"(avg of {len(hs_pct_samples)} matches)"
+        )
+
     return {
-        'player': display_name,
-        'player_id': player_id,
-        'player_slug': player_slug,
-        'match_ids': match_ids,          # full list — used for H2H filtering
-        'map_kills': map_kills,
-        'mean': round(mean, 2),
-        'std': round(std, 2),
-        'sample_size': len(map_kills),
-        'source': 'HLTV Live',
+        'player':            display_name,
+        'player_id':         player_id,
+        'player_slug':       player_slug,
+        'match_ids':         match_ids,        # full list — used for H2H filtering
+        'map_kills':         map_kills,
+        'mean':              round(mean, 2),
+        'std':               round(std, 2),
+        'sample_size':       len(map_kills),
+        'source':            'HLTV Live',
+        'recent_hs_pct':     recent_hs_pct,   # None if no HS data found on match pages
+        'hs_pct_n_matches':  len(hs_pct_samples),
     }
 
 

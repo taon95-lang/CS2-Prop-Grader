@@ -362,17 +362,30 @@ def _analyze_player(
     hs_rate      = None
     hs_rate_src  = None
     if stat_type == "HS" and not used_fallback:
-        _pid   = info.get("player_id")
-        _pslug = info.get("player_slug")
-        if _pid and _pslug:
-            try:
-                # grade_prop runs in a thread executor — call the blocking function directly
-                scraped_rate = get_player_hs_pct(_pid, _pslug)
-                if scraped_rate is not None:
-                    hs_rate     = scraped_rate
-                    hs_rate_src = f"HLTV profile ({round(scraped_rate * 100)}%)"
-            except Exception as _e:
-                logger.warning(f"HS% scrape failed ({type(_e).__name__}): {_e}")
+        n_hs_matches = info.get("hs_pct_n_matches", 0)
+
+        # Priority 1: recent HS% derived from actual match pages (last ~10 matches)
+        recent_hs = info.get("recent_hs_pct")
+        if recent_hs is not None:
+            hs_rate     = recent_hs
+            hs_rate_src = (
+                f"last {n_hs_matches} matches avg "
+                f"({round(recent_hs * 100)}%)"
+            )
+            logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
+
+        # Priority 2: career HS% from their HLTV profile page (separate request)
+        if hs_rate is None:
+            _pid   = info.get("player_id")
+            _pslug = info.get("player_slug")
+            if _pid and _pslug:
+                try:
+                    profile_rate = get_player_hs_pct(_pid, _pslug)
+                    if profile_rate is not None:
+                        hs_rate     = profile_rate
+                        hs_rate_src = f"career profile ({round(profile_rate * 100)}%)"
+                except Exception as _e:
+                    logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
 
     if stat_type == "HS":
         if hs_rate is None:
