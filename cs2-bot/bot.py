@@ -27,6 +27,39 @@ DECISION_COLORS = {
     "MISPRICED": 0xFF851B,
 }
 
+# ---------------------------------------------------------------------------
+# AWPer HS% database
+# ---------------------------------------------------------------------------
+# AWP kills can be body shots (no headshot needed), so AWPers have structurally
+# lower HS% than riflers (riflers: 38-55%, AWPers: 15-28%).
+# Values below are conservative typical rates sourced from career HLTV stats.
+# If a player is listed here AND the scraped HS% is unrealistically high
+# (> _AWPER_HS_CAP), the scraping result is treated as an artifact and this
+# value is used instead.
+_KNOWN_AWPERS: dict[str, float] = {
+    "idisbalance": 0.22,
+    "sh1ro":       0.20,
+    "zywoo":       0.26,
+    "s1mple":      0.28,   # hybrid but still low for AWP role periods
+    "device":      0.21,
+    "jl":          0.24,
+    "maden":       0.23,
+    "snappi":      0.24,   # AWP support
+    "ropz":        0.35,   # rifler with occasional AWP — borderline
+    "mezii":       0.24,
+    "floppyfish":  0.23,
+    "syrson":      0.22,
+    "headtr1ck":   0.24,
+    "nitro":       0.24,
+    "broky":       0.23,
+    "azr":         0.25,
+    "imorim":      0.22,
+}
+
+# HS% above this threshold for a known AWPer is almost certainly a scraping
+# error — override with the known typical rate instead.
+_AWPER_HS_CAP = 0.33
+
 GRADE_EMOJIS = {
     range(1, 4): "🔴",
     range(4, 6): "🟡",
@@ -358,9 +391,14 @@ def _analyze_player(
 
     # --- Step 2.5: HS% Scaling (only for HS props) ---
     # The scraper always returns kill data. For HS props we convert kills → HS
-    # using the player's career HS% from their HLTV profile (or 40% default).
+    # using the player's recent match HS% (or career profile, or role default).
     hs_rate      = None
     hs_rate_src  = None
+    is_awper     = False
+    awper_warn   = False   # True when AWPer override fires
+
+    pslug = info.get("player_slug", "").lower() if not used_fallback else ""
+
     if stat_type == "HS" and not used_fallback:
         n_hs_matches = info.get("hs_pct_n_matches", 0)
 
@@ -388,9 +426,30 @@ def _analyze_player(
                     logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
 
     if stat_type == "HS":
+        # --- AWPer sanity check ---
+        # AWP kills are body shots — their real HS% is 15–28%, not 38–55%.
+        # If we know the player is an AWPer and the scraped rate is unrealistically
+        # high, override it with the role-appropriate estimate.
+        if pslug in _KNOWN_AWPERS:
+            is_awper = True
+            awper_known_rate = _KNOWN_AWPERS[pslug]
+            if hs_rate is None or hs_rate > _AWPER_HS_CAP:
+                logger.info(
+                    f"[hs_scale] AWPer {pslug}: scraped={hs_rate} > cap={_AWPER_HS_CAP} "
+                    f"→ overriding with {awper_known_rate}"
+                )
+                hs_rate     = awper_known_rate
+                hs_rate_src = (
+                    f"AWPer role estimate ({round(awper_known_rate * 100)}% — "
+                    f"AWP kills are body shots)"
+                )
+                awper_warn = True
+
         if hs_rate is None:
-            hs_rate     = 0.40   # pro-player average
-            hs_rate_src = "default (40% — pro average)"
+            # Generic default — warn if it looks high relative to AWPer norms
+            hs_rate     = 0.40
+            hs_rate_src = "default (40% — rifler average; lower for AWPers)"
+
         # Scale every map's kills → estimated headshots
         map_stats = [
             {**m, "stat_value": round(m["stat_value"] * hs_rate, 2)}
@@ -468,6 +527,8 @@ def _analyze_player(
     sim_result["deep"]         = deep
     sim_result["opponent"]     = opponent     # raw user input — None if not supplied
     sim_result["hs_rate_src"]  = hs_rate_src  # None for kills props, str for HS props
+    sim_result["is_awper"]     = is_awper
+    sim_result["awper_warn"]   = awper_warn
 
     # If using estimated fallback data — override to PASS, never make directional calls
     # on invented stats. The grade stays for context but direction is unreliable.
@@ -1153,12 +1214,21 @@ def build_result_embed(
     misprice_label = result.get("misprice_label", "✅ Fair Line")
     line_pct       = result.get("line_percentile")
     hs_rate_src    = result.get("hs_rate_src")
+    is_awper       = result.get("is_awper", False)
+    awper_warn     = result.get("awper_warn", False)
     if line_pct is not None:
         pct_direction = "⬆️ Lean OVER" if line_pct < 50 else ("⬇️ Lean UNDER" if line_pct > 50 else "⚖️ Coin Flip")
         pct_line = f"**Line Percentile:** `{line_pct}%` of sims at/below line — {pct_direction}"
     else:
         pct_line = ""
-    hs_note = f"\n_HS rate source: {hs_rate_src}_" if hs_rate_src else ""
+    if hs_rate_src and awper_warn:
+        hs_note = f"\n⚠️ **AWPer detected** — {hs_rate_src}"
+    elif hs_rate_src and is_awper:
+        hs_note = f"\n🎯 **AWPer** — HS rate: {hs_rate_src}"
+    elif hs_rate_src:
+        hs_note = f"\n_HS rate: {hs_rate_src}_"
+    else:
+        hs_note = ""
     embed.add_field(
         name="💰 Fair Line Analysis",
         value=(
