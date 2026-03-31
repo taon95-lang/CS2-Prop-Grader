@@ -13,19 +13,6 @@ from scraper import (
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
-try:
-    from bo3_scraper import get_bo3_hs_data as _get_bo3_hs
-    _BO3_AVAILABLE = True
-except ImportError:
-    _BO3_AVAILABLE = False
-    _get_bo3_hs = None
-
-try:
-    from esportslab_scraper import get_esl_stats as _get_esl_stats
-    _ESL_AVAILABLE = True
-except ImportError:
-    _ESL_AVAILABLE = False
-    _get_esl_stats = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -407,17 +394,6 @@ def _analyze_player(
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
-    # --- Step 2.4: Fetch ESL (The Esports Lab) data for this player ---
-    # ESL provides last-10-maps rolling stats (kills, headshots, kpm, hspm) for
-    # a rotating set of featured CS2 players.  Fetch once here and reuse below
-    # for both kills props (kpm cross-reference) and HS props (hs_pct Priority 2.5).
-    _esl_data: dict | None = None
-    if _ESL_AVAILABLE and not used_fallback:
-        try:
-            _esl_data = _get_esl_stats(player_name)
-        except Exception as _e:
-            logger.warning(f"[esl] Stats fetch failed: {type(_e).__name__}: {_e}")
-
     # --- Step 2.5: HS% Scaling (only for HS props) ---
     # The scraper always returns kill data. For HS props we convert kills → HS
     # using the player's recent match HS% (or career profile, or role default).
@@ -453,43 +429,6 @@ def _analyze_player(
                         hs_rate_src = f"career profile ({round(profile_rate * 100)}%)"
                 except Exception as _e:
                     logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
-
-        # Priority 2.5: The Esports Lab (theesportslab.com) — last-10-maps rolling stats.
-        # PrizePicks-owned data source. The /players/list/default_search endpoint is NOT
-        # Cloudflare-blocked and returns kills + headshots over the last 10 maps for a
-        # rotating set of ~6 featured CS2 players.  kpm = kills per map average.
-        # This data is more recent than bo3.gg career stats, so it takes priority.
-        # _esl_data was already fetched in Step 2.4 above (shared across stat types).
-        if hs_rate is None and _esl_data is not None:
-            _esl_hs = _esl_data.get("hs_pct")
-            if _esl_hs is not None and 0.05 <= _esl_hs <= 0.80:
-                hs_rate     = _esl_hs
-                hs_rate_src = (
-                    f"esportslab.com last-10-maps ({round(_esl_hs * 100)}% — "
-                    f"kpm={_esl_data.get('kpm')})"
-                )
-                logger.info(
-                    f"[hs_scale] ESL last-10-maps HS% for {player_name!r}: "
-                    f"{round(_esl_hs * 100, 1)}%  kpm={_esl_data.get('kpm')}"
-                )
-
-        # Priority 3: bo3.gg career HS% (accuracy_stats: Head kills / total kills)
-        # Uses the bo3.gg API which is NOT Cloudflare-blocked. Career average over all
-        # matches tracked by bo3.gg — much more accurate than the 40% default.
-        if hs_rate is None and _BO3_AVAILABLE:
-            try:
-                _bo3 = _get_bo3_hs(player_name, n_series=0)   # n_series=0 → career only, fast
-                if _bo3:
-                    _bo3_hs = _bo3.get("career_hs_pct")
-                    if _bo3_hs is not None:
-                        hs_rate     = _bo3_hs
-                        hs_rate_src = f"bo3.gg career avg ({round(_bo3_hs * 100)}%)"
-                        logger.info(
-                            f"[hs_scale] bo3.gg career HS% for {player_name!r}: "
-                            f"{round(_bo3_hs * 100, 1)}%"
-                        )
-            except Exception as _e:
-                logger.warning(f"[hs_scale] bo3.gg HS fallback failed: {type(_e).__name__}: {_e}")
 
     if stat_type == "HS":
         # --- Known-rate override ---
@@ -970,14 +909,6 @@ def _analyze_player(
     sim_result["confidence_label"] = conf_label_final
     sim_result["unit_recommendation"] = unit_rec
 
-    # Pass ESL data through to the embed builder if available
-    if _esl_data is not None:
-        sim_result["esl_kpm"]  = _esl_data.get("kpm")
-        sim_result["esl_hspm"] = _esl_data.get("hspm")
-        sim_result["esl_hs_pct"] = _esl_data.get("hs_pct")
-        sim_result["esl_team"]  = _esl_data.get("team", "")
-        sim_result["esl_source"] = _esl_data.get("source", "")
-
     return sim_result
 
 
@@ -1170,23 +1101,12 @@ def build_result_embed(
     recent_n_maps    = result.get("recent_n_maps", 4)
     trend_pct        = result.get("trend_pct", 0)
     hist_avg_kills   = round(result.get("hist_avg", 0) / 2, 1)  # per-map from series total
-    # ESL cross-reference line (if the player is featured on theesportslab.com)
-    _esl_kpm  = result.get("esl_kpm")
-    _esl_hspm = result.get("esl_hspm")
-    _esl_cross = ""
-    if _esl_kpm is not None:
-        if stat_type == "HS" and _esl_hspm is not None:
-            _esl_cross = f"\n**ESL 10-map avg:** `{_esl_kpm}` kills/map · `{_esl_hspm}` HS/map _(esportslab.com)_"
-        else:
-            _esl_cross = f"\n**ESL 10-map avg:** `{_esl_kpm}` kills/map _(esportslab.com)_"
-
     embed.add_field(
         name="🔥 Recent Form",
         value=(
             f"**Trend:** {trend_label}\n"
             f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` {stat_unit}/map\n"
-            f"**Overall avg per map:** `{hist_avg_kills}` {stat_unit}/map"
-            f"{_esl_cross}\n"
+            f"**Overall avg per map:** `{hist_avg_kills}` {stat_unit}/map\n"
             f"_Simulation is 70% weighted to recent form_"
         ),
         inline=False,
