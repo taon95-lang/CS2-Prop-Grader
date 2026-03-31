@@ -221,6 +221,7 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
     slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
 
     maps_result = []
+    _dump_done = False   # only dump once per match for diagnostics
     for map_num, map_id in enumerate(map_ids, start=1):
         content_div = matchstats.find(id=f'{map_id}-content')
         if not content_div:
@@ -228,13 +229,37 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
 
         map_name = map_names.get(map_id, f'Map{map_num}')
 
-        # Find the player row — search all <tr> elements for the player's name
-        player_row = None
+        # One-time structural dump: find every <td> containing '(' to locate HS cells
+        if not _dump_done:
+            _dump_done = True
+            _hs_cells = []
+            for td in content_div.find_all('td'):
+                ct = td.get_text(strip=True)
+                if '(' in ct and re.search(r'\d+\s*\(\d+\)', ct):
+                    _hs_cells.append(repr(ct[:80]))
+            logger.info(f"[hs_locate] Map1 cells with '(N)' pattern: {_hs_cells[:10]}")
+            # Also dump all unique table classes in this content div
+            _tbl_classes = [str(t.get('class', '')) for t in content_div.find_all('table')]
+            logger.info(f"[hs_locate] Table classes in content_div: {_tbl_classes}")
+
+        # Find ALL player rows (overview row + per-half row may both exist)
+        player_rows = []
         for tr in content_div.find_all('tr'):
             row_text = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
             if slug_norm in row_text and slug_norm:
-                player_row = tr
+                player_rows.append(tr)
+
+        # Prefer the row that contains a kills(HS)-deaths cell; fall back to first row found
+        player_row = None
+        for tr in player_rows:
+            for td in tr.find_all('td'):
+                if re.search(r'\d+\s*\(\d+\)\s*[-–]\s*\d+', td.get_text()):
+                    player_row = tr
+                    break
+            if player_row:
                 break
+        if player_row is None and player_rows:
+            player_row = player_rows[0]
 
         if player_row is None:
             # Try partial match (first 4 chars of slug)
@@ -250,24 +275,43 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             continue
 
         # Extract K, optional HS count, and D.
-        # HLTV scorecard format: "22 (8) - 14"  (detailed stats tab)
-        #                    or: "22-14"          (abbreviated view)
+        # HLTV match stats have two rows per player per map:
+        #   1) Overview row: "22 (8) - 14"  (total kills, HS in parens, total deaths)
+        #   2) Per-half row: "11-16\n11-18" (CT kills-deaths \n T kills-deaths)
+        # player_row selection above already prefers the overview row when available.
         row_text = player_row.get_text()
-        # Debug: log the raw row HTML and text to diagnose HS format
-        logger.info(f"[parse_row] Map {map_num} ({map_name}) row HTML: {str(player_row)[:400]!r}")
-        logger.info(f"[parse_row] Map {map_num} row text: {row_text[:200]!r}")
-        kd_hs_match = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', row_text)
-        if kd_hs_match:
-            kills     = int(kd_hs_match.group(1))
-            headshots = int(kd_hs_match.group(2))
-            deaths    = int(kd_hs_match.group(3))
-        else:
-            kd_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', row_text)
-            if not kd_match:
+        logger.info(f"[parse_row] Map {map_num} ({map_name}) row text: {row_text[:300]!r}")
+
+        headshots = None
+        kills     = None
+        deaths    = None
+
+        # Strategy A: check each <td> for "kills(HS)-deaths" format (overview row)
+        for td in player_row.find_all('td'):
+            cell_text = td.get_text(strip=True)
+            m = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', cell_text)
+            if m:
+                kills     = int(m.group(1))
+                headshots = int(m.group(2))
+                deaths    = int(m.group(3))
+                logger.info(f"[parse_row] HS found in td: {cell_text!r} → K={kills} HS={headshots} D={deaths}")
+                break
+
+        if kills is None:
+            # Strategy B: per-half row — find ALL K-D pairs, sum CT+T halves
+            all_kd = re.findall(r'(\d+)\s*[-–]\s*(\d+)', row_text)
+            # Filter pairs that look like kills-deaths (both ≤ 60 to exclude round counts)
+            kd_pairs = [(int(k), int(d)) for k, d in all_kd if int(k) <= 60 and int(d) <= 60]
+            if len(kd_pairs) >= 2:
+                # Two pairs = CT half + T half; sum for total
+                kills  = kd_pairs[0][0] + kd_pairs[1][0]
+                deaths = kd_pairs[0][1] + kd_pairs[1][1]
+                logger.info(f"[parse_row] Per-half sum: CT={kd_pairs[0]} T={kd_pairs[1]} → total K={kills} D={deaths}")
+            elif len(kd_pairs) == 1:
+                kills  = kd_pairs[0][0]
+                deaths = kd_pairs[0][1]
+            else:
                 continue
-            kills     = int(kd_match.group(1))
-            deaths    = int(kd_match.group(2))
-            headshots = None
 
         # Extract Rating 2.0 — it's a decimal like 1.15 in [0.40, 3.00]
         # found in td cells, typically the rightmost decimal value
