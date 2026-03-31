@@ -939,12 +939,31 @@ def build_result_embed(
     if opp_display:
         title += f" vs {opp_display}"
 
+    used_fallback = result.get("used_fallback", False)
+
+    if used_fallback:
+        data_line = "⚠️ HLTV data unavailable — estimated stats only"
+    else:
+        data_line = f"HLTV Live ({result.get('data_source', 'HLTV')})"
+
     description = (
         f"**Prop:** `{line} {stat_type}` ({'Over' if decision == 'OVER' else 'Under' if decision == 'UNDER' else decision})\n"
-        f"**Data:** {result.get('data_source', 'HLTV')}"
+        f"**Data:** {data_line}"
     )
 
     embed = discord.Embed(title=title, description=description, color=color)
+
+    # ── HLTV unavailable banner ───────────────────────────────────────────────
+    if used_fallback:
+        embed.add_field(
+            name="🚫 HLTV Data Unavailable",
+            value=(
+                "Could not retrieve live match data from HLTV for this player.\n"
+                "Stats below are **estimated** and no directional call has been made.\n"
+                "Check back later or try a different player."
+            ),
+            inline=False,
+        )
 
     # ── Warn user when the opponent team name was not found on HLTV ────────────
     if deep and deep.get("error") and result.get("opponent"):
@@ -1354,12 +1373,13 @@ def build_result_embed(
         inline=True,
     )
 
+    footer_data = (
+        "Data: Estimated (HLTV unavailable)"
+        if used_fallback
+        else "Data: HLTV (Last 10 BO3, Maps 1-2 only)"
+    )
     embed.set_footer(
-        text=(
-            "Elite CS2 Prop Grader | Negative Binomial Model | "
-            "Data: HLTV (Last 10 BO3, Maps 1-2 only) | "
-            "Not financial advice."
-        )
+        text=f"Elite CS2 Prop Grader | Negative Binomial Model | {footer_data} | Not financial advice."
     )
     return embed
 
