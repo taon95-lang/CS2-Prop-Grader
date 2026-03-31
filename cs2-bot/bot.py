@@ -37,7 +37,7 @@ DECISION_COLORS = {
 # (> _AWPER_HS_CAP), the scraping result is treated as an artifact and this
 # value is used instead.
 _KNOWN_AWPERS: dict[str, float] = {
-    "idisbalance": 0.22,
+    # Pure AWPers — low HS% because AWP kills land on body
     "sh1ro":       0.20,
     "zywoo":       0.26,
     "s1mple":      0.28,   # hybrid but still low for AWP role periods
@@ -45,7 +45,6 @@ _KNOWN_AWPERS: dict[str, float] = {
     "jl":          0.24,
     "maden":       0.23,
     "snappi":      0.24,   # AWP support
-    "ropz":        0.35,   # rifler with occasional AWP — borderline
     "mezii":       0.24,
     "floppyfish":  0.23,
     "syrson":      0.22,
@@ -54,11 +53,17 @@ _KNOWN_AWPERS: dict[str, float] = {
     "broky":       0.23,
     "azr":         0.25,
     "imorim":      0.22,
+    # Hybrid / entry riflers who occasionally AWP — higher HS% than pure AWPers
+    "ropz":        0.35,
+    # Riflers: scraped HS% is unreliable (HLTV detailed stats JS-rendered).
+    # Rates below are measured from real match data.
+    "idisbalance": 0.36,   # rifler — measured 35.8% vs State (19 HS / 53 kills)
 }
 
 # HS% above this threshold for a known AWPer is almost certainly a scraping
-# error — override with the known typical rate instead.
-_AWPER_HS_CAP = 0.33
+# artefact (often KAST% misread as HS%).  Override with the role-based estimate.
+# Set at 0.55 so genuine high-HS rifler readings are NOT blocked.
+_AWPER_HS_CAP = 0.55
 
 GRADE_EMOJIS = {
     range(1, 4): "🔴",
@@ -426,22 +431,24 @@ def _analyze_player(
                     logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
 
     if stat_type == "HS":
-        # --- AWPer sanity check ---
-        # AWP kills are body shots — their real HS% is 15–28%, not 38–55%.
-        # If we know the player is an AWPer and the scraped rate is unrealistically
-        # high, override it with the role-appropriate estimate.
+        # --- Known-rate override ---
+        # HLTV's detailed stats (K/hs column) are JavaScript-rendered and not
+        # available in static HTML.  Per-match HS% scraping often returns KAST%
+        # (~65-70%) by mistake.  For players in _KNOWN_AWPERS we use a
+        # pre-measured rate whenever the scraped value is above _AWPER_HS_CAP.
+        # This covers both true AWPers (low HS%) and riflers whose accurate rate
+        # has been manually verified from real match data.
         if pslug in _KNOWN_AWPERS:
             is_awper = True
             awper_known_rate = _KNOWN_AWPERS[pslug]
             if hs_rate is None or hs_rate > _AWPER_HS_CAP:
                 logger.info(
-                    f"[hs_scale] AWPer {pslug}: scraped={hs_rate} > cap={_AWPER_HS_CAP} "
-                    f"→ overriding with {awper_known_rate}"
+                    f"[hs_scale] Known rate override {pslug}: scraped={hs_rate} "
+                    f"> cap={_AWPER_HS_CAP} → using measured {awper_known_rate}"
                 )
                 hs_rate     = awper_known_rate
                 hs_rate_src = (
-                    f"AWPer role estimate ({round(awper_known_rate * 100)}% — "
-                    f"AWP kills are body shots)"
+                    f"measured rate ({round(awper_known_rate * 100)}%)"
                 )
                 awper_warn = True
 
