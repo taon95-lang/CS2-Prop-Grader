@@ -459,8 +459,11 @@ def _analyze_player(
 
         # Apply HS scaling per-map using the best available rate in priority order:
         #   1) Actual HS count from scorecard  → use directly
-        #   2) Per-match scraped HS% from the all-maps overview  → kills × match_hs_pct
-        #   3) Global hs_rate (recent avg or AWPer estimate)  → kills × hs_rate
+        #   2) Per-match scraped HS% (only for players NOT in _KNOWN_AWPERS,
+        #      because known-rate players use pre-verified rates that are more
+        #      reliable than HLTV's JS-rendered detailed stats scraped via fallback)
+        #   3) Global hs_rate (known rate override or recent avg)  → kills × hs_rate
+        use_known_rate = pslug in _KNOWN_AWPERS
         scaled_maps     = []
         n_actual        = 0
         n_match_pct     = 0
@@ -470,7 +473,7 @@ def _analyze_player(
             if m.get("headshots") is not None:
                 scaled_maps.append({**m, "stat_value": float(m["headshots"])})
                 n_actual += 1
-            elif m.get("match_hs_pct") is not None:
+            elif m.get("match_hs_pct") is not None and not use_known_rate:
                 est = round(kills * m["match_hs_pct"], 2)
                 scaled_maps.append({**m, "stat_value": est})
                 n_match_pct += 1
