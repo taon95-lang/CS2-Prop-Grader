@@ -249,14 +249,22 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             logger.debug(f"[parse] Player '{player_slug}' not found on map {map_num} ({map_name})")
             continue
 
-        # Extract K-D from the row — format is "22-14"
+        # Extract K, optional HS count, and D.
+        # HLTV scorecard format: "22 (8) - 14"  (detailed stats tab)
+        #                    or: "22-14"          (abbreviated view)
         row_text = player_row.get_text()
-        kd_match = re.search(r'(\d+)-(\d+)', row_text)
-        if not kd_match:
-            continue
-
-        kills  = int(kd_match.group(1))
-        deaths = int(kd_match.group(2))
+        kd_hs_match = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', row_text)
+        if kd_hs_match:
+            kills     = int(kd_hs_match.group(1))
+            headshots = int(kd_hs_match.group(2))
+            deaths    = int(kd_hs_match.group(3))
+        else:
+            kd_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', row_text)
+            if not kd_match:
+                continue
+            kills     = int(kd_match.group(1))
+            deaths    = int(kd_match.group(2))
+            headshots = None
 
         # Extract Rating 2.0 — it's a decimal like 1.15 in [0.40, 3.00]
         # found in td cells, typically the rightmost decimal value
@@ -321,6 +329,7 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
         maps_result.append({
             'map_name':      map_name,
             'kills':         kills,
+            'headshots':     headshots,   # int or None if not shown on scorecard
             'deaths':        deaths,
             'rating':        rating,
             'kast_pct':      kast_pct,
@@ -330,9 +339,10 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             'fd':            fd,
             'map_number':    map_num,
         })
+        _hs_str = f" HS={headshots}" if headshots is not None else ""
         logger.info(
             f"[parse] Map {map_num} ({map_name}): {player_slug} — "
-            f"{kills}K/{deaths}D rating={rating} fk={fk}"
+            f"{kills}K{_hs_str}/{deaths}D rating={rating} fk={fk}"
         )
 
     if not maps_result:
@@ -593,6 +603,7 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
             map_num = m.get('map_number', 1)
             map_kills.append({
                 'stat_value':    m['kills'],
+                'headshots':     m.get('headshots'),  # actual HS count or None
                 'rounds':        22,
                 'match_id':      match_id,
                 'map_name':      m['map_name'].lower(),
@@ -624,14 +635,27 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
     std = statistics.stdev(kill_values) if len(kill_values) > 1 else 4.0
     std = max(std, 2.0)  # floor to avoid degenerate distributions
 
-    # Compute recent HS% from the match-level samples we collected above
-    recent_hs_pct = None
-    if hs_pct_samples:
+    # Prefer actual per-map HS counts (scraped from "kills (HS)" in scorecard) over
+    # the all-maps overview HS% when available — it's the ground truth.
+    actual_hs_rates = [
+        mk['headshots'] / mk['stat_value']
+        for mk in map_kills
+        if mk.get('headshots') is not None and mk.get('stat_value', 0) > 0
+    ]
+    if actual_hs_rates:
+        recent_hs_pct = round(sum(actual_hs_rates) / len(actual_hs_rates), 3)
+        logger.info(
+            f"[hs_pct] Actual per-map HS% for {player_slug}: "
+            f"{round(recent_hs_pct*100, 1)}% (from {len(actual_hs_rates)} maps with real counts)"
+        )
+    elif hs_pct_samples:
         recent_hs_pct = round(sum(hs_pct_samples) / len(hs_pct_samples), 3)
         logger.info(
-            f"[hs_pct] Recent HS% for {player_slug}: {round(recent_hs_pct*100, 1)}% "
-            f"(avg of {len(hs_pct_samples)} matches)"
+            f"[hs_pct] Fallback overview HS% for {player_slug}: {round(recent_hs_pct*100, 1)}% "
+            f"(avg of {len(hs_pct_samples)} match overviews)"
         )
+    else:
+        recent_hs_pct = None
 
     return {
         'player':            display_name,

@@ -450,12 +450,22 @@ def _analyze_player(
             hs_rate     = 0.40
             hs_rate_src = "default (40% — rifler average; lower for AWPers)"
 
-        # Scale every map's kills → estimated headshots
-        map_stats = [
-            {**m, "stat_value": round(m["stat_value"] * hs_rate, 2)}
-            for m in map_stats
-        ]
-        logger.info(f"[hs_scale] stat_type=HS → scaled kills by {hs_rate} ({hs_rate_src})")
+        # Use actual HS counts from the scorecard if available; fall back to kills × rate.
+        scaled_maps = []
+        maps_with_actual_hs = 0
+        for m in map_stats:
+            if m.get("headshots") is not None:
+                scaled_maps.append({**m, "stat_value": float(m["headshots"])})
+                maps_with_actual_hs += 1
+            else:
+                scaled_maps.append({**m, "stat_value": round(m["stat_value"] * hs_rate, 2)})
+        map_stats = scaled_maps
+
+        if maps_with_actual_hs > 0:
+            hs_rate_src = f"actual scorecard HS counts ({maps_with_actual_hs}/{len(map_stats)} maps)"
+            logger.info(f"[hs_scale] stat_type=HS → {maps_with_actual_hs} maps use real HS counts, rest estimated at {hs_rate}")
+        else:
+            logger.info(f"[hs_scale] stat_type=HS → estimated kills×{hs_rate} ({hs_rate_src})")
     else:
         hs_rate_src = None
 
@@ -1092,11 +1102,17 @@ def build_result_embed(
             _hit = "✅" if s["total"] > line else "❌"
             _series_lines.append(f"S{i}: {_maps_str} = **{s['total']}** {_hit}")
         _breakdown_str = "\n".join(_series_lines)
-        try:
-            _hs_pct_num = round(float(str(_hs_rate_val).split('(')[1].split('%')[0]))
-            _breakdown_note = f"\n_Estimated from kills × {_hs_pct_num}% HS rate_" if _is_hs_prop else ""
-        except (IndexError, ValueError):
-            _breakdown_note = "\n_HS estimates applied_" if _is_hs_prop else ""
+        if _is_hs_prop:
+            if "actual scorecard" in str(_hs_rate_val):
+                _breakdown_note = "\n_Actual HS counts from HLTV scorecard_"
+            else:
+                try:
+                    _hs_pct_num = round(float(str(_hs_rate_val).split('(')[1].split('%')[0]))
+                    _breakdown_note = f"\n_Estimated: kills × {_hs_pct_num}% HS rate_"
+                except (IndexError, ValueError):
+                    _breakdown_note = "\n_HS estimates applied_"
+        else:
+            _breakdown_note = ""
     else:
         _breakdown_str = "_No breakdown available_"
         _breakdown_note = ""
