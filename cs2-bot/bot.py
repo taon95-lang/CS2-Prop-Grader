@@ -8,6 +8,7 @@ import logging
 from scraper import (
     get_player_info,
     get_player_info_fallback,
+    get_player_hs_pct,
 )
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
@@ -355,6 +356,37 @@ def _analyze_player(
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
+    # --- Step 2.5: HS% Scaling (only for HS props) ---
+    # The scraper always returns kill data. For HS props we convert kills → HS
+    # using the player's career HS% from their HLTV profile (or 40% default).
+    hs_rate      = None
+    hs_rate_src  = None
+    if stat_type == "HS" and not used_fallback:
+        _pid   = info.get("player_id")
+        _pslug = info.get("player_slug")
+        if _pid and _pslug:
+            try:
+                # grade_prop runs in a thread executor — call the blocking function directly
+                scraped_rate = get_player_hs_pct(_pid, _pslug)
+                if scraped_rate is not None:
+                    hs_rate     = scraped_rate
+                    hs_rate_src = f"HLTV profile ({round(scraped_rate * 100)}%)"
+            except Exception as _e:
+                logger.warning(f"HS% scrape failed ({type(_e).__name__}): {_e}")
+
+    if stat_type == "HS":
+        if hs_rate is None:
+            hs_rate     = 0.40   # pro-player average
+            hs_rate_src = "default (40% — pro average)"
+        # Scale every map's kills → estimated headshots
+        map_stats = [
+            {**m, "stat_value": round(m["stat_value"] * hs_rate, 2)}
+            for m in map_stats
+        ]
+        logger.info(f"[hs_scale] stat_type=HS → scaled kills by {hs_rate} ({hs_rate_src})")
+    else:
+        hs_rate_src = None
+
     # --- Step 3 (optional): Deep opponent analysis ---
     deep: dict | None = None
     if opponent:
@@ -416,11 +448,12 @@ def _analyze_player(
         logger.error(f"Simulation failed ({err_name}): {e}")
         return {"sim_error": err_name, "error": str(e)[:300]}
 
-    sim_result["data_source"] = data_source
+    sim_result["data_source"]  = data_source
     sim_result["used_fallback"] = used_fallback
-    sim_result["player_name"] = player_name
-    sim_result["line"] = line
-    sim_result["deep"] = deep
+    sim_result["player_name"]  = player_name
+    sim_result["line"]         = line
+    sim_result["deep"]         = deep
+    sim_result["hs_rate_src"]  = hs_rate_src  # None for kills props, str for HS props
 
     # If using estimated fallback data — override to PASS, never make directional calls
     # on invented stats. The grade stays for context but direction is unreliable.
@@ -768,6 +801,8 @@ def build_result_embed(
     color = DECISION_COLORS.get(decision, 0x7289DA)
     grade = result.get("grade", "N/A")
     emoji = grade_emoji(grade)
+    # Use the stat_type from result (set by simulator) so all labels match the prop type
+    stat_unit = result.get("stat_type", stat_type)   # "Kills" or "HS"
 
     deep = result.get("deep")
     opp_display = deep["opponent_display"] if deep and deep.get("opponent_display") else None
@@ -936,8 +971,8 @@ def build_result_embed(
         name="🔥 Recent Form",
         value=(
             f"**Trend:** {trend_label}\n"
-            f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` kills/map\n"
-            f"**Overall avg per map:** `{hist_avg_kills}` kills/map\n"
+            f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` {stat_unit}/map\n"
+            f"**Overall avg per map:** `{hist_avg_kills}` {stat_unit}/map\n"
             f"_Simulation is 70% weighted to recent form_"
         ),
         inline=False,
@@ -997,16 +1032,16 @@ def build_result_embed(
     ceiling    = result.get("ceiling", "N/A")
     floor_v    = result.get("floor", "N/A")
     map_kpr    = result.get("map_kpr", {})
-    # Show kills/map (KPR × 22) alongside KPR so it's human-readable
+    # Show stat/map (KPR × 22) alongside KPR so it's human-readable
     map_kpr_lines = "\n".join(
-        f"  `{mn.title()}`: `{round(v * 22, 1)}` kills/map  ({v} KPR)"
+        f"  `{mn.title()}`: `{round(v * 22, 1)}` {stat_unit}/map  ({v} KPR)"
         for mn, v in sorted(map_kpr.items(), key=lambda x: -x[1])
     ) if map_kpr else "  _No map-specific data_"
     embed.add_field(
         name="📉 Stability Score",
         value=(
-            f"**Std Dev (series):** `±{stab_std}` kills  —  {stab_label}\n"
-            f"**Ceiling:** `{ceiling}` kills  |  **Floor:** `{floor_v}` kills\n"
+            f"**Std Dev (series):** `±{stab_std}` {stat_unit}  —  {stab_label}\n"
+            f"**Ceiling:** `{ceiling}` {stat_unit}  |  **Floor:** `{floor_v}` {stat_unit}\n"
             f"**Per-Map Avg:**\n{map_kpr_lines}"
         ),
         inline=False,
@@ -1091,18 +1126,21 @@ def build_result_embed(
     fair_line_val  = result.get("fair_line", result.get("sim_median", "N/A"))
     misprice_label = result.get("misprice_label", "✅ Fair Line")
     line_pct       = result.get("line_percentile")
+    hs_rate_src    = result.get("hs_rate_src")
     if line_pct is not None:
         pct_direction = "⬆️ Lean OVER" if line_pct < 50 else ("⬇️ Lean UNDER" if line_pct > 50 else "⚖️ Coin Flip")
-        pct_line = f"**Line Percentile:** `{line_pct}%` of simulations fell at/below this line — {pct_direction}"
+        pct_line = f"**Line Percentile:** `{line_pct}%` of sims at/below line — {pct_direction}"
     else:
         pct_line = ""
+    hs_note = f"\n_HS rate source: {hs_rate_src}_" if hs_rate_src else ""
     embed.add_field(
         name="💰 Fair Line Analysis",
         value=(
-            f"**Fair Line (50/50):** `{fair_line_val}` kills\n"
-            f"**Sportsbook Line:** `{line}` kills\n"
+            f"**Fair Line (50/50):** `{fair_line_val}` {stat_unit}\n"
+            f"**Sportsbook Line:** `{line}` {stat_unit}\n"
             f"**Assessment:** {misprice_label}\n"
             + (f"{pct_line}" if pct_line else "")
+            + hs_note
         ),
         inline=False,
     )

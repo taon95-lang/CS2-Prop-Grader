@@ -401,6 +401,58 @@ def _parse_pistol_stats(html: str, player_slug: str) -> dict:
     return result
 
 
+def get_player_hs_pct(player_id: str, player_slug: str) -> float | None:
+    """
+    Scrape a player's career headshot % from their HLTV profile page.
+    Returns a float in [0.0, 1.0] or None if not found.
+
+    HLTV player page (/player/{id}/{slug}) shows stats including HS%.
+    The value appears near a label containing 'headshot' or 'hs'.
+    """
+    url  = f"{HLTV_BASE}/player/{player_id}/{player_slug}"
+    html = _fetch(url)
+    if not html:
+        return None
+
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Strategy 1: look for a stat row/cell mentioning 'headshot'
+    for tag in soup.find_all(['span', 'div', 'td', 'p']):
+        text = tag.get_text(strip=True).lower()
+        if 'headshot' in text or 'hs%' in text:
+            m = re.search(r'(\d{1,2})\.?\d*\s*%', tag.get_text())
+            if m:
+                val = float(m.group(1))
+                if 10 <= val <= 80:
+                    logger.info(f"[hs_pct] Scraped HS% for {player_slug}: {val}%")
+                    return round(val / 100, 3)
+            # Maybe it's in a sibling element
+            parent = tag.parent
+            if parent:
+                sib_text = parent.get_text()
+                m2 = re.search(r'(\d{1,2})\.?\d*\s*%', sib_text)
+                if m2:
+                    val = float(m2.group(1))
+                    if 10 <= val <= 80:
+                        logger.info(f"[hs_pct] Scraped HS% for {player_slug} (sibling): {val}%")
+                        return round(val / 100, 3)
+
+    # Strategy 2: Scan the entire page for lines like "42%" near "headshot"
+    raw = html.lower()
+    idx = raw.find('headshot')
+    if idx != -1:
+        snippet = html[max(0, idx - 50): idx + 100]
+        m = re.search(r'(\d{1,2})\.?\d*\s*%', snippet)
+        if m:
+            val = float(m.group(1))
+            if 10 <= val <= 80:
+                logger.info(f"[hs_pct] Scraped HS% for {player_slug} (text scan): {val}%")
+                return round(val / 100, 3)
+
+    logger.info(f"[hs_pct] Could not find HS% for {player_slug} — will use default")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Step 4 — Get HS kills specifically (from per-round headshot data if available)
 # ---------------------------------------------------------------------------
