@@ -87,8 +87,15 @@ def run_simulation(
     close_via_rank = False
 
     if rank_gap is not None:
-        if rank_gap > 50:
-            rounds_per_map_projected = 18
+        if rank_gap > 100:
+            # Heavy favourite — maps typically end ~19 rounds (16-3 territory)
+            rounds_per_map_projected = 19
+            match_context = f"Heavy Stomp (Rank gap {rank_gap}) — very short match risk"
+            stomp_via_rank = True
+        elif rank_gap > 50:
+            # Moderate mismatch — maps typically end ~20 rounds (16-4 territory)
+            # 18 was too aggressive: even lopsided CS2 maps rarely go below 20 rounds.
+            rounds_per_map_projected = 20
             match_context = f"Stomp Mismatch (Rank gap {rank_gap}) — short match risk"
             stomp_via_rank = True
         elif rank_gap < 15:
@@ -227,6 +234,7 @@ def run_simulation(
         stat_type=stat_type,
         stability_std=stability_std,
         trend_pct=trend_pct,
+        stomp_via_rank=stomp_via_rank,
     )
 
     return {
@@ -286,13 +294,19 @@ def calculate_grade(
     stat_type: str,
     stability_std: float = 0.0,
     trend_pct: float = 0.0,
+    stomp_via_rank: bool = False,
 ) -> tuple:
     """
     Apply grading scale and decision logic.
     Returns (grade_str, recommendation_str, decision_str).
     """
     # --- Decision Logic ---
-    stomp_trap = favorite_prob >= 0.72 and stat_type == "Kills"
+    # stomp_trap fires either from favorite_prob OR from a rank-based stomp
+    # projection (stomp_via_rank). When it's active the primary OVER/UNDER
+    # paths based on historical data are suppressed — the round-count model
+    # may have artificially moved over_prob away from 50 without historical
+    # backing, so PASS is the safe call.
+    stomp_trap = (favorite_prob >= 0.72 or stomp_via_rank) and stat_type == "Kills"
     avg_above = hist_avg > line
     median_above = hist_median > line
     hot_form  = trend_pct >= 12   # recent 4 maps running 12%+ above average
@@ -303,11 +317,15 @@ def calculate_grade(
 
     if avg_above and median_above and strong_hit_rate and not stomp_trap:
         decision = "OVER"
-    elif not avg_above and not median_above and weak_hit_rate and not hot_form:
-        # Don't call UNDER if player is trending hot — could be a line timing issue
+    elif not avg_above and not median_above and weak_hit_rate and not hot_form and not stomp_trap:
+        # Don't call UNDER if player is trending hot or if stomp projection
+        # may have artificially depressed over_prob
         decision = "UNDER"
     elif stomp_trap and avg_above:
         decision = "PASS"
+    elif stomp_trap and not avg_above and not median_above and weak_hit_rate and not hot_form:
+        # Historical data agrees with UNDER even accounting for stomp context
+        decision = "UNDER"
     else:
         # Edge-based decision — lower threshold when trend confirms direction
         over_threshold  = 0.05 if hot_form  else 0.08
@@ -315,7 +333,13 @@ def calculate_grade(
         if edge > over_threshold:
             decision = "OVER"
         elif edge < -under_threshold:
-            decision = "UNDER"
+            # Guard: if the stomp projection drove the edge negative but
+            # historical data (hit_rate, hist_avg) still leans OVER, call
+            # PASS rather than UNDER — the model and history contradict.
+            if stomp_via_rank and avg_above and median_above:
+                decision = "PASS"
+            else:
+                decision = "UNDER"
         elif hot_form and edge >= 0:
             # Player on a hot streak and edge is non-negative → lean OVER
             decision = "OVER"
