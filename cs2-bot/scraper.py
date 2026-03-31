@@ -286,7 +286,8 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
         kills     = None
         deaths    = None
 
-        # Strategy A: check each <td> for "kills(HS)-deaths" format (overview row)
+        # Strategy A: check each <td> individually for "kills(HS)-deaths" format.
+        # This appears in the overview/scorecard row on newer HLTV match pages.
         for td in player_row.find_all('td'):
             cell_text = td.get_text(strip=True)
             m = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', cell_text)
@@ -297,19 +298,12 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
                 logger.info(f"[parse_row] HS found in td: {cell_text!r} → K={kills} HS={headshots} D={deaths}")
                 break
 
+        # Strategy B: plain K-D from row text (first match only — total kills, not per-half sum)
         if kills is None:
-            # Strategy B: per-half row — find ALL K-D pairs, sum CT+T halves
-            all_kd = re.findall(r'(\d+)\s*[-–]\s*(\d+)', row_text)
-            # Filter pairs that look like kills-deaths (both ≤ 60 to exclude round counts)
-            kd_pairs = [(int(k), int(d)) for k, d in all_kd if int(k) <= 60 and int(d) <= 60]
-            if len(kd_pairs) >= 2:
-                # Two pairs = CT half + T half; sum for total
-                kills  = kd_pairs[0][0] + kd_pairs[1][0]
-                deaths = kd_pairs[0][1] + kd_pairs[1][1]
-                logger.info(f"[parse_row] Per-half sum: CT={kd_pairs[0]} T={kd_pairs[1]} → total K={kills} D={deaths}")
-            elif len(kd_pairs) == 1:
-                kills  = kd_pairs[0][0]
-                deaths = kd_pairs[0][1]
+            kd_match = re.search(r'(\d+)\s*[-–]\s*(\d+)', row_text)
+            if kd_match:
+                kills  = int(kd_match.group(1))
+                deaths = int(kd_match.group(2))
             else:
                 continue
 
@@ -516,21 +510,22 @@ def get_player_hs_pct(player_id: str, player_slug: str) -> float | None:
 
 def _parse_match_hs_pct(html: str, player_slug: str) -> float | None:
     """
-    Extract the player's HS% from a match page's all-maps overview table.
+    Extract the player's HS% from a match page's ALL-MAPS overview table only.
 
-    HLTV match pages show per-player all-map stats (kills, deaths, rating,
-    ADR, KAST%, HS%) in a summary section separate from per-map scorecards.
+    HLTV match pages have two stat views per map:
+      1) A per-map/per-half breakdown (CT K-D / T K-D / CT ADR / T ADR / CT KAST / T KAST)
+      2) An all-maps combined overview in id="all-content" (K(HS)-D / ADR / KAST / HS% / Rating)
 
-    Strategy: find any row that contains the player's slug, then pull
-    percentage cells. KAST% is typically 50-100, HS% is 10-65.
-    We take the LAST percentage in the row (KAST tends to be listed before HS).
-    Returns a float in [0.0, 1.0] or None.
+    We specifically target the all-maps section to avoid misreading KAST% from per-half rows.
+    Strategies (in priority order):
+      A) The all-content K-D cell shows "kills(HS)-deaths" → HS% = HS/kills (most accurate)
+      B) The all-content row has percentage cells → last in [10,70] range is HS%
+    Returns a float in [0.0, 1.0] or None if not found.
     """
     soup = BeautifulSoup(html, 'html.parser')
     slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
 
     def _row_pcts(row) -> list[int]:
-        """Return all XX% integer values from a <tr> row."""
         vals = []
         for cell in row.find_all(['td', 'th']):
             ct = cell.get_text(strip=True)
@@ -539,33 +534,44 @@ def _parse_match_hs_pct(html: str, player_slug: str) -> float | None:
                 vals.append(int(m.group(1)))
         return vals
 
-    # Strategy 1: scan every table row for the player name
-    for row in soup.find_all('tr'):
+    # ── Step 1: look in the all-maps overview section (id="all-content") ────────
+    all_content = soup.find(id='all-content')
+    search_scope = all_content if all_content else soup  # fallback to full page
+
+    for row in search_scope.find_all('tr'):
         row_norm = re.sub(r'[^a-z0-9]', '', row.get_text().lower())
         if slug_norm not in row_norm:
             continue
+
+        # Strategy A: find "kills(HS)-deaths" cell → compute HS% directly
+        for td in row.find_all('td'):
+            cell_text = td.get_text(strip=True)
+            m = re.search(r'(\d+)\s*\((\d+)\)\s*[-–]\s*(\d+)', cell_text)
+            if m:
+                kills = int(m.group(1))
+                hs    = int(m.group(2))
+                if kills > 0:
+                    rate = round(hs / kills, 3)
+                    logger.info(
+                        f"[hs_pct] All-maps K(HS)-D for {player_slug}: "
+                        f"{kills}K {hs}HS → {round(rate*100, 1)}%"
+                    )
+                    return rate
+
+        # Strategy B: percentage columns — KAST (50-100) comes before HS (10-70)
         pcts = _row_pcts(row)
         if not pcts:
             continue
-        # HLTV column order (typical): ...KAST(50-100)...HS(10-65)
-        # Take the last percentage that fits the HS range
-        hs_candidates = [p for p in pcts if 10 <= p <= 65]
+        # Use upper bound 70 to capture riflers; AWPers well below that
+        hs_candidates = [p for p in pcts if 10 <= p <= 70]
         if hs_candidates:
+            # The LAST candidate is typically HS% (KAST is listed first in HLTV columns)
             val = hs_candidates[-1]
-            logger.debug(f"[hs_pct] Row match for {player_slug}: pcts={pcts} → HS={val}%")
+            logger.info(
+                f"[hs_pct] All-maps pct for {player_slug}: pcts={pcts} → HS≈{val}%"
+                + (" (all-content)" if all_content else " (full-page fallback)")
+            )
             return round(val / 100, 3)
-
-    # Strategy 2: Scan anchors — the player's profile link often has a data-attribute
-    # or appears near their stats; look for HS% in siblings
-    for a_tag in soup.find_all('a', href=re.compile(rf'/player/\d+/{re.escape(player_slug)}', re.I)):
-        row = a_tag.find_parent('tr')
-        if row:
-            pcts = _row_pcts(row)
-            hs_candidates = [p for p in pcts if 10 <= p <= 65]
-            if hs_candidates:
-                val = hs_candidates[-1]
-                logger.debug(f"[hs_pct] Anchor match for {player_slug}: HS={val}%")
-                return round(val / 100, 3)
 
     return None
 
@@ -651,6 +657,7 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
             map_kills.append({
                 'stat_value':    m['kills'],
                 'headshots':     m.get('headshots'),  # actual HS count or None
+                'match_hs_pct':  match_hs,            # per-match scraped HS% (all-maps avg) or None
                 'rounds':        22,
                 'match_id':      match_id,
                 'map_name':      m['map_name'].lower(),

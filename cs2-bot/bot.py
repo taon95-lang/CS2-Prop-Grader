@@ -450,22 +450,35 @@ def _analyze_player(
             hs_rate     = 0.40
             hs_rate_src = "default (40% — rifler average; lower for AWPers)"
 
-        # Use actual HS counts from the scorecard if available; fall back to kills × rate.
-        scaled_maps = []
-        maps_with_actual_hs = 0
+        # Apply HS scaling per-map using the best available rate in priority order:
+        #   1) Actual HS count from scorecard  → use directly
+        #   2) Per-match scraped HS% from the all-maps overview  → kills × match_hs_pct
+        #   3) Global hs_rate (recent avg or AWPer estimate)  → kills × hs_rate
+        scaled_maps     = []
+        n_actual        = 0
+        n_match_pct     = 0
+        n_global        = 0
         for m in map_stats:
+            kills = m["stat_value"]
             if m.get("headshots") is not None:
                 scaled_maps.append({**m, "stat_value": float(m["headshots"])})
-                maps_with_actual_hs += 1
+                n_actual += 1
+            elif m.get("match_hs_pct") is not None:
+                est = round(kills * m["match_hs_pct"], 2)
+                scaled_maps.append({**m, "stat_value": est})
+                n_match_pct += 1
             else:
-                scaled_maps.append({**m, "stat_value": round(m["stat_value"] * hs_rate, 2)})
+                scaled_maps.append({**m, "stat_value": round(kills * hs_rate, 2)})
+                n_global += 1
         map_stats = scaled_maps
 
-        if maps_with_actual_hs > 0:
-            hs_rate_src = f"actual scorecard HS counts ({maps_with_actual_hs}/{len(map_stats)} maps)"
-            logger.info(f"[hs_scale] stat_type=HS → {maps_with_actual_hs} maps use real HS counts, rest estimated at {hs_rate}")
-        else:
-            logger.info(f"[hs_scale] stat_type=HS → estimated kills×{hs_rate} ({hs_rate_src})")
+        # Build a readable source label for the embed note
+        parts = []
+        if n_actual:     parts.append(f"{n_actual} actual scorecard")
+        if n_match_pct:  parts.append(f"{n_match_pct} per-match HS%")
+        if n_global:     parts.append(f"{n_global} AWPer/default estimate")
+        hs_rate_src = " + ".join(parts) if parts else hs_rate_src
+        logger.info(f"[hs_scale] HS sources: {hs_rate_src}")
     else:
         hs_rate_src = None
 
@@ -1103,14 +1116,13 @@ def build_result_embed(
             _series_lines.append(f"S{i}: {_maps_str} = **{s['total']}** {_hit}")
         _breakdown_str = "\n".join(_series_lines)
         if _is_hs_prop:
-            if "actual scorecard" in str(_hs_rate_val):
+            _src = str(_hs_rate_val)
+            if "actual scorecard" in _src and "per-match" not in _src and "estimate" not in _src:
                 _breakdown_note = "\n_Actual HS counts from HLTV scorecard_"
+            elif "per-match" in _src or "actual scorecard" in _src:
+                _breakdown_note = "\n_Per-match HS% from HLTV overview applied per series_"
             else:
-                try:
-                    _hs_pct_num = round(float(str(_hs_rate_val).split('(')[1].split('%')[0]))
-                    _breakdown_note = f"\n_Estimated: kills × {_hs_pct_num}% HS rate_"
-                except (IndexError, ValueError):
-                    _breakdown_note = "\n_HS estimates applied_"
+                _breakdown_note = "\n_AWPer/default HS rate applied (per-match data unavailable)_"
         else:
             _breakdown_note = ""
     else:
