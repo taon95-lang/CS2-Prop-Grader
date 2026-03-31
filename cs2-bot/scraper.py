@@ -35,12 +35,56 @@ except ImportError:
     logger.warning("curl_cffi not available — install it for HLTV access")
 
 
-_FETCH_RETRY_DELAYS = [0.6, 1.5, 3.0]   # seconds between retries on 403/CF block
+_FETCH_RETRY_DELAYS = [1.0, 2.5, 5.0]   # seconds between retries on 403/CF block
+
+# ---------------------------------------------------------------------------
+# Persistent HLTV session — shared across ALL requests so Cloudflare cookies
+# accumulate and the IP is treated as a returning browser, not a fresh bot.
+# ---------------------------------------------------------------------------
+
+_HLTV_SESSION: "_cffi_req.Session | None" = None
+_HLTV_SESSION_WARMED = False
+
+
+def _get_hltv_session() -> "_cffi_req.Session | None":
+    """Return the shared persistent HLTV curl_cffi Session, creating it if needed."""
+    global _HLTV_SESSION
+    if not _CFFI_OK:
+        return None
+    if _HLTV_SESSION is None:
+        try:
+            _HLTV_SESSION = _cffi_req.Session(impersonate="chrome120")
+            logger.info("[session] Created persistent HLTV session")
+        except Exception as e:
+            logger.warning(f"[session] Could not create session: {e}")
+    return _HLTV_SESSION
+
+
+def _warm_hltv_session() -> None:
+    """Visit the HLTV homepage once to seed Cloudflare cookies in the session."""
+    global _HLTV_SESSION_WARMED
+    if _HLTV_SESSION_WARMED:
+        return
+    sess = _get_hltv_session()
+    if sess is None:
+        return
+    try:
+        r = sess.get(HLTV_BASE + "/", timeout=15)
+        logger.info(f"[session] Homepage warm-up: {r.status_code}")
+        _HLTV_SESSION_WARMED = True
+        time.sleep(0.5)   # brief pause after warm-up
+    except Exception as e:
+        logger.warning(f"[session] Warm-up failed: {e}")
 
 
 def _fetch(url: str, max_retries: int = 3) -> str | None:
     """
-    Fetch a URL using curl_cffi Chrome impersonation.
+    Fetch a URL using the persistent HLTV session (curl_cffi Chrome impersonation).
+
+    Using a persistent Session means Cloudflare cookies (especially __cf_bm)
+    accumulate across requests, making the connection look like a real returning
+    browser rather than a fresh stateless bot probe.
+
     Retries up to max_retries times with increasing delays on 403 / CF block.
     Returns None only after all retries are exhausted.
     """
@@ -48,15 +92,20 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
         logger.warning(f"[fetch] curl_cffi not available, skipping {url}")
         return None
 
+    _warm_hltv_session()   # no-op after first call
+    sess = _get_hltv_session()
+    if sess is None:
+        return None
+
     for attempt in range(max_retries):
         try:
             tag = f" (retry {attempt})" if attempt else ""
             logger.info(f"[fetch] GET {url}{tag}")
-            resp = _cffi_req.get(url, impersonate="chrome120", timeout=FETCH_TIMEOUT)
+            resp = sess.get(url, timeout=FETCH_TIMEOUT)
             if resp.status_code == 200 and "Just a moment" not in resp.text:
                 logger.info(f"[fetch] OK — {len(resp.text):,} chars")
                 return resp.text
-            # Non-200 or CF challenge
+            # Non-200 or CF challenge page
             if attempt < max_retries - 1:
                 delay = _FETCH_RETRY_DELAYS[attempt]
                 logger.warning(
@@ -135,35 +184,28 @@ _STATS_PAGES_BLOCKED = False  # circuit-breaker: stop trying after first confirm
 
 
 def _get_stats_session() -> "_cffi_req.Session | None":
-    """Return a persistent curl_cffi Session, initialising it lazily."""
-    global _STATS_SESSION
-    if not _CFFI_OK:
-        return None
-    if _STATS_SESSION is None:
-        try:
-            from curl_cffi import requests as _cr
-            _STATS_SESSION = _cr.Session(impersonate="chrome120")
-        except Exception as e:
-            logger.warning(f"[stats_session] Could not create session: {e}")
-    return _STATS_SESSION
+    """
+    Return the shared persistent HLTV session for stats page requests.
+    Reuses _HLTV_SESSION so all requests share the same Cloudflare cookies.
+    """
+    return _get_hltv_session()
 
 
 def _warm_stats_session(match_url: str) -> bool:
     """
-    Visit the homepage then the match page to accumulate Cloudflare cookies
-    before attempting any /stats/ request.  Returns True if the warm-up
-    pages loaded successfully.
+    Warm the shared HLTV session for stats page access by visiting
+    the match page (homepage is already done by _warm_hltv_session).
+    Returns True when the session is ready.
     """
-    global _STATS_SESSION_WARMED
+    global _STATS_SESSION_WARMED, _HLTV_SESSION_WARMED
+    if _STATS_SESSION_WARMED:
+        return True
     sess = _get_stats_session()
     if sess is None:
         return False
-    if _STATS_SESSION_WARMED:
-        return True
+    # Ensure homepage warm-up has happened (sets _HLTV_SESSION_WARMED)
+    _warm_hltv_session()
     try:
-        r1 = sess.get(HLTV_BASE + "/", timeout=15)
-        logger.info(f"[stats_session] Warm-up homepage: {r1.status_code}")
-        time.sleep(1)
         r2 = sess.get(match_url, timeout=FETCH_TIMEOUT)
         logger.info(f"[stats_session] Warm-up match page: {r2.status_code} len={len(r2.text)}")
         if r2.status_code == 200:
@@ -440,15 +482,46 @@ def search_player_v2(name: str) -> tuple[str, str, str] | None:
 # Step 2 — Get player's recent BO3 match IDs from the results page
 # ---------------------------------------------------------------------------
 
+# Match ID cache: player_id → (fetched_at_timestamp, [(match_id, slug), ...])
+# TTL: 3 hours — matches don't change; player gets new results every few days.
+_MATCH_IDS_CACHE: dict[str, tuple[float, list]] = {}
+_MATCH_IDS_CACHE_TTL = 3 * 3600  # 3 hours
+
+
 def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[str, str]]:
     """
     Fetch /results?player={id} and return a list of (match_id, slug) tuples
     for recently completed matches. Only returns large IDs (7+ digits) which
     correspond to accessible HLTV match pages.
+
+    Results are cached for 3 hours — if HLTV returns 403 on a repeat query,
+    we serve the last successful fetch rather than falling to estimated data.
     """
+    now = time.time()
+
+    # Serve from cache if fresh
+    if player_id in _MATCH_IDS_CACHE:
+        cached_at, cached_ids = _MATCH_IDS_CACHE[player_id]
+        age_min = round((now - cached_at) / 60)
+        if (now - cached_at) < _MATCH_IDS_CACHE_TTL:
+            logger.info(
+                f"[results] Cache hit for player {player_id}: "
+                f"{len(cached_ids)} match IDs (age {age_min}min)"
+            )
+            return cached_ids
+        logger.info(f"[results] Cache stale for player {player_id} ({age_min}min) — refreshing")
+
     url = f"{HLTV_BASE}/results?player={player_id}"
     html = _fetch(url)
     if not html:
+        # Return stale cache rather than nothing
+        if player_id in _MATCH_IDS_CACHE:
+            _, stale = _MATCH_IDS_CACHE[player_id]
+            logger.warning(
+                f"[results] Live fetch failed — serving stale cache "
+                f"({len(stale)} IDs) for player {player_id}"
+            )
+            return stale
         return []
 
     # Find all match links on the page — only large IDs work (small IDs return 500)
@@ -460,6 +533,9 @@ def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[st
 
     results = list(seen.items())[:max_matches]
     logger.info(f"[results] Found {len(results)} match IDs for player {player_id}")
+
+    # Store in cache
+    _MATCH_IDS_CACHE[player_id] = (now, results)
     return results
 
 

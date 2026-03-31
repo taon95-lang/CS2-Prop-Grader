@@ -9,6 +9,7 @@ from scraper import (
     get_player_info,
     get_player_info_fallback,
     get_player_hs_pct,
+    _warm_hltv_session,
 )
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
@@ -100,6 +101,11 @@ async def on_ready():
         logger.info(f"Synced {len(synced)} slash command(s) globally")
     except Exception as e:
         logger.error(f"Failed to sync slash commands: {e}")
+
+    # Pre-warm the persistent HLTV session so Cloudflare cookies are set
+    # before the first user command arrives. Run in executor to avoid blocking.
+    loop = asyncio.get_event_loop()
+    loop.run_in_executor(None, _warm_hltv_session)
 
     await bot.change_presence(
         activity=discord.Activity(
