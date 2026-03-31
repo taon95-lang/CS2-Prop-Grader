@@ -62,12 +62,127 @@ BASELINE_KILLS = 18.5
 
 _RANK_CACHE: dict[str, tuple] = {}    # team_id → (timestamp, rank | None)
 _OPP_CACHE: dict[str, tuple] = {}     # team_id → (timestamp, data_dict)
+_RANKING_PAGE_CACHE: dict[str, tuple] = {}  # "page" → (timestamp, html)
 RANK_TTL = 6 * 3600
 OPP_TTL  = 4 * 3600
+RANKING_PAGE_TTL = 3600  # 1 hour — ranking page changes infrequently
 
 # ---------------------------------------------------------------------------
 # 1. Team ranking
 # ---------------------------------------------------------------------------
+
+def _rank_from_team_page(html: str, team_slug: str) -> int | None:
+    """
+    Parse a team's world ranking from their HLTV profile page HTML.
+    Tries multiple extraction strategies in priority order.
+    """
+    # Strategy 1: JSON field "worldRanking" (most specific — avoids false positives
+    # from "individualRanking" or other "ranking" keys that appear in the same JSON)
+    m = re.search(r'"worldRanking"\s*:\s*(\d+)', html, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    # Strategy 2: profile-team-stat div — HLTV renders:
+    #   <div class="profile-team-stat">
+    #     <b>World ranking</b><a ...>#77</a>
+    #   </div>
+    # Use BeautifulSoup to find the exact stat block
+    try:
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(html, 'html.parser')
+        for stat in soup.find_all(class_='profile-team-stat'):
+            label = stat.find('b')
+            if label and 'world ranking' in label.get_text(strip=True).lower():
+                val = stat.find('a') or stat.find(class_='value')
+                if val:
+                    m2 = re.search(r'#(\d+)', val.get_text(strip=True))
+                    if m2:
+                        return int(m2.group(1))
+    except Exception:
+        pass
+
+    # Strategy 3: generic "World ranking #N" anywhere in page text
+    m = re.search(r'World\s+ranking\s*[^<]{0,30}#\s*(\d+)', html, re.IGNORECASE | re.DOTALL)
+    if m:
+        return int(m.group(1))
+
+    # Strategy 4: teamRanking CSS class containing "#N"
+    m = re.search(r'class=["\'][^"\']*teamRanking[^"\']*["\'][^>]*>(?:[^<]{0,20})?#\s*(\d+)', html, re.IGNORECASE)
+    if m:
+        return int(m.group(1))
+
+    return None
+
+
+def _fetch_ranking_page() -> str | None:
+    """Fetch (and cache for 1 hour) the HLTV world team ranking page HTML."""
+    cached = _RANKING_PAGE_CACHE.get("page")
+    if cached:
+        ts, html = cached
+        if time.time() - ts < RANKING_PAGE_TTL:
+            return html
+    url = f"{HLTV_BASE}/ranking/teams"
+    html = _fetch(url)
+    if html:
+        _RANKING_PAGE_CACHE["page"] = (time.time(), html)
+    return html
+
+
+def _rank_from_ranking_page(team_id: str) -> int | None:
+    """
+    Find a team's world ranking from the HLTV ranking page.
+    HLTV renders:
+        <div class="ranked-team" data-team-id="XXXXX">
+            <div class="ranking-header">
+                <span class="position">#77</span>
+            </div>
+            ...
+        </div>
+    """
+    html = _fetch_ranking_page()
+    if not html:
+        return None
+
+    try:
+        from bs4 import BeautifulSoup as _BS
+        soup = _BS(html, 'html.parser')
+
+        # Primary: data-team-id attribute on the ranked-team block
+        for block in soup.find_all(attrs={"data-team-id": True}):
+            if str(block.get("data-team-id")) == str(team_id):
+                pos_tag = block.find(class_=re.compile(r'position', re.I))
+                if pos_tag:
+                    m = re.search(r'(\d+)', pos_tag.get_text())
+                    if m:
+                        return int(m.group(1))
+                # Fallback: look for #N in the block's raw text
+                m = re.search(r'#\s*(\d+)', block.get_text())
+                if m:
+                    return int(m.group(1))
+
+        # Secondary: look for /team/TEAM_ID/ links inside ranked-team divs
+        for block in soup.find_all(class_=re.compile(r'ranked-team', re.I)):
+            if f'/team/{team_id}/' in str(block):
+                pos_tag = block.find(class_=re.compile(r'position', re.I))
+                if pos_tag:
+                    m = re.search(r'(\d+)', pos_tag.get_text())
+                    if m:
+                        return int(m.group(1))
+    except Exception as e:
+        logger.warning(f"[rank] ranking page parse error: {e}")
+
+    # Last resort: simple regex scan for data-team-id="X" ... position ... #N
+    m = re.search(
+        rf'data-team-id=["\']?{re.escape(str(team_id))}["\']?[^>]*>(.*?)</div>',
+        html, re.IGNORECASE | re.DOTALL
+    )
+    if m:
+        m2 = re.search(r'#\s*(\d+)', m.group(1))
+        if m2:
+            return int(m2.group(1))
+
+    return None
+
 
 def get_team_rank(team_id: str, team_slug: str) -> int | None:
     cached = _RANK_CACHE.get(team_id)
@@ -76,31 +191,25 @@ def get_team_rank(team_id: str, team_slug: str) -> int | None:
         if time.time() - ts < RANK_TTL:
             return rank
 
+    rank = None
+
+    # Tier 1: parse from the team's own profile page
     url = f"{HLTV_BASE}/team/{team_id}/{team_slug}"
     html = _fetch(url)
-    if not html:
-        _RANK_CACHE[team_id] = (time.time(), None)
-        return None
+    if html:
+        rank = _rank_from_team_page(html, team_slug)
 
-    patterns = [
-        r'"ranking":\s*(\d+)',
-        r'teamRanking[^<]{0,100}#\s*(\d+)',
-        r'World\s+ranking\s*#\s*(\d+)',
-        r'ranked\s*#\s*(\d+)',
-        r'#(\d+)\s+in the world',
-        r'(?:rank|ranking)[^<]{0,60}>\s*#\s*(\d+)',
-    ]
-    for p in patterns:
-        m = re.search(p, html, re.IGNORECASE)
-        if m:
-            rank = int(m.group(1))
-            _RANK_CACHE[team_id] = (time.time(), rank)
-            logger.info(f"[rank] {team_slug} → #{rank}")
-            return rank
+    # Tier 2: if team page didn't yield a rank, check the live rankings page
+    if rank is None:
+        logger.info(f"[rank] Team page gave no rank for {team_slug} — trying ranking page")
+        rank = _rank_from_ranking_page(team_id)
 
-    _RANK_CACHE[team_id] = (time.time(), None)
-    logger.warning(f"[rank] could not parse rank for {team_slug}")
-    return None
+    _RANK_CACHE[team_id] = (time.time(), rank)
+    if rank is not None:
+        logger.info(f"[rank] {team_slug} → #{rank}")
+    else:
+        logger.warning(f"[rank] could not determine rank for {team_slug} (team_id={team_id})")
+    return rank
 
 # ---------------------------------------------------------------------------
 # 2. Map name extraction from a match page
