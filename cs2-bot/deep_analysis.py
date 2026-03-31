@@ -392,7 +392,8 @@ def get_h2h_stats(
         if len(results) >= n:
             break
         time.sleep(0.35)
-        page_html = _fetch(f"{HLTV_BASE}/matches/{match_id}/{slug}")
+        _match_url = f"{HLTV_BASE}/matches/{match_id}/{slug}"
+        page_html = _fetch(_match_url)
         if not page_html:
             continue
 
@@ -400,7 +401,7 @@ def get_h2h_stats(
         if f'/team/{opponent_team_id}/' not in page_html:
             continue
 
-        parsed = _parse_match_kills(page_html, player_slug)
+        parsed = _parse_match_kills(page_html, player_slug, _match_url)
         if not parsed or not parsed.get('maps'):
             continue
 

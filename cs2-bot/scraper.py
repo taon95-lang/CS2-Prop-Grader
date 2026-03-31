@@ -7,11 +7,12 @@ Discovered accessible paths (no Cloudflare block):
   /results?player={id}          → player's recent results (get match IDs)
   /results?team={id}            → team's recent results (get match IDs)
   /matches/{id}/{slug}          → match detail page (per-map kill stats)
+  /stats/matches/mapstatsid/... → per-map detailed stats with K(hs) column
+                                  (requires cookie-warmed session — falls back
+                                  gracefully if Cloudflare blocks the request)
 
-Blocked paths (Cloudflare Turnstile — DO NOT USE):
-  /stats/players                → always 403
-  /stats/players/...            → always 403
-  /stats/matches/...            → always 403
+Previously blocked but now attempted via session warm-up:
+  /stats/players/...            → attempted, falls back if 403
 """
 
 import re
@@ -41,7 +42,7 @@ def _fetch(url: str) -> str | None:
         return None
     try:
         logger.info(f"[fetch] GET {url}")
-        resp = _cffi_req.get(url, impersonate="chrome110", timeout=FETCH_TIMEOUT)
+        resp = _cffi_req.get(url, impersonate="chrome120", timeout=FETCH_TIMEOUT)
         if resp.status_code == 200 and "Just a moment" not in resp.text:
             logger.info(f"[fetch] OK — {len(resp.text):,} chars")
             return resp.text
@@ -50,6 +51,208 @@ def _fetch(url: str) -> str | None:
     except Exception as e:
         logger.warning(f"[fetch] {type(e).__name__}: {e}")
         return None
+
+
+# ---------------------------------------------------------------------------
+# Session-based fetcher for /stats/ pages (requires warm cookie session)
+# ---------------------------------------------------------------------------
+
+_STATS_SESSION: "_cffi_req.Session | None" = None
+_STATS_SESSION_WARMED = False
+_STATS_PAGES_BLOCKED = False  # circuit-breaker: stop trying after first confirmed 403
+
+
+def _get_stats_session() -> "_cffi_req.Session | None":
+    """Return a persistent curl_cffi Session, initialising it lazily."""
+    global _STATS_SESSION
+    if not _CFFI_OK:
+        return None
+    if _STATS_SESSION is None:
+        try:
+            from curl_cffi import requests as _cr
+            _STATS_SESSION = _cr.Session(impersonate="chrome120")
+        except Exception as e:
+            logger.warning(f"[stats_session] Could not create session: {e}")
+    return _STATS_SESSION
+
+
+def _warm_stats_session(match_url: str) -> bool:
+    """
+    Visit the homepage then the match page to accumulate Cloudflare cookies
+    before attempting any /stats/ request.  Returns True if the warm-up
+    pages loaded successfully.
+    """
+    global _STATS_SESSION_WARMED
+    sess = _get_stats_session()
+    if sess is None:
+        return False
+    if _STATS_SESSION_WARMED:
+        return True
+    try:
+        r1 = sess.get(HLTV_BASE + "/", timeout=15)
+        logger.info(f"[stats_session] Warm-up homepage: {r1.status_code}")
+        time.sleep(1)
+        r2 = sess.get(match_url, timeout=FETCH_TIMEOUT)
+        logger.info(f"[stats_session] Warm-up match page: {r2.status_code} len={len(r2.text)}")
+        if r2.status_code == 200:
+            _STATS_SESSION_WARMED = True
+            return True
+    except Exception as e:
+        logger.warning(f"[stats_session] Warm-up failed: {e}")
+    return False
+
+
+def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
+    """
+    Attempt to fetch an HLTV /stats/matches/mapstatsid/ page using a
+    cookie-warmed session.  Returns HTML string or None on failure.
+
+    A module-level circuit-breaker (_STATS_PAGES_BLOCKED) stops retrying
+    after the first confirmed 403, so we never waste time on pages that
+    are blocked in this environment.
+    """
+    global _STATS_PAGES_BLOCKED
+    if _STATS_PAGES_BLOCKED:
+        return None
+    sess = _get_stats_session()
+    if sess is None:
+        return None
+    _warm_stats_session(match_url)
+    try:
+        logger.info(f"[stats_fetch] GET {stats_url}")
+        resp = sess.get(
+            stats_url,
+            headers={"Referer": match_url},
+            timeout=12,  # shorter timeout so blocked requests don't stall the bot
+        )
+        if resp.status_code == 200 and len(resp.text) > 5000 and "Just a moment" not in resp.text:
+            logger.info(f"[stats_fetch] OK — {len(resp.text):,} chars")
+            return resp.text
+        if resp.status_code == 403:
+            logger.warning(
+                "[stats_fetch] 403 received — stats pages are Cloudflare-blocked in this "
+                "environment. Activating circuit-breaker; HS will use calibrated fallback rates."
+            )
+            _STATS_PAGES_BLOCKED = True
+        else:
+            logger.warning(f"[stats_fetch] status={resp.status_code} len={len(resp.text)} — skipping")
+        return None
+    except Exception as e:
+        logger.warning(f"[stats_fetch] {type(e).__name__}: {e}")
+        return None
+
+
+def _parse_map_stats_hs(html: str, player_slug: str) -> tuple[int | None, int | None]:
+    """
+    Parse a /stats/matches/mapstatsid/ page.
+
+    The page contains a .stats-table (or table.stats-table) with these columns:
+      Player | K (hs) | A (f) | D (t) | ADR | KAST | Rating ...
+    The "K (hs)" cell is formatted as "15 (4)" — Total Kills (Headshots).
+
+    Extraction logic per the user spec:
+      headshots = text.split('(')[1].replace(')', '')
+
+    The K(hs) column is typically the 5th column (index 4) but we detect it by
+    scanning headers for text that contains both "K" and "(" or "hs".
+
+    Returns (kills, headshots) or (None, None) if not found.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+
+    # Locate the stats table — HLTV uses class="stats-table" on the main table
+    stats_tables = (
+        soup.find_all(class_='stats-table') or
+        soup.find_all('table', class_=re.compile(r'stats.?table', re.I)) or
+        soup.find_all('table')
+    )
+
+    for tbl in stats_tables:
+        # Find header row
+        header_row = tbl.find('tr')
+        if not header_row:
+            continue
+        headers = header_row.find_all(['th', 'td'])
+
+        # Identify the K(hs) column — contains "K" and "(" or "hs" in header text
+        khs_col = None
+        d_col   = None
+        for ci, hdr in enumerate(headers):
+            ht = hdr.get_text(strip=True).lower()
+            # Exact match: "k (hs)", "k(hs)", "kills (hs)", etc.
+            if khs_col is None and re.search(r'k.*\(.*hs|hs.*\)', ht):
+                khs_col = ci
+                logger.debug(f"[map_stats] K(hs) col={ci} header={ht!r}")
+            # Death column: "d (t)" or just "d"
+            if d_col is None and re.search(r'^d[\s(]|^deaths', ht):
+                d_col = ci
+
+        # If no explicit K(hs) header found, try column index 4 then 5 (user spec)
+        if khs_col is None:
+            all_headers_text = [h.get_text(strip=True) for h in headers]
+            logger.debug(f"[map_stats] Table headers: {all_headers_text}")
+            # Check columns 4 and 5 for "(N)" pattern in first data row
+            first_data_row = tbl.find_all('tr')[1] if len(tbl.find_all('tr')) > 1 else None
+            if first_data_row:
+                data_cells = first_data_row.find_all('td')
+                for probe_col in (4, 5, 3):
+                    if probe_col < len(data_cells):
+                        ct = data_cells[probe_col].get_text(strip=True)
+                        if re.search(r'\d+\s*\(\d+\)', ct):
+                            khs_col = probe_col
+                            logger.info(f"[map_stats] K(hs) col probed at index {probe_col}: {ct!r}")
+                            break
+
+        if khs_col is None:
+            continue  # No K(hs) column found in this table
+
+        # Scan data rows for the player
+        for tr in tbl.find_all('tr')[1:]:
+            row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm not in row_norm:
+                continue
+
+            cells = tr.find_all('td')
+            if khs_col >= len(cells):
+                continue
+
+            cell_text = cells[khs_col].get_text(strip=True)
+            logger.info(f"[map_stats] K(hs) cell for {player_slug!r}: {cell_text!r}")
+
+            # --- User-specified parse logic ---
+            # headshots = text.split('(')[1].replace(')', '')
+            kills_hs = None
+            headshots = None
+
+            if '(' in cell_text:
+                try:
+                    hs_str = cell_text.split('(')[1].replace(')', '').strip()
+                    headshots = int(hs_str)
+                    # Extract kills: everything before the '('
+                    kills_str = cell_text.split('(')[0].strip()
+                    kills_m = re.search(r'(\d+)', kills_str)
+                    if kills_m:
+                        kills_hs = int(kills_m.group(1))
+                    logger.info(
+                        f"[map_stats] Parsed K(hs) — kills={kills_hs} headshots={headshots}"
+                    )
+                    return kills_hs, headshots
+                except (IndexError, ValueError) as e:
+                    logger.warning(f"[map_stats] Parse error on {cell_text!r}: {e}")
+
+            # Fallback: try regex directly on the cell text
+            m = re.search(r'(\d+)\s*\((\d+)\)', cell_text)
+            if m:
+                kills_hs  = int(m.group(1))
+                headshots = int(m.group(2))
+                logger.info(
+                    f"[map_stats] Regex fallback K(hs) — kills={kills_hs} headshots={headshots}"
+                )
+                return kills_hs, headshots
+
+    logger.info(f"[map_stats] No K(hs) data found for {player_slug!r} in stats page")
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -168,23 +371,25 @@ def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[st
 # Step 3 — Parse a match page for per-map kills
 # ---------------------------------------------------------------------------
 
-def _parse_match_kills(html: str, player_slug: str) -> dict:
+def _parse_match_kills(html: str, player_slug: str, match_url: str = "") -> dict:
     """
     Parse an HLTV match page and return:
       {
         'bo_type': 3,          # or 1/2
         'maps': [
-          {'map_name': 'Dust2', 'kills': 22, 'deaths': 14, 'map_number': 1},
-          {'map_name': 'Inferno', 'kills': 19, 'deaths': 17, 'map_number': 2},
+          {'map_name': 'Dust2', 'kills': 22, 'deaths': 14, 'headshots': 4, 'map_number': 1},
+          {'map_name': 'Inferno', 'kills': 19, 'deaths': 17, 'headshots': None, 'map_number': 2},
           ...
         ]
       }
     Returns None if the player isn't found or the match page has no stats.
+
+    headshots is populated from the /stats/matches/mapstatsid/ page K(hs) column
+    when accessible, otherwise None (callers fall back to calibrated HS rates).
     """
     soup = BeautifulSoup(html, 'html.parser')
 
     # Determine BO type from score (e.g. Vitality 2 - NaVi 1)
-    score_elements = soup.find_all(class_=re.compile(r'won|lost|teamWon|teamLost', re.I))
     team_scores = re.findall(r'>\s*(\d)\s*<', html[:50000])
     bo_type = 1
     if team_scores:
@@ -201,7 +406,6 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
 
     # Get ordered map IDs from the tab navigation
     tab_ids = re.findall(r'id="(\d{5,7})"', str(matchstats))
-    # Deduplicate preserving order, skip 'all'
     seen_ids = []
     for tid in tab_ids:
         if tid not in seen_ids:
@@ -209,6 +413,23 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
     map_ids = seen_ids  # ordered by map number
 
     logger.info(f"[parse] Maps found: {map_ids} | BO type: {bo_type}")
+
+    # ── Extract mapstatsid URLs for each map (for Strategy 0 — K(hs) column) ──
+    # HLTV embeds links like /stats/matches/mapstatsid/224728/state-vs-bebop
+    # in the match page HTML.  We index them in the same order as map_ids.
+    _raw_mapstat_links = re.findall(
+        r'/stats/matches/mapstatsid/(\d+)/([\w-]+)', html
+    )
+    # Deduplicate preserving order (each mapstatsid appears once)
+    _seen_msid: dict[str, str] = {}
+    for msid, msslug in _raw_mapstat_links:
+        if msid not in _seen_msid:
+            _seen_msid[msid] = msslug
+    # Build ordered list aligned to map_ids (best-effort; same count usually)
+    _mapstat_urls: list[str] = []
+    for msid, msslug in _seen_msid.items():
+        _mapstat_urls.append(f"{HLTV_BASE}/stats/matches/mapstatsid/{msid}/{msslug}")
+    logger.info(f"[parse] Map stats URLs: {_mapstat_urls}")
 
     # Get map names from the tab labels
     map_names = {}
@@ -238,73 +459,95 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
                 if '(' in ct and re.search(r'\d+\s*\(\d+\)', ct):
                     _hs_cells.append(repr(ct[:80]))
             logger.info(f"[hs_locate] Map1 cells with '(N)' pattern: {_hs_cells[:10]}")
-            # Also dump all unique table classes in this content div
             _tbl_classes = [str(t.get('class', '')) for t in content_div.find_all('table')]
             logger.info(f"[hs_locate] Table classes in content_div: {_tbl_classes}")
 
         # ── Extract kills, headshots, deaths ──────────────────────────────────
-        # HLTV has two stat tables per map inside the content div:
         #
-        #   1) OVERVIEW table  — columns: K | A | D | ADR | KAST | Swing | Rating
-        #      Player cells are plain integers (e.g. "15", "10", "14").
+        # Strategy 0 — /stats/matches/mapstatsid/ page (PRIMARY, highest fidelity)
+        #   The dedicated map stats page contains a .stats-table with a "K (hs)"
+        #   column formatted as "15 (4)" — Total Kills (Headshots).  We extract:
+        #     headshots = text.split('(')[1].replace(')', '')
+        #   This is JavaScript-rendered on the match page but available as static
+        #   HTML on the mapstatsid sub-page (requires a warmed cookie session).
         #
-        #   2) DETAILED STATS table — columns: Op K-D | MKs | KAST | 1vsX |
-        #      K (hs) | A (f) | D (t) | ADR | Swing | Rating
-        #      The "K (hs)" cell contains e.g. "15 (4)" — kills and headshots.
+        # Strategy A — match page Detailed-stats table — K (hs) header in HTML
+        #   (present on some older HLTV page versions)
         #
-        # Strategy A: find the detailed-stats table by its "K (hs)" header.
-        # Strategy B: find the overview table by its plain "K" header.
-        # Strategy C: regex scan on any row containing the player — last resort.
+        # Strategy B — match page totalstats table — K-D combined column
+        #   HLTV's current format: columns are K-D | eK-eD | Swing | ADR | ...
+        #   First number in "K-D" cell is total kills.
+        #
+        # Strategy C — Regex scan on any row containing the player — last resort.
 
         headshots  = None
         kills      = None
         deaths     = None
         player_row = None
 
-        # ─ Strategy A: Detailed-stats table ───────────────────────────────────
-        for table in content_div.find_all('table'):
-            first_tr = table.find('tr')
-            if not first_tr:
-                continue
-            header_cells = first_tr.find_all(['th', 'td'])
+        # ─ Strategy 0: Fetch per-map stats page and parse K(hs) column ─────────
+        # Maps are zero-indexed here: map_num 1 → index 0, map_num 2 → index 1
+        _stats_url = _mapstat_urls[map_num - 1] if map_num - 1 < len(_mapstat_urls) else None
+        if _stats_url and match_url:
+            _stats_html = _fetch_stats_page(_stats_url, match_url)
+            if _stats_html:
+                _sk, _shs = _parse_map_stats_hs(_stats_html, player_slug)
+                if _sk is not None:
+                    kills     = _sk
+                    headshots = _shs
+                    logger.info(
+                        f"[parse_row] Strategy0 K(hs) map{map_num}: "
+                        f"{kills}K {headshots}HS (from stats page)"
+                    )
 
-            k_hs_col = None  # column index for "K (hs)"
-            d_col    = None  # column index for deaths "D (t)"
-            for ci, hc in enumerate(header_cells):
-                ht = re.sub(r'\s+', '', hc.get_text().lower())
-                if k_hs_col is None and 'k' in ht and ('hs' in ht or 'head' in ht):
-                    k_hs_col = ci
-                if d_col is None and 'd' in ht and 't' in ht:
-                    d_col = ci
-
-            if k_hs_col is None:
-                continue  # not the detailed-stats table
-
-            for tr in table.find_all('tr')[1:]:
-                row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
-                if slug_norm not in row_norm:
+        # ─ Strategy A: Detailed-stats table (K (hs) header in match page HTML) ─
+        if kills is None:
+            for table in content_div.find_all('table'):
+                first_tr = table.find('tr')
+                if not first_tr:
                     continue
-                cells_td = tr.find_all('td')
-                if k_hs_col < len(cells_td):
-                    ct = cells_td[k_hs_col].get_text(strip=True)
-                    m = re.search(r'(\d+)\s*\((\d+)\)', ct)
-                    if m:
-                        kills     = int(m.group(1))
-                        headshots = int(m.group(2))
-                        player_row = tr
-                        if d_col is not None and d_col < len(cells_td):
-                            dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
-                            if dm:
-                                deaths = int(dm.group(1))
-                        logger.info(
-                            f"[parse_row] Detail-table K(hs) map{map_num}: "
-                            f"{kills}K {headshots}HS D={deaths}"
-                        )
-                        break
-            if kills is not None:
-                break
+                header_cells = first_tr.find_all(['th', 'td'])
 
-        # ─ Strategy B: Overview table (plain K | A | D columns) ───────────────
+                k_hs_col = None
+                d_col    = None
+                for ci, hc in enumerate(header_cells):
+                    ht = re.sub(r'\s+', '', hc.get_text().lower())
+                    if k_hs_col is None and 'k' in ht and ('hs' in ht or 'head' in ht):
+                        k_hs_col = ci
+                    if d_col is None and 'd' in ht and 't' in ht:
+                        d_col = ci
+
+                if k_hs_col is None:
+                    continue
+
+                for tr in table.find_all('tr')[1:]:
+                    row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+                    if slug_norm not in row_norm:
+                        continue
+                    cells_td = tr.find_all('td')
+                    if k_hs_col < len(cells_td):
+                        ct = cells_td[k_hs_col].get_text(strip=True)
+                        m = re.search(r'(\d+)\s*\((\d+)\)', ct)
+                        if m:
+                            kills     = int(m.group(1))
+                            headshots = int(m.group(2))
+                            player_row = tr
+                            if d_col is not None and d_col < len(cells_td):
+                                dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
+                                if dm:
+                                    deaths = int(dm.group(1))
+                            logger.info(
+                                f"[parse_row] StrategyA K(hs) map{map_num}: "
+                                f"{kills}K {headshots}HS D={deaths}"
+                            )
+                            break
+                if kills is not None:
+                    break
+
+        # ─ Strategy B: totalstats table — K-D combined column ─────────────────
+        # HLTV current format: columns are "K-D" | "eK-eD" | "Swing" | ...
+        # The first number in the K-D cell is total kills.
+        # Also handles legacy pages with separate "K" and "D" columns.
         if kills is None:
             for table in content_div.find_all('table'):
                 first_tr = table.find('tr')
@@ -314,30 +557,47 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
                 k_col = None
                 d_col = None
                 for ci, hc in enumerate(header_cells):
-                    ht = hc.get_text(strip=True).upper().strip()
-                    if ht == 'K' and k_col is None:
+                    raw = hc.get_text(strip=True)
+                    ht  = raw.upper().strip()
+                    # "K-D" combined column — kills are first number
+                    if k_col is None and re.match(r'^K[-–]D$', ht):
                         k_col = ci
-                    if ht == 'D' and d_col is None:
+                    # Legacy plain "K" column
+                    if k_col is None and ht == 'K':
+                        k_col = ci
+                    # Legacy plain "D" column
+                    if d_col is None and ht == 'D':
                         d_col = ci
+
                 if k_col is None:
                     continue
+
                 for tr in table.find_all('tr')[1:]:
                     row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
                     if slug_norm not in row_norm:
                         continue
                     cells_td = tr.find_all('td')
                     if k_col < len(cells_td):
-                        km = re.search(r'(\d+)', cells_td[k_col].get_text(strip=True))
-                        if km:
-                            kills = int(km.group(1))
+                        cell_text = cells_td[k_col].get_text(strip=True)
+                        # "15-14" → kills=15, deaths=14 (K-D combined)
+                        kd_m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', cell_text)
+                        if kd_m:
+                            kills  = int(kd_m.group(1))
+                            deaths = int(kd_m.group(2))
                             player_row = tr
-                        if d_col is not None and d_col < len(cells_td):
-                            dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
-                            if dm:
-                                deaths = int(dm.group(1))
+                        else:
+                            # Legacy: plain integer
+                            km = re.search(r'(\d+)', cell_text)
+                            if km:
+                                kills = int(km.group(1))
+                                player_row = tr
+                            if d_col is not None and d_col < len(cells_td):
+                                dm = re.search(r'(\d+)', cells_td[d_col].get_text(strip=True))
+                                if dm:
+                                    deaths = int(dm.group(1))
                         if kills:
                             logger.info(
-                                f"[parse_row] Overview-table K map{map_num}: {kills}K D={deaths}"
+                                f"[parse_row] StrategyB K-D map{map_num}: {kills}K D={deaths}"
                             )
                         break
                 if kills is not None:
@@ -373,13 +633,35 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
             logger.debug(f"[parse] Player '{player_slug}' not found on map {map_num} ({map_name})")
             continue
 
+        # If Strategy 0 found kills/headshots via stats page but left player_row=None,
+        # do a best-effort search in the content_div's totalstats table so we can
+        # still extract deaths, rating, KAST, and ADR from the match page.
+        if player_row is None:
+            for _tbl in content_div.find_all('table', class_=re.compile(r'totalstats', re.I)):
+                for _tr in _tbl.find_all('tr')[1:]:
+                    _rn = re.sub(r'[^a-z0-9]', '', _tr.get_text().lower())
+                    if slug_norm in _rn:
+                        player_row = _tr
+                        # Try to extract deaths from K-D cell
+                        if deaths is None:
+                            for _td in _tr.find_all('td'):
+                                _kd = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', _td.get_text(strip=True))
+                                if _kd:
+                                    deaths = int(_kd.group(2))
+                                    break
+                        break
+                if player_row:
+                    break
+
         row_text = player_row.get_text() if player_row else ""
         logger.info(f"[parse_row] Map {map_num} ({map_name}) row: {row_text[:200]!r}")
+
+        # Guard: cells is empty list if player_row couldn't be found
+        cells = player_row.find_all('td') if player_row else []
 
         # Extract Rating 2.0 — it's a decimal like 1.15 in [0.40, 3.00]
         # found in td cells, typically the rightmost decimal value
         rating = None
-        cells = player_row.find_all('td')
         for cell in reversed(cells):
             m = re.match(r'^\s*(\d+\.\d{2})\s*$', cell.get_text())
             if m:
@@ -419,7 +701,8 @@ def _parse_match_kills(html: str, player_slug: str) -> dict:
 
         # Compute survival rate from deaths (rounds - deaths) / rounds
         rounds_on_map = 22  # default; refined per-map if parseable
-        survival_rate = round((rounds_on_map - deaths) / rounds_on_map, 3)
+        _deaths_for_sr = deaths if deaths is not None else 0
+        survival_rate = round((rounds_on_map - _deaths_for_sr) / rounds_on_map, 3)
 
         # Extract FK (First Kills) — integer cell BEFORE the rating
         # FK-FD columns appear on some pages as standalone integers (0-20)
@@ -724,7 +1007,7 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
                 break
             continue
 
-        parsed = _parse_match_kills(html, player_slug)
+        parsed = _parse_match_kills(html, player_slug, match_url)
         if not parsed:
             continue
 
