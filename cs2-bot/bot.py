@@ -13,6 +13,12 @@ from scraper import (
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
+try:
+    from bo3_scraper import get_bo3_hs_data as _get_bo3_hs
+    _BO3_AVAILABLE = True
+except ImportError:
+    _BO3_AVAILABLE = False
+    _get_bo3_hs = None
 
 logging.basicConfig(
     level=logging.INFO,
@@ -429,6 +435,24 @@ def _analyze_player(
                         hs_rate_src = f"career profile ({round(profile_rate * 100)}%)"
                 except Exception as _e:
                     logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
+
+        # Priority 3: bo3.gg career HS% (accuracy_stats: Head kills / total kills)
+        # Uses the bo3.gg API which is NOT Cloudflare-blocked. Career average over all
+        # matches tracked by bo3.gg — much more accurate than the 40% default.
+        if hs_rate is None and _BO3_AVAILABLE:
+            try:
+                _bo3 = _get_bo3_hs(player_name, n_series=0)   # n_series=0 → career only, fast
+                if _bo3:
+                    _bo3_hs = _bo3.get("career_hs_pct")
+                    if _bo3_hs is not None:
+                        hs_rate     = _bo3_hs
+                        hs_rate_src = f"bo3.gg career avg ({round(_bo3_hs * 100)}%)"
+                        logger.info(
+                            f"[hs_scale] bo3.gg career HS% for {player_name!r}: "
+                            f"{round(_bo3_hs * 100, 1)}%"
+                        )
+            except Exception as _e:
+                logger.warning(f"[hs_scale] bo3.gg HS fallback failed: {type(_e).__name__}: {_e}")
 
     if stat_type == "HS":
         # --- Known-rate override ---
