@@ -35,93 +35,174 @@ except ImportError:
     logger.warning("curl_cffi not available — install it for HLTV access")
 
 
-_FETCH_RETRY_DELAYS = [1.0, 2.5, 5.0]   # seconds between retries on 403/CF block
+_FETCH_RETRY_DELAYS = [1.0, 2.5, 5.0]   # seconds between retries within one profile
+
+# ---------------------------------------------------------------------------
+# Impersonation profile rotation
+# Tested live — profiles that return 200 from hltv.org are listed first.
+# chrome120/chrome124 currently return 403; rotate away from them on failure.
+# ---------------------------------------------------------------------------
+_PROFILES = ["chrome116", "safari17_0", "chrome107", "chrome110", "chrome99"]
+_profile_idx = 0   # index into _PROFILES — advances on repeated 403s
 
 # ---------------------------------------------------------------------------
 # Persistent HLTV session — shared across ALL requests so Cloudflare cookies
 # accumulate and the IP is treated as a returning browser, not a fresh bot.
 # ---------------------------------------------------------------------------
-
 _HLTV_SESSION: "_cffi_req.Session | None" = None
 _HLTV_SESSION_WARMED = False
+_HLTV_SESSION_PROFILE: str = _PROFILES[0]
+
+
+def _make_session(profile: str) -> "_cffi_req.Session | None":
+    """Create a fresh curl_cffi Session with the given impersonation profile."""
+    try:
+        sess = _cffi_req.Session(impersonate=profile)
+        logger.info(f"[session] Created session with profile={profile}")
+        return sess
+    except Exception as e:
+        logger.warning(f"[session] Could not create session ({profile}): {e}")
+        return None
 
 
 def _get_hltv_session() -> "_cffi_req.Session | None":
-    """Return the shared persistent HLTV curl_cffi Session, creating it if needed."""
-    global _HLTV_SESSION
+    """Return (or lazily create) the shared persistent HLTV curl_cffi Session."""
+    global _HLTV_SESSION, _HLTV_SESSION_PROFILE
     if not _CFFI_OK:
         return None
     if _HLTV_SESSION is None:
-        try:
-            _HLTV_SESSION = _cffi_req.Session(impersonate="chrome120")
-            logger.info("[session] Created persistent HLTV session")
-        except Exception as e:
-            logger.warning(f"[session] Could not create session: {e}")
+        _HLTV_SESSION_PROFILE = _PROFILES[_profile_idx]
+        _HLTV_SESSION = _make_session(_HLTV_SESSION_PROFILE)
+    return _HLTV_SESSION
+
+
+def _rotate_session() -> "_cffi_req.Session | None":
+    """
+    Drop the current session and open a new one using the next profile in the
+    rotation list.  Called when the current profile starts returning 403.
+    """
+    global _HLTV_SESSION, _HLTV_SESSION_WARMED, _HLTV_SESSION_PROFILE, _profile_idx
+    _profile_idx = (_profile_idx + 1) % len(_PROFILES)
+    new_profile = _PROFILES[_profile_idx]
+    logger.warning(f"[session] Rotating profile → {new_profile}")
+    _HLTV_SESSION = _make_session(new_profile)
+    _HLTV_SESSION_PROFILE = new_profile
+    _HLTV_SESSION_WARMED = False   # re-warm with the new session
     return _HLTV_SESSION
 
 
 def _warm_hltv_session() -> None:
-    """Visit the HLTV homepage once to seed Cloudflare cookies in the session."""
+    """
+    Visit the HLTV homepage to seed Cloudflare cookies in the session.
+    Tries every profile in the rotation until one succeeds.
+    """
     global _HLTV_SESSION_WARMED
     if _HLTV_SESSION_WARMED:
         return
-    sess = _get_hltv_session()
-    if sess is None:
+    if not _CFFI_OK:
         return
-    try:
-        r = sess.get(HLTV_BASE + "/", timeout=15)
-        logger.info(f"[session] Homepage warm-up: {r.status_code}")
-        _HLTV_SESSION_WARMED = True
-        time.sleep(0.5)   # brief pause after warm-up
-    except Exception as e:
-        logger.warning(f"[session] Warm-up failed: {e}")
+
+    for _ in range(len(_PROFILES)):
+        sess = _get_hltv_session()
+        if sess is None:
+            return
+        try:
+            r = sess.get(HLTV_BASE + "/", timeout=15)
+            logger.info(
+                f"[session] Homepage warm-up: {r.status_code} "
+                f"(profile={_HLTV_SESSION_PROFILE})"
+            )
+            if r.status_code == 200 and "Just a moment" not in r.text:
+                _HLTV_SESSION_WARMED = True
+                time.sleep(0.5)
+                return
+            # This profile is blocked — rotate and try next
+            logger.warning(
+                f"[session] Warm-up 403 with {_HLTV_SESSION_PROFILE} — rotating"
+            )
+            _rotate_session()
+        except Exception as e:
+            logger.warning(f"[session] Warm-up error ({_HLTV_SESSION_PROFILE}): {e}")
+            _rotate_session()
+
+    logger.warning("[session] All profiles failed warm-up — proceeding without cookie seed")
 
 
 def _fetch(url: str, max_retries: int = 3) -> str | None:
     """
-    Fetch a URL using the persistent HLTV session (curl_cffi Chrome impersonation).
+    Fetch a URL using the persistent HLTV session with automatic profile rotation.
 
-    Using a persistent Session means Cloudflare cookies (especially __cf_bm)
-    accumulate across requests, making the connection look like a real returning
-    browser rather than a fresh stateless bot probe.
+    Strategy:
+      1. Try the current session/profile up to max_retries times.
+      2. On a 403, rotate to the next impersonation profile and retry immediately.
+      3. After exhausting all profiles, give up and return None.
 
-    Retries up to max_retries times with increasing delays on 403 / CF block.
-    Returns None only after all retries are exhausted.
+    Live-tested working profiles (as of 2025-03): chrome116, safari17_0, chrome107.
     """
     if not _CFFI_OK:
         logger.warning(f"[fetch] curl_cffi not available, skipping {url}")
         return None
 
-    _warm_hltv_session()   # no-op after first call
-    sess = _get_hltv_session()
-    if sess is None:
-        return None
+    _warm_hltv_session()   # no-op after first successful warm-up
 
-    for attempt in range(max_retries):
-        try:
-            tag = f" (retry {attempt})" if attempt else ""
-            logger.info(f"[fetch] GET {url}{tag}")
-            resp = sess.get(url, timeout=FETCH_TIMEOUT)
-            if resp.status_code == 200 and "Just a moment" not in resp.text:
-                logger.info(f"[fetch] OK — {len(resp.text):,} chars")
-                return resp.text
-            # Non-200 or CF challenge page
-            if attempt < max_retries - 1:
-                delay = _FETCH_RETRY_DELAYS[attempt]
-                logger.warning(
-                    f"[fetch] status={resp.status_code} — "
-                    f"retrying in {delay}s (attempt {attempt+1}/{max_retries})"
+    profiles_tried = 0
+    max_profile_rotations = len(_PROFILES)
+
+    while profiles_tried <= max_profile_rotations:
+        sess = _get_hltv_session()
+        if sess is None:
+            return None
+
+        got_403_this_profile = False
+        for attempt in range(max_retries):
+            try:
+                tag = f" (retry {attempt})" if attempt else ""
+                logger.info(
+                    f"[fetch] GET {url}{tag} [{_HLTV_SESSION_PROFILE}]"
                 )
-                time.sleep(delay)
-            else:
-                logger.warning(f"[fetch] status={resp.status_code} or CF block — giving up")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                delay = _FETCH_RETRY_DELAYS[attempt]
-                logger.warning(f"[fetch] {type(e).__name__}: {e} — retrying in {delay}s")
-                time.sleep(delay)
-            else:
-                logger.warning(f"[fetch] {type(e).__name__}: {e}")
+                resp = sess.get(url, timeout=FETCH_TIMEOUT)
+
+                if resp.status_code == 200 and "Just a moment" not in resp.text:
+                    logger.info(f"[fetch] OK — {len(resp.text):,} chars [{_HLTV_SESSION_PROFILE}]")
+                    return resp.text
+
+                # 403 / CF challenge — note it and stop hammering this profile
+                logger.warning(
+                    f"[fetch] status={resp.status_code} [{_HLTV_SESSION_PROFILE}]"
+                    + (f" — retrying in {_FETCH_RETRY_DELAYS[min(attempt, len(_FETCH_RETRY_DELAYS)-1)]}s"
+                       if attempt < max_retries - 1 else " — profile exhausted")
+                )
+                if resp.status_code == 403:
+                    got_403_this_profile = True
+                    if attempt < max_retries - 1:
+                        time.sleep(_FETCH_RETRY_DELAYS[attempt])
+                    else:
+                        break   # rotate profile
+                else:
+                    if attempt < max_retries - 1:
+                        time.sleep(_FETCH_RETRY_DELAYS[attempt])
+
+            except Exception as e:
+                logger.warning(
+                    f"[fetch] {type(e).__name__}: {e} [{_HLTV_SESSION_PROFILE}]"
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(_FETCH_RETRY_DELAYS[attempt])
+                else:
+                    break
+
+        if got_403_this_profile:
+            # Rotate to next profile and try again
+            profiles_tried += 1
+            if profiles_tried <= max_profile_rotations:
+                _rotate_session()
+                time.sleep(0.8)
+            continue
+        else:
+            # Non-403 failure (timeout, parse error) — don't rotate, just give up
+            break
+
+    logger.warning(f"[fetch] Giving up on {url} after trying {profiles_tried} profile(s)")
     return None
 
 
