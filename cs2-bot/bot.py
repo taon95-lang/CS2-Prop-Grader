@@ -563,7 +563,7 @@ def _analyze_player(
         _series_breakdown.append({
             "match_id": _mid,
             "total":    round(sum(m["stat_value"] for m in _maps), 1),
-            "per_map":  [f"{m['map_name']} {round(m['stat_value'], 1)}" for m in _maps],
+            "per_map":  [f"{m.get('map_name', f'Map {j+1}')} {round(m['stat_value'], 1)}" for j, m in enumerate(_maps)],
         })
 
     # --- Step 3 (optional): Deep opponent analysis ---
