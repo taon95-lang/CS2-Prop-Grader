@@ -50,14 +50,46 @@ Every package extends `tsconfig.base.json` which sets `composite: true`. The roo
 
 ## Discord Bot (cs2-bot/)
 
-Python-based Discord bot for grading CS2 player props.
+Python-based Discord bot for grading CS2 player props from HLTV data exclusively.
 
-- **Entry:** `cs2-bot/bot.py` — main bot, command handlers
-- **Scraper:** `cs2-bot/scraper.py` — CloudScraper + BeautifulSoup HLTV scraper
-- **Simulator:** `cs2-bot/simulator.py` — Negative Binomial + 100k Monte Carlo engine
+### Core Files
+- **Entry:** `cs2-bot/bot.py` — main bot, all command handlers, embed design
+- **Scraper:** `cs2-bot/scraper.py` — CloudScraper + BeautifulSoup HLTV scraper (chrome116 profile)
+- **Simulator:** `cs2-bot/simulator.py` — Negative Binomial + 10k Monte Carlo engine with recency weighting
+- **Deep Analysis:** `cs2-bot/deep_analysis.py` — Opponent scouting (defense, H2H, economy, map pool)
+- **Grade Engine:** `cs2-bot/grade_engine.py` — Confidence scoring (0-100), edge calc, form streaks, variance tiers, map intel, risk flags, verdict reasoning, multi-line tables
 - **Keep-alive:** `cs2-bot/keep_alive.py` — Flask server on port 5000 for uptime
-- **Command:** `!grade [Player] [Line] [Kills/HS]` — e.g. `!grade ZywOo 38.5 Kills`
-- **Workflow:** `Elite CS2 Prop Grader Bot` (runs `cd cs2-bot && python bot.py`)
+
+### Commands
+- `!grade [Player] [Line] [Kills/HS] [Opponent?]` — Full prop grade with confidence, edge, form, simulation
+- `!scout [Player]` — Player scouting card (role, map pool, HLTV 90-day stats, variance)
+- `!lines [Player] [Kills/HS]` — Multi-line probability table for line shopping (base ± 3 lines)
+
+### Embed Design (Redesigned)
+The `!grade` embed has a compact professional layout:
+1. **Verdict banner** — Decision (OVER/UNDER/PASS) + Confidence/100 + Edge% prominently at top
+2. **Historical** — Avg, Median, Hit Rate, Variance tier, Form streak, Last 4
+3. **Simulation** — Over/Under%, probability bar, Fair line
+4. **HLTV 90d** — KPR, Rating, KAST, ADR, K/D, HS%
+5. **Map Intel** — Expected maps, projected avg vs line, best/worst map
+6. **vs Opponent** — Combined %, defense label, H2H, component breakdown
+7. **Risk Flags** — Only shown when active
+8. **Series Breakdown** — Per-series hit/miss with map labels
+9. **Verdict** — Play directive, one-line reason, unit size
+
+### Grade Engine (grade_engine.py)
+- `compute_confidence_score()` — 0-100 weighted from 10+ signals
+- `compute_edge_pct()` — Edge vs -110 vig (52.38% implied)
+- `compute_form_streak()` — Consecutive hit/miss streak from series data
+- `compute_variance_tier()` — CV-based LOW/MEDIUM/HIGH/VERY_HIGH tiers
+- `compute_map_intel()` — Per-map kill averages with projected overlay
+- `compute_risk_flags()` — Active risk flags (stomp, cold streak, thin sample, etc.)
+- `build_verdict_reason()` — One-line reasoning for the call
+- `run_lines_table()` — Multi-line probability table for ±3 lines
+
+### Workflow
+- **Name:** `Elite CS2 Prop Grader Bot`
+- **Command:** `cd cs2-bot && python3 bot.py`
 - **Token:** Set as `DISCORD_TOKEN` in Replit Secrets
 
 ## Packages

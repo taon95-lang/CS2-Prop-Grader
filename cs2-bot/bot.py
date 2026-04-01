@@ -16,6 +16,12 @@ from scraper import (
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
+from grade_engine import (
+    compute_grade_package,
+    run_lines_table,
+    build_prob_bar as ge_prob_bar,
+    determine_role,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -978,6 +984,19 @@ def _analyze_player(
     sim_result["confidence_label"] = conf_label_final
     sim_result["unit_recommendation"] = unit_rec
 
+    # --- Step 10: Grade Engine Package (new analytics layer) ---
+    try:
+        grade_pkg = compute_grade_package(
+            sim_result=sim_result,
+            map_stats=map_stats,
+            deep=deep,
+            period_stats=period_stats,
+        )
+        sim_result["grade_pkg"] = grade_pkg
+    except Exception as _ge_err:
+        logger.warning(f"[grade_engine] Failed: {_ge_err}")
+        sim_result["grade_pkg"] = {}
+
     return sim_result
 
 
@@ -985,503 +1004,556 @@ def _analyze_player(
 # Embed builder
 # ---------------------------------------------------------------------------
 
+def _fmt_comp(comps: dict, key: str, lbl: str) -> str | None:
+    v = comps.get(key)
+    if v is None:
+        return None
+    p = round((v - 1) * 100, 1)
+    s = "+" if p >= 0 else ""
+    return f"`{lbl}` {s}{p}%"
+
+
 def build_result_embed(
     player_name: str, line: float, stat_type: str, result: dict
 ) -> discord.Embed:
-    decision = result.get("decision", "PASS")
-    color = DECISION_COLORS.get(decision, 0x7289DA)
-    grade = result.get("grade", "N/A")
-    emoji = grade_emoji(grade)
-    # Use the stat_type from result (set by simulator) so all labels match the prop type
-    stat_unit = result.get("stat_type", stat_type)   # "Kills" or "HS"
+    # ── Core data extraction ─────────────────────────────────────────────────
+    decision  = result.get("decision", "PASS")
+    color     = DECISION_COLORS.get(decision, 0x7289DA)
+    stat_unit = result.get("stat_type", stat_type)
+    used_fb   = result.get("used_fallback", False)
 
-    deep = result.get("deep")
-    opp_display = deep["opponent_display"] if deep and deep.get("opponent_display") else None
+    deep        = result.get("deep") or {}
+    opp_display = deep.get("opponent_display") if deep and not deep.get("error") else None
+    opp_name    = result.get("opponent")
+    pkg         = result.get("grade_pkg") or {}
 
-    title = f"{emoji} CS2 Prop Grade — {player_name}"
+    form      = pkg.get("form",      {})
+    variance  = pkg.get("variance",  {})
+    map_intel = pkg.get("map_intel", {})
+    flags     = pkg.get("flags",     [])
+    confidence = pkg.get("confidence", result.get("confidence_score", 50))
+    edge_pct   = pkg.get("edge_pct",   result.get("edge", 0))
+    reason     = pkg.get("reason",     result.get("recommendation", ""))
+
+    # ── Title ────────────────────────────────────────────────────────────────
+    d_icons = {"OVER": "✅", "UNDER": "❌", "PASS": "⏸️", "MISPRICED": "⚠️"}
+    title = f"🎯  {player_name}  ·  {line} {stat_unit}"
+
+    # ── Description — verdict banner ─────────────────────────────────────────
+    conf_bar  = ge_prob_bar(confidence / 100, width=8)
+    edge_sign = "+" if edge_pct >= 0 else ""
+    verdict_line = (
+        f"**{d_icons.get(decision, '📊')} {decision}**  ·  "
+        f"Confidence: **{confidence}/100** `{conf_bar}`  ·  "
+        f"Edge: **{edge_sign}{edge_pct}%**"
+    )
+
+    ctx_parts = []
     if opp_display:
-        title += f" vs {opp_display}"
+        ctx_parts.append(f"vs **{opp_display}**")
+    match_ctx = result.get("match_context", "")
+    if match_ctx:
+        ctx_parts.append(f"_{match_ctx}_")
+    if used_fb:
+        ctx_parts.append("⚠️ _Estimated data only_")
 
-    used_fallback = result.get("used_fallback", False)
-
-    if used_fallback:
-        data_line = "⚠️ HLTV data unavailable — estimated stats only"
-    else:
-        data_line = f"HLTV Live ({result.get('data_source', 'HLTV')})"
-
+    SEP = "━" * 30
     description = (
-        f"**Prop:** `{line} {stat_type}` ({'Over' if decision == 'OVER' else 'Under' if decision == 'UNDER' else decision})\n"
-        f"**Data:** {data_line}"
+        ("  ·  ".join(ctx_parts) + "\n" if ctx_parts else "")
+        + f"{SEP}\n{verdict_line}\n{SEP}"
     )
 
     embed = discord.Embed(title=title, description=description, color=color)
 
-    # ── HLTV unavailable banner ───────────────────────────────────────────────
-    if used_fallback:
+    # ── HLTV unavailable warning ─────────────────────────────────────────────
+    if used_fb:
         embed.add_field(
             name="🚫 HLTV Data Unavailable",
-            value=(
-                "Could not retrieve live match data from HLTV for this player.\n"
-                "Stats below are **estimated** and no directional call has been made.\n"
-                "Check back later or try a different player."
-            ),
+            value="Live data could not be fetched. Stats are **estimated** — no directional call is made.",
             inline=False,
         )
 
-    # ── Warn user when the opponent team name was not found on HLTV ────────────
-    if deep and deep.get("error") and result.get("opponent"):
+    if deep and deep.get("error") and opp_name:
         embed.add_field(
             name="⚠️ Opponent Not Found",
             value=(
-                f"Could not locate **{result['opponent']}** on HLTV — "
-                f"opponent analysis was skipped.\n"
-                f"Try the exact team name (e.g. `!grade {player_name} {line} {stat_type} Team-Liquid`)."
+                f"**{opp_name}** wasn't found on HLTV — opponent analysis skipped.\n"
+                f"Try exact team name (e.g. `!grade {player_name} {line} {stat_unit} NaVi`)."
             ),
             inline=False,
         )
 
-    # ── Deep Opponent Analysis (only when opponent was provided) ──────────────
+    # ── 1. Historical Stats ───────────────────────────────────────────────────
+    n_series  = result.get("n_series",    "?")
+    hist_avg  = result.get("hist_avg",    "N/A")
+    hist_med  = result.get("hist_median", "N/A")
+    hit_rate  = result.get("hit_rate",    "N/A")
+    var_label = variance.get("label", "")
+    var_std   = variance.get("std",   "")
+    var_floor = variance.get("floor", "")
+    var_ceil  = variance.get("ceil",  "")
+    form_lbl  = form.get("label", "")
+    last4_h   = form.get("last4_hits", "?")
+    last4_n   = form.get("last4_n",    "?")
+    hist_val  = (
+        f"**Avg:** `{hist_avg}` · **Median:** `{hist_med}` · **Hit Rate:** `{hit_rate}%`\n"
+        f"**Variance:** {var_label} · σ={var_std} · Range: {var_floor}–{var_ceil}\n"
+        f"{form_lbl}  ·  Last {last4_n}: {last4_h}/{last4_n} hit"
+    )
+    embed.add_field(name=f"📊 Historical — {n_series} BO3 Series", value=hist_val, inline=False)
+
+    # ── 2. Simulation ─────────────────────────────────────────────────────────
+    over_p   = result.get("over_prob",  "N/A")
+    under_p  = result.get("under_prob", "N/A")
+    push_p   = result.get("push_prob",  0)
+    sim_mean = result.get("sim_mean",   "N/A")
+    sim_std  = result.get("sim_std",    "N/A")
+    fair_ln  = result.get("fair_line",  result.get("sim_median", "N/A"))
+    n_sims   = result.get("n_simulations", 10000)
+    eco_tag  = " _(eco-adj)_" if result.get("economy_adjusted") else ""
+    over_bar = ge_prob_bar((over_p or 0) / 100) if isinstance(over_p, (int, float)) else ""
+    sim_val  = (
+        f"OVER `{line}`: **{over_p}%** {eco_tag} `{over_bar}`\n"
+        f"UNDER: **{under_p}%** · Push: **{push_p}%**\n"
+        f"Mean: **{sim_mean}** · ±**{sim_std}** · Fair line: **{fair_ln}**"
+    )
+    embed.add_field(name=f"🎲 Simulation ({n_sims:,} runs)", value=sim_val, inline=True)
+
+    # ── 3. HLTV 90-Day Stats ──────────────────────────────────────────────────
+    ps = result.get("period_stats") or {}
+    if ps and any(ps.get(k) is not None for k in ("kpr", "rating", "kast", "adr")):
+        ps_lines = []
+        if ps.get("kpr")    is not None: ps_lines.append(f"KPR: **{ps['kpr']:.2f}**")
+        if ps.get("rating") is not None: ps_lines.append(f"Rating: **{ps['rating']:.2f}**")
+        if ps.get("kast")   is not None: ps_lines.append(f"KAST: **{ps['kast']:.0f}%**")
+        if ps.get("adr")    is not None: ps_lines.append(f"ADR: **{ps['adr']:.0f}**")
+        if ps.get("kd")     is not None: ps_lines.append(f"K/D: **{ps['kd']:.2f}**")
+        if ps.get("hs_pct") is not None: ps_lines.append(f"HS%: **{ps['hs_pct']:.0f}%**")
+        ps_val   = "\n".join(ps_lines)
+        ps_label = f"📋 HLTV {ps.get('days', 90)}d Stats"
+    else:
+        ps_val   = "_HLTV stats page unavailable_"
+        ps_label = "📋 HLTV Stats"
+    embed.add_field(name=ps_label, value=ps_val, inline=True)
+
+    # ── 4. Map Intelligence (if data available) ────────────────────────────────
+    mi_parts = []
+    if map_intel.get("projected_labels"):
+        mi_parts.append("**Expected:** " + " · ".join(map_intel["projected_labels"][:3]))
+    if map_intel.get("projected_avg") is not None:
+        pvs = map_intel.get("projected_vs_line", "")
+        mi_parts.append(f"**Avg on these:** `{map_intel['projected_avg']}` {pvs}")
+    if map_intel.get("best_map") and map_intel.get("worst_map"):
+        bm = map_intel["best_map"]
+        wm = map_intel["worst_map"]
+        mi_parts.append(f"Best: {bm[0].title()} `{bm[1]}` ↑ · Worst: {wm[0].title()} `{wm[1]}` ↓")
+    if mi_parts:
+        embed.add_field(name="🗺️ Map Intelligence", value="\n".join(mi_parts), inline=False)
+
+    # ── 5. Opponent Deep Analysis ─────────────────────────────────────────────
     if deep and not deep.get("error") and opp_display:
-        combined     = deep.get("combined_multiplier", 1.0)
-        total_pct    = round((combined - 1) * 100, 1)
-        total_sign   = "+" if total_pct >= 0 else ""
-        components   = deep.get("components", {})
+        combined   = deep.get("combined_multiplier", 1.0) or 1.0
+        total_pct  = round((combined - 1) * 100, 1)
+        tot_sign   = "+" if total_pct >= 0 else ""
+        components = deep.get("components", {})
 
-        def fmt_comp(key, label):
-            v = components.get(key)
-            if v is None:
-                return None
-            p = round((v - 1) * 100, 1)
-            s = "+" if p >= 0 else ""
-            return f"`{label}` {s}{p}%"
-
-        comp_parts = list(filter(None, [
-            fmt_comp("defensive",       "Defense"),
-            fmt_comp("t_side",          "T-Side"),
-            fmt_comp("rank",            "Ranking"),
-            fmt_comp("map_pool",        "Map Pool"),
-            fmt_comp("h2h",             "H2H"),
-            fmt_comp("star_clamp",      "Role Clamp"),
-            fmt_comp("hs_vulnerability","HS Vuln"),
+        comp_str = "  ".join(filter(None, [
+            _fmt_comp(components, "defensive", "Def"),
+            _fmt_comp(components, "t_side",    "T-Side"),
+            _fmt_comp(components, "rank",      "Rank"),
+            _fmt_comp(components, "map_pool",  "Maps"),
+            _fmt_comp(components, "h2h",       "H2H"),
         ]))
 
-        # Summary section
-        bullets = deep.get("summary_bullets", [])
-        bullet_text = "\n".join(f"• {b}" for b in bullets[:4]) if bullets else "_No significant factors detected_"
-
-        embed.add_field(
-            name=f"🔬 Deep Opponent Analysis — {opp_display}",
-            value=(
-                f"**Combined Adjustment:** `{total_sign}{total_pct}%`\n"
-                f"{chr(10).join(comp_parts) if comp_parts else '_No component adjustments_'}\n\n"
-                f"**Key Factors:**\n{bullet_text}"
-            ),
-            inline=False,
-        )
-
-        # Defensive Profile
-        def_profile = deep.get("defensive_profile", {})
-        rank_info   = deep.get("rank_info", {})
-        map_pool    = deep.get("map_pool", {})
-
-        def_val_parts = [f"**{def_profile.get('label','?')}**"]
-        if def_profile.get("avg_kills_allowed"):
-            def_val_parts.append(f"Avg kills allowed/map: `{def_profile['avg_kills_allowed']}`")
-        if def_profile.get("ct_win_pct") is not None:
-            def_val_parts.append(f"CT win %: `{def_profile['ct_win_pct']}%`")
-        if def_profile.get("t_win_pct") is not None:
-            def_val_parts.append(f"T win %: `{def_profile['t_win_pct']}%`")
-        if def_profile.get("sample"):
-            def_val_parts.append(f"Sample: {def_profile['sample']} player-maps")
-
-        embed.add_field(
-            name="🛡️ Defensive Profile",
-            value="\n".join(def_val_parts) or "No data",
-            inline=True,
-        )
-
-        # Opponent team HLTV 90-day aggregate stats (if fetched)
-        _otp = deep.get("team_period_stats") or {}
-        if _otp and any(_otp.get(k) for k in ("kpr", "rating", "adr", "kast", "kd")):
-            _otp_parts = []
-            if _otp.get("kpr")    is not None: _otp_parts.append(f"**KPR:** `{_otp['kpr']:.2f}`")
-            if _otp.get("rating") is not None: _otp_parts.append(f"**Rating:** `{_otp['rating']:.2f}`")
-            if _otp.get("adr")    is not None: _otp_parts.append(f"**ADR:** `{_otp['adr']:.1f}`")
-            if _otp.get("kast")   is not None: _otp_parts.append(f"**KAST:** `{_otp['kast']:.1f}%`")
-            if _otp.get("kd")     is not None: _otp_parts.append(f"**K/D:** `{_otp['kd']:.2f}`")
-            embed.add_field(
-                name=f"📋 {opp_display} HLTV Stats (90d)",
-                value="\n".join(_otp_parts),
-                inline=True,
-            )
-
-        # Ranking & Map Pool
-        rank_label    = rank_info.get("label", "Unknown")
-        stomp_text    = " ⚠️" if rank_info.get("stomp_risk") else ""
-        most_played   = map_pool.get("most_played", [])
-        permaban_hint = map_pool.get("permaban_hint")
-
-        map_val = f"**{map_pool.get('label','?')}**"
-        if most_played:
-            map_val += f"\nMost Played: `{', '.join(m.title() for m in most_played[:3])}`"
-        if permaban_hint:
-            map_val += f"\nPermaban Hint: `{permaban_hint.title()}`"
-
-        embed.add_field(
-            name="🗺️ Ranking & Map Pool",
-            value=f"**{rank_label}{stomp_text}**\n{map_val}",
-            inline=True,
-        )
-
-        # H2H
         h2h_records = deep.get("h2h", [])
-        h2h_label   = deep.get("h2h_label", "No H2H data")
         if h2h_records:
-            h2h_lines = []
-            for i, rec in enumerate(h2h_records, 1):
-                maps_str = " / ".join(str(k) for k in rec.get("kills_by_map", []))
-                h2h_lines.append(f"Match {i}: `{maps_str}` kills → avg `{rec['avg_kills']}`")
-            h2h_val = f"{h2h_label}\n" + "\n".join(h2h_lines)
+            h2h_clears = sum(1 for s in h2h_records if s.get("cleared"))
+            h2h_str = f"H2H **{h2h_clears}/{len(h2h_records)}** {'✅' if h2h_clears == len(h2h_records) else '⚠️'}"
         else:
-            h2h_val = h2h_label
+            h2h_str = "H2H: no data"
 
-        embed.add_field(
-            name="🆚 Head-to-Head (Last 3)",
-            value=h2h_val,
-            inline=False,
+        def_lbl  = (deep.get("defensive_profile") or {}).get("label", "")
+        rank_lbl = (deep.get("rank_info") or {}).get("label", "")
+
+        opp_val = (
+            f"**Combined:** `{tot_sign}{total_pct}%`  ·  {def_lbl}  ·  {h2h_str}\n"
+            f"{comp_str}\n"
+            f"_{rank_lbl}_"
         )
 
-        # ── 🛡️ Opponent Scouting ──────────────────────────────────────────────
+        otp = deep.get("team_period_stats") or {}
+        if otp and any(otp.get(k) is not None for k in ("kpr", "rating", "adr")):
+            otp_parts = []
+            if otp.get("kpr")    is not None: otp_parts.append(f"KPR {otp['kpr']:.2f}")
+            if otp.get("rating") is not None: otp_parts.append(f"Rtg {otp['rating']:.2f}")
+            if otp.get("adr")    is not None: otp_parts.append(f"ADR {otp['adr']:.0f}")
+            opp_val += f"\n_Opp 90d: {' · '.join(otp_parts)}_"
+
+        # H2H vs line
         scouting = deep.get("scouting", {})
-        hs_sc   = scouting.get("hs_vulnerability", {})
-        role_sc = scouting.get("role_suppression", {})
-        h2h_sc  = scouting.get("h2h_line", {})
-
-        hs_line = hs_sc.get("rating") or "❓ No Data"
-        if hs_sc.get("pct_proxy"):
-            hs_line += f"  `({hs_sc['pct_proxy']})`"
-
-        role_line = role_sc.get("label") or "❓ No Data"
-
-        cleared   = h2h_sc.get("matches_cleared", 0)
-        of_n      = h2h_sc.get("of_n", 0)
-        fav       = h2h_sc.get("matchup_favorite", False)
+        h2h_sc   = scouting.get("h2h_line", {})
+        cleared  = h2h_sc.get("matches_cleared", 0)
+        of_n     = h2h_sc.get("of_n", 0)
         if of_n > 0:
-            h2h_line_txt = f"`{cleared}/{of_n}` H2H matches cleared `{line}` line"
-            if fav:
-                h2h_line_txt += "  ✅ **+5% Over bonus applied**"
-        else:
-            h2h_line_txt = "_No H2H data for line check_"
+            bonus_tag = "  ✅ +5% Over bonus" if h2h_sc.get("matchup_favorite") else ""
+            opp_val += f"\n_H2H vs line: {cleared}/{of_n} cleared{bonus_tag}_"
 
-        econ_sc  = scouting.get("economy_impact", {})
-        econ_line = econ_sc.get("label") or "⚖️ No Economy Data"
+        if result.get("stomp_high_line_warning"):
+            opp_val += "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
 
+        embed.add_field(name=f"🔬 vs {opp_display}", value=opp_val, inline=False)
+
+    # ── 6. Risk Flags (only if active) ────────────────────────────────────────
+    active_flags = [f for f in flags if not f.startswith("✅")]
+    if active_flags:
         embed.add_field(
-            name="🛡️ Opponent Scouting",
-            value=(
-                f"**HS Vulnerability:** {hs_line}\n"
-                f"**Role Suppression:** {role_line}\n"
-                f"**H2H vs Line:** {h2h_line_txt}\n"
-                f"**Economy Impact:** {econ_line}"
-            ),
+            name="⚠️ Risk Flags",
+            value="\n".join(f"• {f}" for f in active_flags[:4]),
             inline=False,
         )
 
-    n_series = result.get("n_series", 0)
-    n_maps = result.get("n_samples", 0)
-    embed.add_field(
-        name="📋 Recent Sample",
-        value=(
-            f"**Series:** Last {n_series} BO3 (Maps 1 & 2 only)\n"
-            f"**Total Maps:** {n_maps}"
-        ),
-        inline=False,
-    )
-
-    # ── 🔥 Recent Form ────────────────────────────────────────────────────────
-    trend_label      = result.get("trend_label", "➡️ Neutral")
-    recent_avg_kills = result.get("recent_avg_kills", "N/A")
-    recent_n_maps    = result.get("recent_n_maps", 4)
-    trend_pct        = result.get("trend_pct", 0)
-    hist_avg_kills   = round(result.get("hist_avg", 0) / 2, 1)  # per-map from series total
-    embed.add_field(
-        name="🔥 Recent Form",
-        value=(
-            f"**Trend:** {trend_label}\n"
-            f"**Recent avg (last {recent_n_maps} maps):** `{recent_avg_kills}` {stat_unit}/map\n"
-            f"**Overall avg per map:** `{hist_avg_kills}` {stat_unit}/map\n"
-            f"_Simulation is 70% weighted to recent form_"
-        ),
-        inline=False,
-    )
-
-    # Per-series breakdown (compact — one entry per series)
-    _breakdown   = result.get("series_breakdown", [])
-    _is_hs_prop  = stat_type == "HS"
-    _hs_rate_val = result.get("hs_rate_src", "")   # e.g. "AWPer role estimate (22%...)"
+    # ── 7. Per-Series Breakdown ────────────────────────────────────────────────
+    _breakdown  = result.get("series_breakdown", [])
+    _is_hs_prop = stat_unit == "HS"
+    _hs_src     = result.get("hs_rate_src", "")
     if _breakdown:
-        _series_lines = []
-        for i, s in enumerate(_breakdown, 1):
-            _maps_str = " + ".join(s["per_map"])
-            _total_str = f"`{s['total']}`"
-            # Mark series that beat the prop line
-            _hit = "✅" if s["total"] > line else "❌"
-            _series_lines.append(f"S{i}: {_maps_str} = **{s['total']}** {_hit}")
-        _breakdown_str = "\n".join(_series_lines)
-        if _is_hs_prop:
-            _src = str(_hs_rate_val)
-            if "actual scorecard" in _src and "per-match" not in _src and "estimate" not in _src:
-                _breakdown_note = "\n_Actual HS counts from HLTV scorecard_"
-            elif "per-match" in _src or "actual scorecard" in _src:
-                _breakdown_note = "\n_Per-match HS% from HLTV overview applied per series_"
-            else:
-                _breakdown_note = "\n_AWPer/default HS rate applied (per-match data unavailable)_"
-        else:
-            _breakdown_note = ""
+        rows = []
+        for i, s in enumerate(_breakdown[:10], 1):
+            _maps_str = " + ".join(s.get("per_map", []))
+            _total    = s.get("total", 0)
+            _tick     = "✅" if _total > line else "❌"
+            rows.append(f"S{i}: {_maps_str} = **{_total}** {_tick}")
+        rows.append(f"_Line {line} → need >{int(line)}_")
+        if _is_hs_prop and _hs_src:
+            _src_str = str(_hs_src)
+            if "actual scorecard" in _src_str:
+                rows.append("_Actual HS counts from HLTV scorecard_")
+            elif "estimate" in _src_str or "AWPer" in _src_str:
+                rows.append("_AWPer/default HS rate estimate applied_")
+        embed.add_field(name="📋 Series Breakdown", value="\n".join(rows), inline=False)
+
+    # ── 8. Verdict ────────────────────────────────────────────────────────────
+    unit_rec = result.get("unit_recommendation", "🚫 0u — Pass")
+    hs_src   = result.get("hs_rate_src")
+    is_awper = result.get("is_awper", False)
+    awper_warn = result.get("awper_warn", False)
+
+    if decision in ("OVER", "UNDER"):
+        verdict_text = f"**PLAY {decision} {line}**"
     else:
-        _breakdown_str = "_No breakdown available_"
-        _breakdown_note = ""
+        verdict_text = f"**{decision}**"
 
-    embed.add_field(
-        name=f"📊 Per-Series {stat_unit} Totals (last {len(_breakdown)} series)",
-        value=_breakdown_str + _breakdown_note,
-        inline=False,
-    )
+    hs_note = ""
+    if hs_src and awper_warn:
+        hs_note = f"\n⚠️ AWPer detected — {hs_src}"
+    elif hs_src and is_awper:
+        hs_note = f"\n🎯 AWPer — {hs_src}"
+    elif hs_src:
+        hs_note = f"\n_HS rate: {hs_src}_"
 
+    grade_str = result.get("grade", "N/A")
     embed.add_field(
-        name="📈 Historical Stats (2-map totals)",
+        name="✅ Verdict",
         value=(
-            f"**Average:** `{result.get('hist_avg', 'N/A')}`\n"
-            f"**Median:** `{result.get('hist_median', 'N/A')}`\n"
-            f"**Hit Rate vs {line}:** `{result.get('hit_rate', 'N/A')}%`"
-        ),
-        inline=True,
-    )
-
-    # ── HLTV 90-day Aggregate Stats (from /stats/players/ page) ─────────────
-    ps = result.get("period_stats") or {}
-    if ps and any(ps.get(k) for k in ("kpr", "hs_pct", "rating", "kast", "adr", "kd")):
-        ps_parts = []
-        if ps.get("kpr")    is not None: ps_parts.append(f"**KPR:** `{ps['kpr']:.2f}`")
-        if ps.get("hs_pct") is not None: ps_parts.append(f"**HS%:** `{ps['hs_pct']:.1f}%`")
-        if ps.get("rating") is not None: ps_parts.append(f"**Rating:** `{ps['rating']:.2f}`")
-        if ps.get("kast")   is not None: ps_parts.append(f"**KAST:** `{ps['kast']:.1f}%`")
-        if ps.get("adr")    is not None: ps_parts.append(f"**ADR:** `{ps['adr']:.1f}`")
-        if ps.get("kd")     is not None: ps_parts.append(f"**K/D:** `{ps['kd']:.2f}`")
-        _ps_days = ps.get("days", 90)
-        embed.add_field(
-            name=f"📋 HLTV Stats (last {_ps_days} days)",
-            value="\n".join(ps_parts) if ps_parts else "_Stats page unavailable_",
-            inline=True,
-        )
-
-    map_note = result.get("map_projection_note", "Overall average")
-    embed.add_field(
-        name="🎯 Projection",
-        value=(
-            f"**Rounds/Map:** `{result.get('rounds_per_map', 22)}`\n"
-            f"**Total Rounds:** `{result.get('total_projected_rounds', 44)}`\n"
-            f"**Expected {stat_type}:** `{result.get('expected_total', 'N/A')}`\n"
-            f"**Basis:** {map_note}\n"
-            f"**Context:** {result.get('match_context', 'Standard')}"
-        ),
-        inline=True,
-    )
-
-    embed.add_field(
-        name=f"🎲 Monte Carlo ({result.get('n_simulations', 25000):,} runs)",
-        value=(
-            f"**Sim Mean:** `{result.get('sim_mean', 'N/A')}`\n"
-            f"**Std Dev:** `±{result.get('sim_std', 'N/A')}`\n"
-            f"**Sim Median:** `{result.get('sim_median', 'N/A')}`\n"
-            f"**Model:** Negative Binomial"
-        ),
-        inline=True,
-    )
-
-    over_p = result.get("over_prob", 0)
-    under_p = result.get("under_prob", 0)
-    econ_adj_tag = "  _(economy-adjusted)_" if result.get("economy_adjusted") else ""
-    over_bar = build_prob_bar(over_p / 100)
-    embed.add_field(
-        name="📈 Simulated Probabilities",
-        value=(
-            f"**Over {line}:** `{over_p}%`{econ_adj_tag} {over_bar}\n"
-            f"**Under {line}:** `{under_p}%`\n"
-            f"**Push:** `{result.get('push_prob', 0)}%`"
+            f"{verdict_text}\n"
+            f"_{reason}_\n"
+            f"{unit_rec}  ·  Grade: `{grade_str}`" + hs_note
         ),
         inline=False,
     )
 
-    # ── 📉 Stability Score ────────────────────────────────────────────────────
-    stab_std   = result.get("stability_std", 0)
-    stab_label = result.get("stability_label", "🎯 Consistent")
-    ceiling    = result.get("ceiling", "N/A")
-    floor_v    = result.get("floor", "N/A")
-    map_kpr    = result.get("map_kpr", {})
-    # Show stat/map (KPR × 22) alongside KPR so it's human-readable
-    map_kpr_lines = "\n".join(
-        f"  `{mn.title()}`: `{round(v * 22, 1)}` {stat_unit}/map  ({v} KPR)"
-        for mn, v in sorted(map_kpr.items(), key=lambda x: -x[1])
-    ) if map_kpr else "  _No map-specific data_"
-    embed.add_field(
-        name="📉 Stability Score",
-        value=(
-            f"**Std Dev (series):** `±{stab_std}` {stat_unit}  —  {stab_label}\n"
-            f"**Ceiling:** `{ceiling}` {stat_unit}  |  **Floor:** `{floor_v}` {stat_unit}\n"
-            f"**Per-Map Avg:**\n{map_kpr_lines}"
-        ),
-        inline=False,
-    )
-
-    # ── ⚔️ Impact & Opening Duel Profile ─────────────────────────────────────
-    impact_label = result.get("impact_label", "❓ No Rating Data")
-    impact_note  = result.get("impact_note", "")
-    duel_label   = result.get("duel_label",  "❓ No Opening Duel Data")
-    duel_note    = result.get("duel_note",   "")
-    avg_fk       = result.get("avg_fk")
-    avg_fd       = result.get("avg_fd")
-    avg_rating   = result.get("avg_rating")
-
-    impact_adj_tag = "  _(impact-adjusted)_" if result.get("impact_adjusted") else ""
-    fk_stat_line = f"Avg FK: `{avg_fk}` / FD: `{avg_fd}`" if avg_fk is not None else ""
-
-    stomp_warning = ""
-    if result.get("stomp_high_line_warning"):
-        stomp_warning = "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
-
-    embed.add_field(
-        name="⚔️ Impact & Opening Duel",
-        value=(
-            f"**Impact Profile:** {impact_label}{impact_adj_tag}\n"
-            f"_{impact_note}_\n"
-            f"**Opening Duels:** {duel_label}\n"
-            f"_{duel_note}_"
-            + (f"\n{fk_stat_line}" if fk_stat_line else "")
-            + stomp_warning
-        ),
-        inline=False,
-    )
-
-    # ── 🏃 Survival Rate / Exit Fragger ──────────────────────────────────────
-    ef_label = result.get("exit_fragger_label", "❓ No Data")
-    ef_note  = result.get("exit_fragger_note",  "")
-    avg_surv = result.get("avg_survival_rate")
-    avg_kd   = result.get("avg_kd_ratio")
-    surv_line = f"Avg Survival: `{avg_surv:.0%}` | K/D: `{avg_kd}`" if avg_surv is not None else ""
-    embed.add_field(
-        name="🏃 Survival Profile",
-        value=(
-            f"**Style:** {ef_label}\n"
-            + (f"{surv_line}\n" if surv_line else "")
-            + f"_{ef_note}_"
-        ),
-        inline=True,
-    )
-
-    # ── 🔫 Pistol Floor ───────────────────────────────────────────────────────
-    pistol_label  = result.get("pistol_label",  "❓ No Pistol Data")
-    pistol_note   = result.get("pistol_note",   "")
-    buffer_tag    = "  ✅ **+1.5 buffer applied**" if result.get("pistol_buffer_applied") else ""
-    embed.add_field(
-        name="🔫 Pistol Floor",
-        value=(
-            f"**{pistol_label}**{buffer_tag}\n"
-            f"_{pistol_note}_"
-        ),
-        inline=True,
-    )
-
-    # ── 🎮 KAST% Consistency + ADR Kill Conversion ───────────────────────────
-    kast_label_e = result.get("kast_label",  "❓ KAST Not Available")
-    kast_note_e  = result.get("kast_note",   "")
-    conv_label_e = result.get("conv_label",  "❓ No ADR Data")
-    conv_note_e  = result.get("conv_note",   "")
-    kast_adj_tag = "  _(+2% Over applied)_" if result.get("kast_adj_applied") else ""
-    embed.add_field(
-        name="🎮 KAST & ADR Conversion",
-        value=(
-            f"**Consistency:** {kast_label_e}{kast_adj_tag}\n"
-            f"_{kast_note_e}_\n"
-            f"**Kill Conversion:** {conv_label_e}\n"
-            f"_{conv_note_e}_"
-        ),
-        inline=False,
-    )
-
-    # ── 💰 Fair Line Analysis ──────────────────────────────────────────────────
-    fair_line_val  = result.get("fair_line", result.get("sim_median", "N/A"))
-    misprice_label = result.get("misprice_label", "✅ Fair Line")
-    line_pct       = result.get("line_percentile")
-    hs_rate_src    = result.get("hs_rate_src")
-    is_awper       = result.get("is_awper", False)
-    awper_warn     = result.get("awper_warn", False)
-    if line_pct is not None:
-        pct_direction = "⬆️ Lean OVER" if line_pct < 50 else ("⬇️ Lean UNDER" if line_pct > 50 else "⚖️ Coin Flip")
-        pct_line = f"**Line Percentile:** `{line_pct}%` of sims at/below line — {pct_direction}"
-    else:
-        pct_line = ""
-    if hs_rate_src and awper_warn:
-        hs_note = f"\n⚠️ **AWPer detected** — {hs_rate_src}"
-    elif hs_rate_src and is_awper:
-        hs_note = f"\n🎯 **AWPer** — HS rate: {hs_rate_src}"
-    elif hs_rate_src:
-        hs_note = f"\n_HS rate: {hs_rate_src}_"
-    else:
-        hs_note = ""
-    embed.add_field(
-        name="💰 Fair Line Analysis",
-        value=(
-            f"**Fair Line (50/50):** `{fair_line_val}` {stat_unit}\n"
-            f"**Sportsbook Line:** `{line}` {stat_unit}\n"
-            f"**Assessment:** {misprice_label}\n"
-            + (f"{pct_line}" if pct_line else "")
-            + hs_note
-        ),
-        inline=False,
-    )
-
-    conf_grade  = result.get("confidence_grade", "?")
-    conf_label  = result.get("confidence_label", "❓ Unknown")
-    conf_score  = result.get("confidence_score", 0)
-    unit_rec    = result.get("unit_recommendation", "🚫 0u — Pass")
-    edge_val    = result.get("edge", 0)
-    edge_sign   = "+" if edge_val >= 0 else ""
-    embed.add_field(
-        name="💡 Edge & Verdict",
-        value=(
-            f"**Edge vs Line:** `{edge_sign}{edge_val}%`\n"
-            f"**Grade:** `{grade}` {emoji}\n"
-            f"**Decision:** `{decision}`\n"
-            f"**Confidence:** {conf_label} `({conf_score}/100)`"
-        ),
-        inline=True,
-    )
-
-    rec = result.get("recommendation", "N/A")
-    embed.add_field(
-        name="✅ Recommendation",
-        value=(
-            f"**{rec}**\n"
-            f"**Unit Size:** {unit_rec}"
-        ),
-        inline=True,
-    )
-
-    footer_data = (
-        "Data: Estimated (HLTV unavailable)"
-        if used_fallback
-        else "Data: HLTV (Last 10 BO3, Maps 1-2 only)"
-    )
+    # ── Footer ────────────────────────────────────────────────────────────────
+    data_note = "Estimated (HLTV unavailable)" if used_fb else "HLTV Live — Last 10 BO3, Maps 1&2 only"
     embed.set_footer(
-        text=f"Elite CS2 Prop Grader | Negative Binomial Model | {footer_data} | Not financial advice."
+        text=f"Elite CS2 Prop Grader  ·  Negative Binomial Model  ·  {data_note}  ·  Not financial advice"
     )
     return embed
 
 
 def build_prob_bar(prob: float, length: int = 10) -> str:
-    filled = round(prob * length)
-    return "█" * filled + "░" * (length - filled)
+    """Thin wrapper around grade_engine's bar builder."""
+    return ge_prob_bar(prob, width=length)
+
+
+# ---------------------------------------------------------------------------
+# !scout — Player scouting card
+# ---------------------------------------------------------------------------
+
+@bot.command(name="scout")
+async def cmd_scout(ctx, *, player_arg: str = ""):
+    """
+    Usage: !scout <Player>
+    Returns a compact player scouting card from HLTV.
+    """
+    if not player_arg.strip():
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Usage Error",
+                description="Usage: `!scout <Player>`\nExample: `!scout ZywOo`",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    player_name = player_arg.strip()
+    status_msg  = await ctx.send(
+        embed=discord.Embed(
+            title=f"🔍 Scouting {player_name}…",
+            description="Fetching HLTV data — please wait.",
+            color=0x7289DA,
+        )
+    )
+
+    try:
+        # Use get_player_info for search + scrape in one call
+        info = await asyncio.to_thread(get_player_info, player_name, "Kills")
+        map_stats     = info.get("map_kills", [])
+        resolved_name = info.get("player_name", player_name)
+        team_name     = info.get("team_name",   "Unknown")
+        player_id     = info.get("player_id",   "")
+        used_fallback_scout = info.get("used_fallback", False)
+
+        if not map_stats and not used_fallback_scout:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ Player Not Found",
+                    description=f"Could not find **{player_name}** on HLTV. Check the spelling.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        # Period stats
+        ps = None
+        if player_id:
+            try:
+                player_slug = info.get("player_slug", player_name.lower())
+                ps = await asyncio.to_thread(
+                    get_player_period_stats, player_id, player_slug, 90
+                )
+            except Exception:
+                pass
+
+        if not map_stats:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ No Data",
+                    description=f"No recent BO3 match data for **{resolved_name}**.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        # Compute stats
+        from grade_engine import (
+            compute_form_streak, compute_variance_tier, compute_map_intel,
+            _extract_series_totals,
+        )
+        series_totals = _extract_series_totals(map_stats)
+        variance = compute_variance_tier(series_totals)
+
+        hist_avg  = round(sum(series_totals) / len(series_totals), 1) if series_totals else 0
+        hist_med  = round(sorted(series_totals)[len(series_totals) // 2], 1) if series_totals else 0
+        per_map_avgs: dict = {}
+        for m in map_stats:
+            mn = m.get("map_name", "").lower()
+            if mn and mn != "unknown":
+                per_map_avgs.setdefault(mn, []).append(m["stat_value"])
+        sorted_maps = sorted(
+            [(mn, round(sum(v)/len(v), 1)) for mn, v in per_map_avgs.items() if v],
+            key=lambda x: x[1], reverse=True
+        )
+
+        # Role fingerprint
+        known_awpers = getattr(bot, "_known_awpers", {})
+        kpr_vals = [m["stat_value"] / max(m["rounds"], 1) for m in map_stats if m.get("rounds")]
+        avg_kpr  = round(sum(kpr_vals) / len(kpr_vals), 3) if kpr_vals else None
+        hs_rate  = ps.get("hs_pct") / 100 if ps and ps.get("hs_pct") is not None else None
+        role, role_emoji = determine_role(
+            resolved_name.lower(), known_awpers, avg_kpr,
+            avg_fk_rate=None, avg_survival=None, hs_rate=hs_rate
+        )
+
+        # Build embed
+        color = 0x00B4FF
+        title = f"👤  {resolved_name}  ·  {team_name or 'Unknown Team'}"
+        desc  = f"{role_emoji} **{role}**  ·  Last {len(series_totals)} BO3 Series (Maps 1&2)"
+
+        embed = discord.Embed(title=title, description=desc, color=color)
+
+        # Historical
+        hist_val = (
+            f"**Avg:** `{hist_avg}` · **Median:** `{hist_med}`\n"
+            f"**Variance:** {variance.get('label','?')} · σ={variance.get('std','?')}\n"
+            f"**Range:** {variance.get('floor','?')}–{variance.get('ceil','?')}"
+        )
+        embed.add_field(name=f"📊 Kill Totals (Maps 1+2, {len(series_totals)} series)", value=hist_val, inline=False)
+
+        # Map strengths
+        if sorted_maps:
+            top3 = sorted_maps[:3]
+            worst = sorted_maps[-1] if len(sorted_maps) > 1 else None
+            map_lines = [f"**{mn.title()}:** `{avg}` avg" for mn, avg in top3]
+            if worst and worst[0] != top3[-1][0]:
+                map_lines.append(f"🔴 Worst: **{worst[0].title()}:** `{worst[1]}` avg")
+            embed.add_field(name="🗺️ Map Pool (by kill avg)", value="\n".join(map_lines), inline=True)
+
+        # HLTV 90d
+        if ps and any(ps.get(k) is not None for k in ("kpr", "rating", "kast", "adr")):
+            ps_lines = []
+            if ps.get("kpr")    is not None: ps_lines.append(f"KPR: **{ps['kpr']:.2f}**")
+            if ps.get("rating") is not None: ps_lines.append(f"Rating: **{ps['rating']:.2f}**")
+            if ps.get("kast")   is not None: ps_lines.append(f"KAST: **{ps['kast']:.0f}%**")
+            if ps.get("adr")    is not None: ps_lines.append(f"ADR: **{ps['adr']:.0f}**")
+            if ps.get("kd")     is not None: ps_lines.append(f"K/D: **{ps['kd']:.2f}**")
+            if ps.get("hs_pct") is not None: ps_lines.append(f"HS%: **{ps['hs_pct']:.0f}%**")
+            embed.add_field(name=f"📋 HLTV {ps.get('days',90)}d Stats", value="\n".join(ps_lines), inline=True)
+
+        embed.add_field(
+            name="💡 Quick Grade",
+            value=f"Try `!grade {resolved_name} {{line}} Kills` to grade a prop",
+            inline=False,
+        )
+        embed.set_footer(text="Elite CS2 Prop Grader  ·  HLTV Live Data  ·  Not financial advice")
+
+        await status_msg.edit(embed=embed)
+
+    except Exception as e:
+        logger.exception(f"[scout] Error for {player_name}: {e}")
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ Error",
+                description=f"Failed to scout **{player_name}**: {str(e)[:200]}",
+                color=0xFF4136,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# !lines — Multi-line probability table
+# ---------------------------------------------------------------------------
+
+@bot.command(name="lines")
+async def cmd_lines(ctx, player_arg: str = "", stat_type_arg: str = "Kills"):
+    """
+    Usage: !lines <Player> [Kills|HS]
+    Returns a probability table for ±3 lines around the fair line.
+    """
+    if not player_arg.strip():
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Usage Error",
+                description="Usage: `!lines <Player> [Kills|HS]`\nExample: `!lines ZywOo Kills`",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    player_name = player_arg.strip()
+    stat_type   = "HS" if stat_type_arg.upper() in ("HS", "HEADSHOTS", "HEADSHOT") else "Kills"
+
+    status_msg = await ctx.send(
+        embed=discord.Embed(
+            title=f"📊 Building Lines Table — {player_name}",
+            description="Running simulations across 7 line values…",
+            color=0x7289DA,
+        )
+    )
+
+    try:
+        info = await asyncio.to_thread(get_player_info, player_name, stat_type)
+        map_stats     = info.get("map_kills", [])
+        resolved_name = info.get("player_name", player_name)
+        player_id     = info.get("player_id", "")
+        used_fallback = info.get("used_fallback", False)
+
+        if not map_stats and not used_fallback:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ Player Not Found",
+                    description=f"**{player_name}** not found on HLTV.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        if not map_stats:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ No Data",
+                    description=f"No recent BO3 match data for **{resolved_name}**.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        # Compute fair line from initial sim (base = median series total)
+        from grade_engine import _extract_series_totals
+        series_totals = _extract_series_totals(map_stats)
+        # Fair line = median series total (already in 2-map units), rounded to 0.5
+        med = sorted(series_totals)[len(series_totals)//2] if series_totals else 40.0
+        base_line = round(med * 2) / 2
+
+        period_kpr = None
+        if player_id:
+            try:
+                player_slug = info.get("player_slug", player_name.lower())
+                ps_lines_cmd = await asyncio.to_thread(
+                    get_player_period_stats, player_id, player_slug, 90
+                )
+                if ps_lines_cmd:
+                    period_kpr = ps_lines_cmd.get("kpr")
+            except Exception:
+                pass
+
+        rows = await asyncio.to_thread(
+            run_lines_table,
+            map_stats, base_line, stat_type,
+            0.60, None, None, period_kpr,
+            1.0, 3
+        )
+
+        if not rows:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ Simulation Failed",
+                    description="Could not generate line table. Try again later.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        # Build table text
+        header = f"{'Line':>6}  {'OVER%':>6}  {'UNDER%':>7}  {'Value':>5}"
+        divider = "─" * len(header)
+        table_lines = [f"```", header, divider]
+        for row in rows:
+            marker = "►" if row["is_base"] else " "
+            val_str = (row["over_val"] or row["under_val"] or "⚪").strip()
+            table_lines.append(
+                f"{marker}{row['line']:>5.1f}  {row['over']:>5.1f}%  {row['under']:>6.1f}%  {val_str}"
+            )
+        table_lines.append("```")
+        table_lines.append("🟢🟢 Strong OVER · 🟢 Lean OVER · ⚪ Toss-up · 🔴 Lean UNDER · 🔴🔴 Strong UNDER")
+        table_lines.append(f"_► = projected fair line  ·  vs -110 vig (52.38% implied)_")
+
+        embed = discord.Embed(
+            title=f"📊  {resolved_name}  ·  {stat_type} Lines Table",
+            description="\n".join(table_lines),
+            color=0x00B4FF,
+        )
+        embed.set_footer(text="Elite CS2 Prop Grader  ·  Negative Binomial Model  ·  Not financial advice")
+        await status_msg.edit(embed=embed)
+
+    except Exception as e:
+        logger.exception(f"[lines] Error for {player_name}: {e}")
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ Error",
+                description=f"Lines table failed for **{player_name}**: {str(e)[:200]}",
+                color=0xFF4136,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
