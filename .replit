@@ -48,4 +48,4 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
-packages = ["libxcrypt", "pkg-config", "xcodebuild", "xsimd", "zlib"]
+packages = ["geckodriver", "gitFull", "libxcrypt", "pkg-config", "playwright-driver", "xcodebuild", "xsimd", "zlib"]
