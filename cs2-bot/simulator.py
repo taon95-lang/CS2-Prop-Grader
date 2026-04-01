@@ -52,6 +52,7 @@ def run_simulation(
     favorite_prob: float = 0.55,
     likely_maps: list = None,
     rank_gap: int = None,
+    period_kpr: float = None,
 ) -> dict:
     """
     Run 100,000 Monte Carlo simulations using Negative Binomial distribution.
@@ -163,6 +164,14 @@ def run_simulation(
 
     # Blend: 70% recent form, 30% map-weighted (or overall) avg
     blended_kpr = 0.70 * recent_avg_kpr + 0.30 * avg_kpr
+
+    # If HLTV period stats provides an aggregate KPR (90-day), fold it in as a
+    # 3rd signal. It captures a broader date window than the 10-series scrape
+    # and is already normalised to all rounds (not just BO3 Maps 1&2).
+    # We weight it conservatively (25%) so it calibrates without dominating.
+    if period_kpr and 0.1 <= period_kpr <= 4.0:
+        blended_kpr = 0.75 * blended_kpr + 0.25 * period_kpr
+        logger.debug(f"[sim] period_kpr={period_kpr:.3f} blended into kpr → {blended_kpr:.3f}")
 
     # Trend signal (vs overall average, not map-weighted)
     trend_pct = round((recent_avg_kpr - overall_avg_kpr) / max(overall_avg_kpr, 0.01) * 100, 1)

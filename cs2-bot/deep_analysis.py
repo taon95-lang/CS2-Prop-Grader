@@ -21,6 +21,7 @@ from scraper import (
     _fetch, HLTV_BASE,
     search_team,
     get_player_team,
+    get_team_period_stats,
     _parse_match_kills,
 )
 
@@ -472,6 +473,18 @@ def run_deep_analysis(
     # ── Fetch opponent match data (single pass) ─────────────────────────────
     opp_data = _fetch_opponent_profile(opp_id, n_matches=10)
 
+    # ── Opponent team period stats (90-day aggregate from HLTV /stats/teams/) ─
+    # Used as fallback when opp_data has no avg_kills_allowed, and stored on
+    # the output dict for optional display.
+    team_period: dict | None = None
+    try:
+        team_period = get_team_period_stats(opp_id, opp_slug, days=90)
+        if team_period:
+            logger.debug(f"[deep] team period stats {opp_display}: {team_period}")
+    except Exception as _tp_e:
+        logger.warning(f"[deep] team period stats failed: {_tp_e}")
+    out['team_period_stats'] = team_period
+
     # ── Rankings ────────────────────────────────────────────────────────────
     opp_rank    = get_team_rank(opp_id, opp_slug)
     player_rank = get_team_rank(player_team_id, player_team_slug) if player_team_id and player_team_slug else None
@@ -489,6 +502,24 @@ def run_deep_analysis(
 
     # ── [A] Defensive kills allowed ──────────────────────────────────────────
     avg_allowed = opp_data.get('avg_kills_allowed')
+
+    # If scrape returned no kill data, attempt to estimate avg_allowed from the
+    # opponent team's own KPR (90-day period stats).  A team with higher KPR
+    # typically plays a more skilled / active CT-side, meaning fewer kills for
+    # the opposing player.  We invert the signal:
+    #   estimate ≈ BASELINE_KILLS * (1 - (opp_kpr - 0.65) * 0.5)
+    # where 0.65 is an approximate pro average KPR.  Clamped to [12, 22].
+    if avg_allowed is None and team_period:
+        _tp_kpr = team_period.get("kpr")
+        if _tp_kpr and 0.10 <= _tp_kpr <= 2.0:
+            _baseline_ref = BASELINE_KILLS
+            _est = _baseline_ref * (1.0 - (_tp_kpr - 0.65) * 0.50)
+            avg_allowed = round(max(12.0, min(22.0, _est)), 1)
+            logger.debug(
+                f"[deep] avg_kills_allowed estimated from team KPR "
+                f"{_tp_kpr:.3f} → {avg_allowed}"
+            )
+
     if avg_allowed:
         # Use the player's own per-map average as the denominator so the
         # adjustment is relative to what THIS player typically scores, not

@@ -9,6 +9,8 @@ from scraper import (
     get_player_info,
     get_player_info_fallback,
     get_player_hs_pct,
+    get_player_period_stats,
+    get_team_period_stats,
     _warm_hltv_session,
 )
 from deep_analysis import run_deep_analysis
@@ -421,9 +423,27 @@ def _analyze_player(
     if not map_stats:
         return {"error": "No data available. Check the player name spelling."}
 
-    # --- Step 2.5: HS% Scaling (only for HS props) ---
+    # --- Step 2.5: Period stats from HLTV stats page (last 90 days) ---
+    # Always fetched when we have real HLTV data (not fallback).
+    # Provides: KPR, HS%, Rating 2.0, KAST, ADR — all date-filtered.
+    period_stats: dict | None = None
+    if not used_fallback:
+        _pid_ps   = info.get("player_id")
+        _pslug_ps = info.get("player_slug")
+        if _pid_ps and _pslug_ps:
+            try:
+                period_stats = get_player_period_stats(_pid_ps, _pslug_ps, days=90)
+            except Exception as _e:
+                logger.warning(f"[period_stats] Fetch failed: {_e}")
+
+    # --- Step 2.6: HS% Scaling (only for HS props) ---
     # The scraper always returns kill data. For HS props we convert kills → HS
-    # using the player's recent match HS% (or career profile, or role default).
+    # using the best available HS rate in priority order:
+    #   P0: Period stats page HS% (90-day aggregate, most accurate & date-filtered)
+    #   P1: recent HS% averaged from match-level overview rows (~10 matches)
+    #   P2: career HS% from /player/{id}/{slug} profile page
+    #   P3: AWPer known-rate override (if player is in calibrated table)
+    #   P4: default 45% (rifler estimate)
     hs_rate      = None
     hs_rate_src  = None
     is_awper     = False
@@ -434,15 +454,23 @@ def _analyze_player(
     if stat_type == "HS" and not used_fallback:
         n_hs_matches = info.get("hs_pct_n_matches", 0)
 
+        # Priority 0: period stats page HS% (90-day aggregate, most reliable)
+        if period_stats and period_stats.get("hs_pct") is not None:
+            _ps_hs  = period_stats["hs_pct"] / 100.0
+            hs_rate     = _ps_hs
+            hs_rate_src = f"HLTV stats page 90d ({round(period_stats['hs_pct'])}%)"
+            logger.info(f"[hs_scale] Using period stats HS%: {hs_rate_src}")
+
         # Priority 1: recent HS% derived from actual match pages (last ~10 matches)
-        recent_hs = info.get("recent_hs_pct")
-        if recent_hs is not None:
-            hs_rate     = recent_hs
-            hs_rate_src = (
-                f"last {n_hs_matches} matches avg "
-                f"({round(recent_hs * 100)}%)"
-            )
-            logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
+        if hs_rate is None:
+            recent_hs = info.get("recent_hs_pct")
+            if recent_hs is not None:
+                hs_rate     = recent_hs
+                hs_rate_src = (
+                    f"last {n_hs_matches} matches avg "
+                    f"({round(recent_hs * 100)}%)"
+                )
+                logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
 
         # Priority 2: career HS% from their HLTV profile page (separate request)
         if hs_rate is None:
@@ -590,6 +618,7 @@ def _analyze_player(
         mp = deep.get("map_pool", {})
         likely_maps = mp.get("most_played", []) or []
         rank_gap = deep.get("rank_info", {}).get("rank_gap")
+    _period_kpr = (period_stats or {}).get("kpr")
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
@@ -598,19 +627,21 @@ def _analyze_player(
             favorite_prob=favorite_prob,
             likely_maps=likely_maps if likely_maps else None,
             rank_gap=rank_gap,
+            period_kpr=_period_kpr,
         )
     except Exception as e:
         err_name = type(e).__name__
         logger.error(f"Simulation failed ({err_name}): {e}")
         return {"sim_error": err_name, "error": str(e)[:300]}
 
-    sim_result["data_source"]  = data_source
+    sim_result["data_source"]   = data_source
     sim_result["used_fallback"] = used_fallback
-    sim_result["player_name"]  = player_name
-    sim_result["line"]         = line
-    sim_result["deep"]         = deep
-    sim_result["opponent"]     = opponent     # raw user input — None if not supplied
-    sim_result["hs_rate_src"]  = hs_rate_src  # None for kills props, str for HS props
+    sim_result["player_name"]   = player_name
+    sim_result["line"]          = line
+    sim_result["deep"]          = deep
+    sim_result["opponent"]      = opponent     # raw user input — None if not supplied
+    sim_result["hs_rate_src"]   = hs_rate_src  # None for kills props, str for HS props
+    sim_result["period_stats"]  = period_stats  # HLTV 90-day aggregate stats
     sim_result["is_awper"]          = is_awper
     sim_result["awper_warn"]        = awper_warn
     sim_result["series_breakdown"]  = _series_breakdown   # per-series stat totals
@@ -1069,6 +1100,21 @@ def build_result_embed(
             inline=True,
         )
 
+        # Opponent team HLTV 90-day aggregate stats (if fetched)
+        _otp = deep.get("team_period_stats") or {}
+        if _otp and any(_otp.get(k) for k in ("kpr", "rating", "adr", "kast", "kd")):
+            _otp_parts = []
+            if _otp.get("kpr")    is not None: _otp_parts.append(f"**KPR:** `{_otp['kpr']:.2f}`")
+            if _otp.get("rating") is not None: _otp_parts.append(f"**Rating:** `{_otp['rating']:.2f}`")
+            if _otp.get("adr")    is not None: _otp_parts.append(f"**ADR:** `{_otp['adr']:.1f}`")
+            if _otp.get("kast")   is not None: _otp_parts.append(f"**KAST:** `{_otp['kast']:.1f}%`")
+            if _otp.get("kd")     is not None: _otp_parts.append(f"**K/D:** `{_otp['kd']:.2f}`")
+            embed.add_field(
+                name=f"📋 {opp_display} HLTV Stats (90d)",
+                value="\n".join(_otp_parts),
+                inline=True,
+            )
+
         # Ranking & Map Pool
         rank_label    = rank_info.get("label", "Unknown")
         stomp_text    = " ⚠️" if rank_info.get("stomp_risk") else ""
@@ -1211,6 +1257,23 @@ def build_result_embed(
         ),
         inline=True,
     )
+
+    # ── HLTV 90-day Aggregate Stats (from /stats/players/ page) ─────────────
+    ps = result.get("period_stats") or {}
+    if ps and any(ps.get(k) for k in ("kpr", "hs_pct", "rating", "kast", "adr", "kd")):
+        ps_parts = []
+        if ps.get("kpr")    is not None: ps_parts.append(f"**KPR:** `{ps['kpr']:.2f}`")
+        if ps.get("hs_pct") is not None: ps_parts.append(f"**HS%:** `{ps['hs_pct']:.1f}%`")
+        if ps.get("rating") is not None: ps_parts.append(f"**Rating:** `{ps['rating']:.2f}`")
+        if ps.get("kast")   is not None: ps_parts.append(f"**KAST:** `{ps['kast']:.1f}%`")
+        if ps.get("adr")    is not None: ps_parts.append(f"**ADR:** `{ps['adr']:.1f}`")
+        if ps.get("kd")     is not None: ps_parts.append(f"**K/D:** `{ps['kd']:.2f}`")
+        _ps_days = ps.get("days", 90)
+        embed.add_field(
+            name=f"📋 HLTV Stats (last {_ps_days} days)",
+            value="\n".join(ps_parts) if ps_parts else "_Stats page unavailable_",
+            inline=True,
+        )
 
     map_note = result.get("map_projection_note", "Overall average")
     embed.add_field(

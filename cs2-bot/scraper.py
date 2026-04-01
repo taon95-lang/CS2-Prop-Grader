@@ -20,6 +20,7 @@ import random
 import time
 import logging
 import statistics as _stats
+from datetime import date, timedelta
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
@@ -1131,6 +1132,193 @@ def get_player_hs_pct(player_id: str, player_slug: str) -> float | None:
 
     logger.info(f"[hs_pct] Could not find HS% for {player_slug} — will use default")
     return None
+
+
+# ---------------------------------------------------------------------------
+# Period stats pages  (/stats/players/{id}/{slug}  and  /stats/teams/{id}/{slug})
+# These endpoints accept startDate / endDate query params and return aggregated
+# stats (KPR, HS%, Rating 2.0, KAST, ADR, etc.) for that date window.
+# We use the same main session (_HLTV_SESSION) — 403s are caught and logged.
+# ---------------------------------------------------------------------------
+
+def _store_stat_val(result: dict, label: str, value_text: str) -> None:
+    """Map one label→value pair from a stats page row into `result`."""
+    label = label.lower().strip()
+    vt    = value_text.strip()
+
+    def _flt(s, lo=None, hi=None):
+        m = re.search(r'(\d+\.?\d*)', s)
+        if not m:
+            return None
+        v = float(m.group(1))
+        if lo is not None and v < lo:
+            return None
+        if hi is not None and v > hi:
+            return None
+        return v
+
+    if 'kills / round' in label or label == 'kpr':
+        v = _flt(vt, 0.1, 5.0)
+        if v:
+            result['kpr'] = v
+    elif any(x in label for x in ('headshots %', 'hs %', 'headshot %', 'hs%')):
+        v = _flt(vt.replace('%', ''), 5.0, 95.0)
+        if v:
+            result['hs_pct'] = v
+    elif any(x in label for x in ('damage / round', 'adr', 'damage/round')):
+        v = _flt(vt, 10.0, 250.0)
+        if v:
+            result['adr'] = v
+    elif 'rating 2' in label or (label == 'rating'):
+        v = _flt(vt, 0.2, 5.0)
+        if v:
+            result['rating'] = v
+    elif label == 'kast':
+        v = _flt(vt.replace('%', ''), 10.0, 100.0)
+        if v:
+            result['kast'] = v
+    elif any(x in label for x in ('k/d ratio', 'k/d')):
+        v = _flt(vt, 0.1, 20.0)
+        if v:
+            result['kd'] = v
+    elif 'total kills' in label:
+        m = re.search(r'(\d+)', vt)
+        if m:
+            result['kills'] = int(m.group(1))
+    elif 'rounds played' in label:
+        m = re.search(r'(\d+)', vt)
+        if m:
+            result['rounds'] = int(m.group(1))
+    elif 'maps played' in label:
+        m = re.search(r'(\d+)', vt)
+        if m:
+            result['maps'] = int(m.group(1))
+    elif any(x in label for x in ('win rate', 'w/l')):
+        v = _flt(vt.replace('%', ''), 0.0, 100.0)
+        if v:
+            result['win_rate'] = v
+    elif any(x in label for x in ('deaths / round', 'dpr', 'deaths/round')):
+        v = _flt(vt, 0.1, 5.0)
+        if v:
+            result['dpr'] = v
+
+
+def _parse_stats_page(html: str, slug: str) -> dict:
+    """
+    Parse a /stats/players/ or /stats/teams/ HLTV page.
+
+    HLTV stats pages use a two-column grid of stat rows:
+      <div class="stats-row">
+        <span class="stats-row-first">Kills / round</span>
+        <span class="bold">0.83</span>
+      </div>
+    We also fall back to raw-text regex scanning for resilience.
+    """
+    result: dict = {}
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Strategy 1: stats-row div pattern
+    for row in soup.find_all('div', class_='stats-row'):
+        spans = row.find_all('span')
+        if len(spans) >= 2:
+            label_text = spans[0].get_text(strip=True)
+            value_text = spans[-1].get_text(strip=True)
+            _store_stat_val(result, label_text, value_text)
+
+    # Strategy 2: generic label → next sibling with a numeric value
+    # Covers pages that use <p>, <td>, or other elements
+    if not result:
+        for tag in soup.find_all(['p', 'td', 'div', 'span']):
+            label_text = tag.get_text(strip=True)
+            if len(label_text) > 50:
+                continue
+            sibling = tag.find_next_sibling()
+            if sibling:
+                _store_stat_val(result, label_text, sibling.get_text(strip=True))
+
+    # Strategy 3: raw-text regex scan — last resort
+    raw = html.lower()
+    _RAW_PATTERNS = [
+        ('kpr',    r'kills\s*/\s*round[^<]{0,80}?(\b0\.\d{2,3}\b)'),
+        ('hs_pct', r'(?:headshots?\s*%|hs\s*%)[^<]{0,60}?(\d{1,2}\.?\d*)\s*%'),
+        ('adr',    r'(?:damage\s*/\s*round|adr)[^<]{0,60}?(\d{2,3}\.?\d*)(?!\s*%)'),
+        ('rating', r'rating\s*2\.0[^<]{0,60}?(\d\.\d{2,3})'),
+        ('kast',   r'\bkast\b[^<]{0,60}?(\d{2}\.?\d*)\s*%'),
+        ('kd',     r'k/d\s*ratio[^<]{0,60}?(\d+\.\d{2})'),
+    ]
+    for field, pat in _RAW_PATTERNS:
+        if field not in result:
+            m = re.search(pat, raw)
+            if m:
+                try:
+                    result[field] = float(m.group(1))
+                except ValueError:
+                    pass
+
+    logger.info(f"[period_stats] parsed slug={slug}: {result}")
+    return result
+
+
+def get_player_period_stats(player_id: str, player_slug: str, days: int = 90) -> dict | None:
+    """
+    Fetch a player's aggregated HLTV stats for the past `days` days.
+
+    URL: /stats/players/{id}/{slug}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+
+    Returns dict with any of: kpr, hs_pct, rating, kast, adr, kd, kills, rounds
+    or None if the page is unavailable.
+    """
+    end_dt   = date.today()
+    start_dt = end_dt - timedelta(days=days)
+    url = (
+        f"{HLTV_BASE}/stats/players/{player_id}/{player_slug}"
+        f"?startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
+    )
+    logger.info(f"[period_stats] GET player stats: {url}")
+    html = _fetch(url)
+    if not html:
+        logger.warning(f"[period_stats] Could not fetch player stats for {player_slug}")
+        return None
+
+    parsed = _parse_stats_page(html, player_slug)
+    if not parsed:
+        logger.warning(f"[period_stats] No stats parsed for {player_slug}")
+        return None
+
+    parsed['url']  = url
+    parsed['days'] = days
+    return parsed
+
+
+def get_team_period_stats(team_id: str, team_slug: str, days: int = 90) -> dict | None:
+    """
+    Fetch a team's aggregated HLTV stats for the past `days` days.
+
+    URL: /stats/teams/{id}/{slug}?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD
+
+    Returns dict with any of: kpr, rating, kast, adr, kd, maps, win_rate
+    or None if the page is unavailable.
+    """
+    end_dt   = date.today()
+    start_dt = end_dt - timedelta(days=days)
+    url = (
+        f"{HLTV_BASE}/stats/teams/{team_id}/{team_slug}"
+        f"?startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
+    )
+    logger.info(f"[period_stats] GET team stats: {url}")
+    html = _fetch(url)
+    if not html:
+        logger.warning(f"[period_stats] Could not fetch team stats for {team_slug}")
+        return None
+
+    parsed = _parse_stats_page(html, team_slug)
+    if not parsed:
+        logger.warning(f"[period_stats] No stats parsed for team {team_slug}")
+        return None
+
+    parsed['url']  = url
+    parsed['days'] = days
+    return parsed
 
 
 # ---------------------------------------------------------------------------
