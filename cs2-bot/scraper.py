@@ -307,58 +307,110 @@ def _warm_stats_session(match_url: str) -> bool:
 
 def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     """
-    Attempt to fetch an HLTV /stats/matches/mapstatsid/ page.
+    Fetch an HLTV /stats/matches/mapstatsid/ page.
 
-    On the first 403 we rotate the session profile (same logic as _fetch) and
-    retry once.  Only if BOTH attempts 403 do we trip the circuit-breaker.
-    This prevents a stale profile from permanently blocking real HS counts.
+    Cycles through ALL available impersonation profiles before giving up.
+    Each profile gets a full warm-up chain (homepage → match page) before
+    the stats page is attempted, mimicking real browser navigation.
+
+    Circuit-breaker only trips after every profile has been exhausted.
     """
-    global _STATS_PAGES_BLOCKED
+    global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
     if _STATS_PAGES_BLOCKED:
         return None
 
-    for attempt in range(2):   # attempt 0 = current profile, attempt 1 = rotated profile
-        sess = _get_stats_session()
+    # Build the complete list of profiles to try (current first, then rest)
+    all_profiles = list(_PROFILES)
+    # Start from current profile index
+    start_idx = _profile_idx
+    ordered = all_profiles[start_idx:] + all_profiles[:start_idx]
+
+    for profile_attempt, profile in enumerate(ordered):
+        # Switch to this profile and build a fresh session
+        global _HLTV_SESSION, _HLTV_SESSION_PROFILE, _HLTV_SESSION_WARMED
+        if _HLTV_SESSION_PROFILE != profile or _HLTV_SESSION is None:
+            _HLTV_SESSION = _make_session(profile)
+            _HLTV_SESSION_PROFILE = profile
+            _HLTV_SESSION_WARMED = False
+            _STATS_SESSION_WARMED = False
+
+        sess = _HLTV_SESSION
         if sess is None:
-            return None
-        _warm_stats_session(match_url)
+            continue
+
         try:
+            # Step 1: Homepage warm-up (seeds Cloudflare cookie)
+            if not _HLTV_SESSION_WARMED:
+                r_home = sess.get(HLTV_BASE + "/", timeout=12)
+                if r_home.status_code == 200 and "Just a moment" not in r_home.text:
+                    _HLTV_SESSION_WARMED = True
+                    logger.info(f"[stats_fetch] Homepage warm-up OK [{profile}]")
+                    time.sleep(random.uniform(0.4, 0.9))
+                else:
+                    logger.warning(f"[stats_fetch] Homepage warm-up {r_home.status_code} [{profile}]")
+                    # don't give up — still try the stats page
+
+            # Step 2: Match page warm-up (builds referer chain)
+            if not _STATS_SESSION_WARMED and match_url:
+                r_match = sess.get(match_url, timeout=15)
+                if r_match.status_code == 200:
+                    _STATS_SESSION_WARMED = True
+                    logger.info(f"[stats_fetch] Match-page warm-up OK [{profile}]")
+                    time.sleep(random.uniform(0.3, 0.7))
+
+            # Step 3: Fetch the actual stats page with browser-like headers
             logger.info(
-                f"[stats_fetch] GET {stats_url} [{_HLTV_SESSION_PROFILE}]"
-                + (" (retry after rotate)" if attempt else "")
+                f"[stats_fetch] GET {stats_url} [{profile}]"
+                + (f" (attempt {profile_attempt + 1}/{len(ordered)})" if profile_attempt else "")
             )
             resp = sess.get(
                 stats_url,
-                headers={"Referer": match_url},
-                timeout=12,
+                headers={
+                    "Referer":          match_url or HLTV_BASE + "/",
+                    "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language":  "en-US,en;q=0.9",
+                    "Accept-Encoding":  "gzip, deflate, br",
+                    "Sec-Fetch-Dest":   "document",
+                    "Sec-Fetch-Mode":   "navigate",
+                    "Sec-Fetch-Site":   "same-origin",
+                    "Sec-Fetch-User":   "?1",
+                    "Upgrade-Insecure-Requests": "1",
+                },
+                timeout=15,
             )
-            if resp.status_code == 200 and len(resp.text) > 5000 and "Just a moment" not in resp.text:
-                logger.info(f"[stats_fetch] OK — {len(resp.text):,} chars [{_HLTV_SESSION_PROFILE}]")
+
+            if resp.status_code == 200 and len(resp.text) > 3000 and "Just a moment" not in resp.text:
+                logger.info(f"[stats_fetch] OK — {len(resp.text):,} chars [{profile}]")
                 return resp.text
+
             if resp.status_code == 403:
-                if attempt == 0:
-                    logger.warning(
-                        f"[stats_fetch] 403 on profile={_HLTV_SESSION_PROFILE} — "
-                        "rotating and retrying"
-                    )
-                    _rotate_session()
-                    time.sleep(0.8)
-                    continue
-                # Both profiles returned 403 — trip the circuit-breaker
                 logger.warning(
-                    "[stats_fetch] 403 on both profiles — activating circuit-breaker. "
-                    "HS will use calibrated fallback rates for this session."
+                    f"[stats_fetch] 403 on profile={profile} "
+                    f"(attempt {profile_attempt + 1}/{len(ordered)}) — rotating"
                 )
-                _STATS_PAGES_BLOCKED = True
-            else:
-                logger.warning(
-                    f"[stats_fetch] status={resp.status_code} len={len(resp.text)} — skipping"
-                )
-            return None
-        except Exception as e:
-            logger.warning(f"[stats_fetch] {type(e).__name__}: {e} [{_HLTV_SESSION_PROFILE}]")
+                _STATS_SESSION_WARMED = False
+                # Exponential backoff: 1s, 2s, 3s, ...
+                delay = min(1.0 + profile_attempt * 1.0, 4.0) + random.uniform(0, 0.5)
+                time.sleep(delay)
+                continue
+
+            logger.warning(
+                f"[stats_fetch] Unexpected status={resp.status_code} "
+                f"len={len(resp.text)} [{profile}]"
+            )
             return None
 
+        except Exception as e:
+            logger.warning(f"[stats_fetch] {type(e).__name__}: {e} [{profile}]")
+            time.sleep(1.0)
+            continue
+
+    # All profiles exhausted — trip the circuit-breaker for this session
+    logger.warning(
+        f"[stats_fetch] All {len(ordered)} profiles returned 403 — "
+        "activating circuit-breaker. HS will use calibrated fallback rates."
+    )
+    _STATS_PAGES_BLOCKED = True
     return None
 
 
@@ -758,6 +810,36 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
     # Normalise player slug for matching (lowercase, no hyphens)
     slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
 
+    # Pre-compute actual round counts per map using mapholder divs.
+    # Each mapholder div that has a played result contains:
+    #   • A STATS link with href="/stats/matches/mapstatsid/{mid}/..." (gives map_id)
+    #   • Two <div class="results-team-score"> elements (one per team) with integer scores
+    # Total rounds = score_team_A + score_team_B.
+    _map_rounds: dict[str, int] = {}
+    for _mh in soup.find_all('div', class_='mapholder'):
+        # Get mapstatsid from the STATS href
+        _stats_a = _mh.find('a', href=re.compile(r'mapstatsid/(\d+)', re.I))
+        if not _stats_a:
+            continue
+        _mid_m = re.search(r'mapstatsid/(\d+)', _stats_a.get('href', ''))
+        if not _mid_m:
+            continue
+        _mid = _mid_m.group(1)
+        # Get team scores
+        _score_els = _mh.find_all('div', class_='results-team-score')
+        _scores = []
+        for _se in _score_els:
+            _t = _se.get_text(strip=True)
+            if re.match(r'^\d{1,2}$', _t):
+                _v = int(_t)
+                if 0 <= _v <= 35:
+                    _scores.append(_v)
+        if len(_scores) >= 2:
+            _total = _scores[0] + _scores[1]
+            if 13 <= _total <= 60:   # CS2: min 13+0=13, max OT games ~48
+                _map_rounds[_mid] = _total
+    logger.info(f"[parse] Per-map round counts from mapholders: {_map_rounds}")
+
     maps_result = []
     _dump_done = False   # only dump once per match for diagnostics
     for map_num, map_id in enumerate(map_ids, start=1):
@@ -1019,31 +1101,35 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
                     adr = round(val, 1)
                     break
 
-        # Compute survival rate from deaths (rounds - deaths) / rounds
-        rounds_on_map = 22  # default; refined per-map if parseable
+        # Use pre-computed round counts from the match page score elements.
+        # Falls back to 24 (CS2 regulation max) if score couldn't be parsed.
+        rounds_on_map = _map_rounds.get(map_id, 24)
         _deaths_for_sr = deaths if deaths is not None else 0
         survival_rate = round((rounds_on_map - _deaths_for_sr) / rounds_on_map, 3)
 
-        # Extract FK (First Kills) — integer cell BEFORE the rating
-        # FK-FD columns appear on some pages as standalone integers (0-20)
+        # Extract FK/FD from the eK-eD column (2nd <td> in the HLTV CS2 row).
+        # Column layout confirmed: K-D | eK-eD | Swing | ADR | eADR | KAST | eKAST | Rating
+        # The "16-7" in the eK-eD cell gives entry kills (16) and entry deaths (7).
         fk = None
         fd = None
-        int_cells = []
-        for cell in cells:
-            ct = cell.get_text(strip=True)
-            if re.match(r'^\d+$', ct) and 0 <= int(ct) <= 40:
-                int_cells.append(int(ct))
-        # int_cells typically: [kills, deaths, fk, fd, ...]
-        # K-D cell shows "22-14" so we skip that; standalone int cells after K-D are fk/fd
-        if len(int_cells) >= 2:
-            fk = int_cells[0]
-            fd = int_cells[1]
+        if player_row is not None:
+            _row_cells = player_row.find_all('td')
+            # Find the data columns: skip the player name cell (which usually has no K-D pattern)
+            _data_cells = [c for c in _row_cells if re.match(r'^\d+[-–]\d+$', c.get_text(strip=True))]
+            if len(_data_cells) >= 2:
+                # _data_cells[0] = K-D, _data_cells[1] = eK-eD
+                _ekd_txt = _data_cells[1].get_text(strip=True)
+                _ekd_m = re.match(r'^(\d+)[-–](\d+)$', _ekd_txt)
+                if _ekd_m:
+                    fk = int(_ekd_m.group(1))
+                    fd = int(_ekd_m.group(2))
 
         maps_result.append({
             'map_name':      map_name,
             'kills':         kills,
             'headshots':     headshots,   # int or None if not shown on scorecard
             'deaths':        deaths,
+            'rounds':        rounds_on_map,
             'rating':        rating,
             'kast_pct':      kast_pct,
             'adr':           adr,
@@ -1055,7 +1141,7 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
         _hs_str = f" HS={headshots}" if headshots is not None else ""
         logger.info(
             f"[parse] Map {map_num} ({map_name}): {player_slug} — "
-            f"{kills}K{_hs_str}/{deaths}D rating={rating} fk={fk}"
+            f"{kills}K{_hs_str}/{deaths}D rounds={rounds_on_map} rating={rating} fk={fk}"
         )
 
     if not maps_result:
@@ -1545,7 +1631,7 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
                 'stat_value':    m['kills'],
                 'headshots':     _hs_val,             # actual HS count or None
                 'match_hs_pct':  match_hs,            # per-match scraped HS% (all-maps avg) or None
-                'rounds':        22,
+                'rounds':        m.get('rounds', 24),  # actual rounds from score parsing; 24 = CS2 regulation max
                 'match_id':      match_id,
                 'map_name':      m['map_name'].lower(),
                 'rating':        m.get('rating'),
