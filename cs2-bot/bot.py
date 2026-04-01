@@ -1112,10 +1112,24 @@ def build_result_embed(
     n_sims   = result.get("n_simulations", 10000)
     eco_tag  = " _(eco-adj)_" if result.get("economy_adjusted") else ""
     over_bar = ge_prob_bar((over_p or 0) / 100) if isinstance(over_p, (int, float)) else ""
+    # EV display (positive EV = value, shown as +X.XXu)
+    decision_for_ev = result.get("decision", "PASS")
+    if decision_for_ev == "OVER":
+        ev_raw = result.get("ev_over", None)
+    elif decision_for_ev == "UNDER":
+        ev_raw = result.get("ev_under", None)
+    else:
+        ev_raw = None
+    ev_str = f" · EV: **{'+' if ev_raw and ev_raw>=0 else ''}{ev_raw:.3f}u**" if ev_raw is not None else ""
+    # p10/p90 floor/ceiling from simulation
+    sim_p10 = result.get("sim_p10")
+    sim_p90 = result.get("sim_p90")
+    range_str = f"\nRange (p10–p90): **{sim_p10:.0f}–{sim_p90:.0f}**" if sim_p10 is not None and sim_p90 is not None else ""
     sim_val  = (
         f"OVER `{line}`: **{over_p}%** {eco_tag} `{over_bar}`\n"
         f"UNDER: **{under_p}%** · Push: **{push_p}%**\n"
-        f"Mean: **{sim_mean}** · ±**{sim_std}** · Fair line: **{fair_ln}**"
+        f"Mean: **{sim_mean}** · ±**{sim_std}** · Fair: **{fair_ln}**{ev_str}"
+        f"{range_str}"
     )
     embed.add_field(name=f"🎲 Simulation ({n_sims:,} runs)", value=sim_val, inline=True)
 
@@ -1365,7 +1379,7 @@ async def cmd_scout(ctx, *, player_arg: str = ""):
         )
 
         # Role fingerprint
-        known_awpers = getattr(bot, "_known_awpers", {})
+        known_awpers = _KNOWN_AWPERS
         kpr_vals = [m["stat_value"] / max(m["rounds"], 1) for m in map_stats if m.get("rounds")]
         avg_kpr  = round(sum(kpr_vals) / len(kpr_vals), 3) if kpr_vals else None
         hs_rate  = ps.get("hs_pct") / 100 if ps and ps.get("hs_pct") is not None else None

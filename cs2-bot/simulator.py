@@ -83,19 +83,22 @@ def run_simulation(
     else:
         stability_label = "🎯 Consistent"
 
-    # --- Round Projection (rank_gap takes priority over favorite_prob) ---
+    # --- Round Projection ---
+    # Base: 21 rounds per map (42 total for 2 maps).
+    # Closeness factor: matches near 50/50 odds run longer; lopsided matches run shorter.
+    # Formula mirrors CS2PropGrader: base + (1 - |implied - 0.5|) * 6, capped at [18, 25].
     stomp_via_rank = False
     close_via_rank = False
 
+    BASE_ROUNDS_PER_MAP = 21
+
+    # Rank gap overrides odds-based projection when available (more precise)
     if rank_gap is not None:
         if rank_gap > 100:
-            # Heavy favourite — maps typically end ~19 rounds (16-3 territory)
             rounds_per_map_projected = 19
             match_context = f"Heavy Stomp (Rank gap {rank_gap}) — very short match risk"
             stomp_via_rank = True
         elif rank_gap > 50:
-            # Moderate mismatch — maps typically end ~20 rounds (16-4 territory)
-            # 18 was too aggressive: even lopsided CS2 maps rarely go below 20 rounds.
             rounds_per_map_projected = 20
             match_context = f"Stomp Mismatch (Rank gap {rank_gap}) — short match risk"
             stomp_via_rank = True
@@ -103,24 +106,32 @@ def run_simulation(
             rounds_per_map_projected = 24
             match_context = f"Tight Clash (Rank gap {rank_gap}) — OT risk"
             close_via_rank = True
-        elif favorite_prob >= 0.70:
-            rounds_per_map_projected = 19
+        else:
+            # Moderate rank gap — use odds-based closeness formula
+            closeness = 1.0 - abs(favorite_prob - 0.5)
+            rounds_float = BASE_ROUNDS_PER_MAP + closeness * 3
+            if favorite_prob >= 0.70:
+                rounds_float -= 2
+                stomp_via_rank = True
+            rounds_per_map_projected = int(round(max(18, min(25, rounds_float))))
+            match_context = f"Rank gap {rank_gap} — {round(closeness*100)}% closeness"
+    else:
+        # No rank data — pure odds-based closeness formula
+        closeness = 1.0 - abs(favorite_prob - 0.5)
+        rounds_float = BASE_ROUNDS_PER_MAP + closeness * 3
+        if favorite_prob >= 0.70:
+            rounds_float -= 2
+            stomp_via_rank = True
             match_context = "Heavy Favorite (short match risk)"
         elif favorite_prob <= 0.55:
-            rounds_per_map_projected = 23
             match_context = "Coinflip Match (full maps likely)"
         else:
-            rounds_per_map_projected = 22
             match_context = "Moderate Favorite"
-    elif favorite_prob >= 0.70:
-        rounds_per_map_projected = 19
-        match_context = "Heavy Favorite (short match risk)"
-    elif favorite_prob <= 0.55:
-        rounds_per_map_projected = 23
-        match_context = "Coinflip Match (full maps likely)"
-    else:
-        rounds_per_map_projected = 22
-        match_context = "Moderate Favorite"
+        rounds_per_map_projected = int(round(max(18, min(25, rounds_float))))
+
+    # Stomp adjusts rounds down for kills (shorter maps = fewer kills)
+    if stomp_via_rank and stat_type == "Kills":
+        rounds_per_map_projected = max(18, rounds_per_map_projected - 1)
 
     total_projected_rounds = rounds_per_map_projected * 2
     per_map_values = stat_values
@@ -221,6 +232,16 @@ def run_simulation(
     else:
         misprice_label = "✅ Fair Line"
 
+    # --- Expected Value (EV) vs standard -110 odds ---
+    # EV = (over_prob * (100/110)) - (under_prob * 1.0)
+    # Positive EV = value on OVER side at -110
+    ev_over  = round(over_prob * (100 / 110) - under_prob, 4)
+    ev_under = round(under_prob * (100 / 110) - over_prob, 4)
+
+    # --- Percentile ceiling / floor from simulation (p90/p10) ---
+    sim_p10 = float(np.percentile(samples, 10))
+    sim_p90 = float(np.percentile(samples, 90))
+
     # --- Historical stats ---
     hit_rate   = (
         sum(1 for v in series_totals if v > line) / len(series_totals)
@@ -289,6 +310,12 @@ def run_simulation(
         "recent_n_maps":          recent_n,
         # --- Line context ---
         "line_percentile":        line_percentile,
+        # --- EV at standard -110 odds ---
+        "ev_over":                round(ev_over, 4),
+        "ev_under":               round(ev_under, 4),
+        # --- Simulation percentile range (p10/p90 = floor/ceiling) ---
+        "sim_p10":                round(sim_p10, 1),
+        "sim_p90":                round(sim_p90, 1),
     }
 
 
@@ -360,42 +387,60 @@ def calculate_grade(
         else:
             decision = "PASS"
 
-    # Mispriced check
-    mispriced = abs(line - hist_avg) / max(hist_avg, 1) > 0.15
+    # --- Misprice check (from CS2PropGrader avg/median gap logic) ---
+    avg_gap    = hist_avg - line       # positive = avg above line
+    median_gap = hist_median - line    # positive = median above line
+    # "Prop Error" if avg is >6 above line; "Mispriced" if avg±median both >3 off
+    prop_error  = avg_gap > 6 and median_gap > 2
+    mispriced   = (abs(avg_gap) > 3 and abs(median_gap) > 2) or (abs(line - hist_avg) / max(hist_avg, 1) > 0.15)
 
-    # --- Grade Scale (1-10) ---
+    # --- Grade Scale (1-10) with rich labels ---
     edge_abs = abs(edge)
 
     if edge_abs >= 0.22:
         grade_num = 10
+        grade_label = "Elite edge"
     elif edge_abs >= 0.18:
         grade_num = 9
+        grade_label = "Very strong edge"
     elif edge_abs >= 0.14:
         grade_num = 8
+        grade_label = "Strong playable edge"
     elif edge_abs >= 0.10:
         grade_num = 7
+        grade_label = "Solid lean"
     elif edge_abs >= 0.07:
         grade_num = 6
+        grade_label = "Small edge"
     elif edge_abs >= 0.05:
         grade_num = 5
+        grade_label = "Borderline"
     elif edge_abs >= 0.03:
         grade_num = 4
+        grade_label = "Marginal"
     elif edge_abs >= 0.02:
         grade_num = 3
+        grade_label = "Very thin"
     elif edge_abs >= 0.01:
         grade_num = 2
+        grade_label = "Noise level"
     else:
         grade_num = 1
+        grade_label = "No edge"
 
-    # Adjust for mispriced
+    # Boost grade when line is clearly mispriced
     if mispriced and grade_num >= 6:
         grade_num = min(grade_num + 1, 10)
+    # Extra boost for prop error (wildly off line)
+    if prop_error and grade_num >= 7:
+        grade_num = min(grade_num + 1, 10)
+        grade_label = "Prop Error (Wildly off)"
 
     # Stability penalty: High Volatility + thin edge → drop grade by 1
     if stability_std > 8 and edge_abs < 0.10:
         grade_num = max(1, grade_num - 1)
 
-    grade_str = f"{grade_num}/10"
+    grade_str = f"{grade_num}/10 ({grade_label})"
 
     # Recommendation
     if grade_num >= 8:
@@ -415,7 +460,9 @@ def calculate_grade(
     else:
         rec = "PASS — insufficient edge"
 
-    if mispriced and decision == "MISPRICED":
+    if prop_error:
+        rec = "PROP ERROR — line wildly off, investigate before betting"
+    elif mispriced and decision == "MISPRICED":
         rec = "LINE APPEARS MISPRICED — investigate before betting"
 
     return grade_str, rec, decision
