@@ -564,6 +564,11 @@ def _analyze_player(
     else:
         hs_rate_src = None
 
+    # Snapshot map_stats BEFORE any opponent multiplier is applied.
+    # Used for historical displays (form streak, variance, map intel) so they
+    # always reflect what the player actually did, not opponent-adjusted values.
+    map_stats_hist = list(map_stats)
+
     # Build per-series breakdown (kills or estimated HS) for the embed.
     # Groups maps back into their original series (2 maps per series).
     _series_breakdown: list[dict] = []
@@ -992,7 +997,7 @@ def _analyze_player(
     try:
         grade_pkg = compute_grade_package(
             sim_result=sim_result,
-            map_stats=map_stats,
+            map_stats=map_stats_hist,
             deep=deep,
             period_stats=period_stats,
         )
