@@ -651,6 +651,10 @@ def _analyze_player(
     sim_result["is_awper"]          = is_awper
     sim_result["awper_warn"]        = awper_warn
     sim_result["series_breakdown"]  = _series_breakdown   # per-series stat totals
+    # bo3.gg enrichment (country, role) — available when scraper is successful
+    sim_result["country"]          = (info or {}).get("country")
+    sim_result["liquipedia_role"]  = (info or {}).get("liquipedia_role")
+    sim_result["bo3gg_context"]    = (info or {}).get("bo3gg_context")
 
     # If using estimated fallback data — override to PASS, never make directional calls
     # on invented stats. The grade stays for context but direction is unreliable.
@@ -1278,8 +1282,21 @@ def build_result_embed(
 
     # ── Footer ────────────────────────────────────────────────────────────────
     data_note = "Estimated (HLTV unavailable)" if used_fb else "HLTV Live — Last 10 BO3, Maps 1&2 only"
+    # Enrich footer with country (from bo3.gg) and role (from Liquipedia) when available
+    country = result.get("country")
+    liq_role = result.get("liquipedia_role")
+    enrichment_parts = []
+    if country:
+        enrichment_parts.append(f"🌍 {country}")
+    if liq_role:
+        role_icons = {"awper": "🎯 AWPer", "igl": "🧠 IGL", "rifler": "⚡ Rifler"}
+        enrichment_parts.append(role_icons.get(liq_role, liq_role))
+    enrichment_str = "  ·  " + "  ·  ".join(enrichment_parts) if enrichment_parts else ""
     embed.set_footer(
-        text=f"Elite CS2 Prop Grader  ·  Negative Binomial Model  ·  {data_note}  ·  Not financial advice"
+        text=(
+            f"Elite CS2 Prop Grader  ·  Negative Binomial Model  ·  "
+            f"{data_note}{enrichment_str}  ·  Not financial advice"
+        )
     )
     return embed
 

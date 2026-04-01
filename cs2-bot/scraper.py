@@ -151,6 +151,13 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
         logger.warning(f"[fetch] curl_cffi not available, skipping {url}")
         return None
 
+    # ── Fast-path: global /stats/ circuit-breaker ─────────────────────────────
+    # If the stats subdomain is known to be blocked, skip immediately without
+    # burning retries.  _is_stats_blocked() also auto-resets after 30 min.
+    if _is_stats_blocked(url):
+        logger.debug(f"[fetch] /stats/ circuit open — skipping {url}")
+        return None
+
     _warm_hltv_session()   # no-op after first successful warm-up
 
     profiles_tried = 0
@@ -182,6 +189,11 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
                 )
                 if resp.status_code == 403:
                     got_403_this_profile = True
+                    _trip_stats_circuit(url)   # no-op for non-/stats/ URLs
+                    # If the circuit just tripped, bail immediately — no more retries
+                    if _STATS_SUBDOMAIN_BLOCKED and '/stats/' in url:
+                        logger.warning(f"[fetch] /stats/ circuit tripped — abandoning {url}")
+                        return None
                     if attempt < max_retries - 1:
                         time.sleep(_FETCH_RETRY_DELAYS[attempt])
                     else:
@@ -269,7 +281,43 @@ def _normalise_player_key(name: str) -> str:
 
 _STATS_SESSION: "_cffi_req.Session | None" = None
 _STATS_SESSION_WARMED = False
-_STATS_PAGES_BLOCKED = False  # circuit-breaker: stop trying after first confirmed 403
+_STATS_PAGES_BLOCKED = False  # legacy per-fetch circuit-breaker (HS mapstats)
+
+# ── Global /stats/ subdomain circuit-breaker ──────────────────────────────────
+# The ENTIRE hltv.org/stats/ path returns 403 from Replit datacenter IPs.
+# This flag trips on the FIRST 403 from any /stats/ URL and prevents the
+# default 6-profile × 3-retry retry storm (~90 seconds wasted per command).
+# Auto-resets after 30 minutes to retry periodically.
+_STATS_SUBDOMAIN_BLOCKED: bool = False
+_STATS_SUBDOMAIN_BLOCKED_AT: float = 0.0
+_STATS_SUBDOMAIN_BLOCK_TTL: int = 30 * 60   # 30 minutes
+
+
+def _is_stats_blocked(url: str) -> bool:
+    """Return True if the /stats/ subdomain circuit-breaker is active for this URL."""
+    global _STATS_SUBDOMAIN_BLOCKED, _STATS_SUBDOMAIN_BLOCKED_AT
+    if '/stats/' not in url:
+        return False
+    if not _STATS_SUBDOMAIN_BLOCKED:
+        return False
+    elapsed = time.time() - _STATS_SUBDOMAIN_BLOCKED_AT
+    if elapsed > _STATS_SUBDOMAIN_BLOCK_TTL:
+        _STATS_SUBDOMAIN_BLOCKED = False
+        logger.info("[circuit] /stats/ block TTL expired — will retry stats URLs")
+        return False
+    return True
+
+
+def _trip_stats_circuit(url: str) -> None:
+    """Trip the /stats/ circuit-breaker on first 403 from a /stats/ URL."""
+    global _STATS_SUBDOMAIN_BLOCKED, _STATS_SUBDOMAIN_BLOCKED_AT
+    if '/stats/' in url and not _STATS_SUBDOMAIN_BLOCKED:
+        _STATS_SUBDOMAIN_BLOCKED = True
+        _STATS_SUBDOMAIN_BLOCKED_AT = time.time()
+        logger.warning(
+            "[circuit] /stats/ circuit-breaker TRIPPED — all HLTV stats URLs "
+            "blocked for 30 min. Kill data unaffected (comes from match pages)."
+        )
 
 
 def _get_stats_session() -> "_cffi_req.Session | None":
@@ -317,6 +365,11 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     """
     global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
     if _STATS_PAGES_BLOCKED:
+        return None
+
+    # ── Global /stats/ circuit-breaker fast-path ──────────────────────────────
+    if _is_stats_blocked(stats_url):
+        logger.debug(f"[stats_fetch] /stats/ circuit open — skipping {stats_url}")
         return None
 
     # Build the complete list of profiles to try (current first, then rest)
@@ -384,6 +437,13 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
                 return resp.text
 
             if resp.status_code == 403:
+                _trip_stats_circuit(stats_url)   # trips global circuit on first 403
+                if _STATS_SUBDOMAIN_BLOCKED:
+                    logger.warning(
+                        f"[stats_fetch] /stats/ circuit TRIPPED on 403 — "
+                        f"abandoning all stats for 30 min"
+                    )
+                    return None
                 logger.warning(
                     f"[stats_fetch] 403 on profile={profile} "
                     f"(attempt {profile_attempt + 1}/{len(ordered)}) — rotating"
@@ -1402,6 +1462,10 @@ def get_player_period_stats(player_id: str, player_slug: str, days: int = 90) ->
         f"{HLTV_BASE}/stats/players/{player_id}/{player_slug}"
         f"?startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
     )
+    # Fast-path: skip immediately if /stats/ subdomain is known-blocked
+    if _is_stats_blocked(url):
+        logger.info(f"[period_stats] /stats/ circuit open — skipping player stats for {player_slug}")
+        return None
     logger.info(f"[period_stats] GET player stats: {url}")
     html = _fetch(url)
     if not html:
@@ -1433,6 +1497,10 @@ def get_team_period_stats(team_id: str, team_slug: str, days: int = 90) -> dict 
         f"{HLTV_BASE}/stats/teams/{team_id}/{team_slug}"
         f"?startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
     )
+    # Fast-path: skip immediately if /stats/ subdomain is known-blocked
+    if _is_stats_blocked(url):
+        logger.info(f"[period_stats] /stats/ circuit open — skipping team stats for {team_slug}")
+        return None
     logger.info(f"[period_stats] GET team stats: {url}")
     html = _fetch(url)
     if not html:
@@ -1569,11 +1637,23 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
     """
     logger.info(f"[scraper] Looking up '{player_name}' for {stat_type}")
 
-    # Step 1: Find player
+    # Step 1: Find player (HLTV search + cache)
     result = search_player_v2(player_name)
     if not result:
         raise RuntimeError(f"Player '{player_name}' not found on HLTV")
     player_id, player_slug, display_name = result
+
+    # Step 1b: Enrich with bo3.gg context (instant, ~500ms, no CF block)
+    # Also fetch Liquipedia role for HS% calibration — only needed for headshots props.
+    _bo3gg_ctx = bo3gg_player_context(player_slug)
+    _liq_role: str | None = None
+    if stat_type.lower() in ("headshots", "hs"):
+        # Only spend ~1-2s on Liquipedia if we actually need HS% role info
+        _liq_role = liquipedia_player_role(display_name)
+    logger.info(
+        f"[scraper] bo3.gg context: {_bo3gg_ctx} | Liquipedia role: {_liq_role} "
+        f"(stat_type={stat_type})"
+    )
 
     # Step 2: Get recent match IDs
     match_ids = get_player_match_ids(player_id, max_matches=30)
@@ -1702,7 +1782,20 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
             f"(avg of {len(hs_pct_samples)} match overviews)"
         )
     else:
-        recent_hs_pct = None
+        # Role-aware HS% default (from Liquipedia role detection)
+        if _liq_role == 'awper':
+            recent_hs_pct = 0.25
+            logger.info(f"[hs_pct] AWPer default 25% for {player_slug} (Liquipedia role)")
+        elif _liq_role == 'igl':
+            recent_hs_pct = 0.38
+            logger.info(f"[hs_pct] IGL default 38% for {player_slug} (Liquipedia role)")
+        else:
+            recent_hs_pct = None   # bot.py will apply _KNOWN_AWPERS table fallback
+
+    # Build country string from bo3.gg context (supplements HLTV data)
+    _country = None
+    if _bo3gg_ctx:
+        _country = _bo3gg_ctx.get('country')
 
     return {
         'player':            display_name,
@@ -1716,6 +1809,9 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         'source':            'HLTV Live',
         'recent_hs_pct':     recent_hs_pct,   # None if no HS data found on match pages
         'hs_pct_n_matches':  len(hs_pct_samples),
+        'bo3gg_context':     _bo3gg_ctx,       # {nickname, team_id, country, bo3gg_id} or None
+        'liquipedia_role':   _liq_role,        # 'awper' | 'igl' | 'rifler' | None
+        'country':           _country,         # country from bo3.gg or None
     }
 
 
@@ -1740,6 +1836,166 @@ def get_player_team(player_id: str, player_slug: str) -> tuple[str, str] | None:
     tid, tslug = matches[0]
     logger.info(f"[player_team] player={player_slug} → team_id={tid} slug={tslug}")
     return tid, tslug
+
+
+# ---------------------------------------------------------------------------
+# bo3.gg integration — instant player/team context (no auth, no CF block)
+# ---------------------------------------------------------------------------
+# bo3.gg API is a Nuxt SPA with a limited but accessible REST API.
+# Available public endpoints:
+#   GET /api/v1/players/{slug}   → {id, nickname, team_id, country_id, slug}
+#   GET /api/v1/players?search=  → paginated player list (broken filter, unused)
+# bo3.gg does NOT expose per-map kill stats — it's used for player enrichment only.
+
+_BO3GG_BASE = "https://bo3.gg"
+_BO3GG_PLAYER_CACHE: dict[str, dict | None] = {}   # slug → result dict or None
+_BO3GG_COUNTRY_MAP = {
+    # Confirmed from live API responses
+    28:  "Finland",        # myltsi → Finland
+    29:  "France",         # ZywOo → France (country_id=29)
+    # Standard ISO numeric approximate mappings
+    57:  "Czech Republic", 69:  "Estonia",    76:  "France",
+    80:  "Germany",        105: "Iceland",    113: "Israel",
+    126: "Kazakhstan",     208: "Sweden",     214: "Slovakia",
+    233: "Ukraine",        250: "Denmark",    616: "Poland",
+    643: "Russia",         840: "United States", 14: "Australia",
+    32:  "Belgium",        179: "Norway",     181: "Netherlands",
+    167: "Lithuania",      154: "Latvia",     24:  "Brazil",
+    40:  "Canada",         75:  "Georgia",    62:  "Croatia",
+}
+
+
+def bo3gg_player_context(player_slug: str) -> dict | None:
+    """
+    Fetch player context from bo3.gg's instant REST API.
+
+    Returns dict with:
+        nickname  : str  — display name from bo3.gg
+        team_id   : int  — bo3.gg team id (different from HLTV)
+        country   : str  — country name (e.g. "Finland")
+        bo3gg_id  : int  — bo3.gg internal player ID
+    or None if not found / request fails.
+
+    Cached indefinitely per session (player data rarely changes mid-session).
+    """
+    key = player_slug.lower().strip()
+    if key in _BO3GG_PLAYER_CACHE:
+        return _BO3GG_PLAYER_CACHE[key]
+
+    if not _CFFI_OK:
+        return None
+
+    try:
+        sess = _cffi_req.Session(impersonate='chrome116')
+        url = f"{_BO3GG_BASE}/api/v1/players/{key}"
+        resp = sess.get(url, timeout=6)
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, dict) and 'id' in data:
+                country_id = data.get('country_id', 0)
+                result = {
+                    'nickname':  data.get('nickname', player_slug),
+                    'team_id':   data.get('team_id'),
+                    'country':   _BO3GG_COUNTRY_MAP.get(country_id, f"Unknown ({country_id})"),
+                    'bo3gg_id':  data.get('id'),
+                }
+                _BO3GG_PLAYER_CACHE[key] = result
+                logger.info(
+                    f"[bo3gg] Player {player_slug!r}: "
+                    f"nickname={result['nickname']} country={result['country']} "
+                    f"team_id={result['team_id']}"
+                )
+                return result
+
+        _BO3GG_PLAYER_CACHE[key] = None
+        logger.debug(f"[bo3gg] Player {player_slug!r} not found (status={resp.status_code})")
+        return None
+
+    except Exception as e:
+        logger.debug(f"[bo3gg] Error fetching {player_slug}: {e}")
+        _BO3GG_PLAYER_CACHE[key] = None
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Liquipedia integration — player role detection for HS% calibration
+# ---------------------------------------------------------------------------
+# Liquipedia's wiki returns rendered HTML for player pages.
+# We use it to detect AWPer / IGL roles which affect HS% estimation:
+#   AWPer → lower HS% (~22-28%); IGL → moderate; Rifler → higher (~42-50%)
+
+_LIQUIPEDIA_BASE = "https://liquipedia.net"
+_LIQUIPEDIA_ROLE_CACHE: dict[str, str | None] = {}   # name → role str or None
+
+
+def liquipedia_player_role(player_name: str) -> str | None:
+    """
+    Detect the player's primary role from their Liquipedia wiki page.
+
+    Returns one of: 'awper', 'igl', 'rifler', or None (unknown).
+    Cached per session.
+    """
+    key = player_name.lower().strip()
+    if key in _LIQUIPEDIA_ROLE_CACHE:
+        return _LIQUIPEDIA_ROLE_CACHE[key]
+
+    if not _CFFI_OK:
+        return None
+
+    try:
+        sess = _cffi_req.Session(impersonate='chrome116')
+        # Use the Liquipedia wiki API for clean JSON (no JS needed)
+        url = (
+            f"{_LIQUIPEDIA_BASE}/counterstrike/api.php"
+            f"?action=parse&page={player_name}&format=json&prop=text&section=0"
+        )
+        headers = {
+            "User-Agent": "CS2PropGraderBot/1.0 (research tool; contact via Discord)",
+            "Accept": "application/json",
+        }
+        resp = sess.get(url, timeout=8, headers=headers)
+        if resp.status_code != 200:
+            _LIQUIPEDIA_ROLE_CACHE[key] = None
+            return None
+
+        data = resp.json()
+        html_text = data.get('parse', {}).get('text', {}).get('*', '')
+        if not html_text:
+            _LIQUIPEDIA_ROLE_CACHE[key] = None
+            return None
+
+        # Search for role indicators in the infobox HTML
+        html_lower = html_text.lower()
+
+        # AWPer detection: explicit role mentions in infobox or career section
+        # Also look for "awp" in weapons tables and "sniper" references
+        _awp_terms = [
+            'awper', 'awp specialist', 'primary awp', 'role">awp<',
+            '"awp"', '>awp<', 'sniper', 'primary sniper',
+            # Liquipedia infobox pattern: <td>AWP</td> in weapons column
+            '>awp</td>', '<td>awp', '>awp</span>',
+        ]
+        _igl_terms = [
+            'in-game leader', 'in game leader', '>igl<', '"igl"',
+            '>igl</td>', '<td>igl', 'role">igl',
+        ]
+        if any(term in html_lower for term in _awp_terms):
+            role = 'awper'
+        elif any(term in html_lower for term in _igl_terms):
+            role = 'igl'
+        elif 'rifler' in html_lower:
+            role = 'rifler'
+        else:
+            role = None
+
+        _LIQUIPEDIA_ROLE_CACHE[key] = role
+        logger.info(f"[liquipedia] {player_name}: role={role!r}")
+        return role
+
+    except Exception as e:
+        logger.debug(f"[liquipedia] Error fetching role for {player_name}: {e}")
+        _LIQUIPEDIA_ROLE_CACHE[key] = None
+        return None
 
 
 # ---------------------------------------------------------------------------
