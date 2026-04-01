@@ -362,116 +362,155 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     return None
 
 
-def _parse_map_stats_hs(html: str, player_slug: str) -> tuple[int | None, int | None]:
+def _parse_map_stats_hs(
+    html: str,
+    player_slug: str,
+    series_num: int = 0,
+    map_num: int = 0,
+) -> tuple[int | None, int | None]:
     """
-    Parse a /stats/matches/mapstatsid/ page.
+    STRICT extraction of kills and headshots from a /stats/matches/mapstatsid/ page.
 
-    The page contains a .stats-table (or table.stats-table) with these columns:
-      Player | K (hs) | A (f) | D (t) | ADR | KAST | Rating ...
-    The "K (hs)" cell is formatted as "15 (4)" — Total Kills (Headshots).
+    Strict Map-by-Map Path (per user specification):
+      1. Locate the stats table on the page (class="stats-table").
+      2. Identify the column whose header contains "K" and "hs" — the "K (hs)" column.
+      3. Find the row whose player name matches player_slug.
+      4. Parse the cell using EXACTLY:
+           headshots = int(raw_text.split('(')[1].split(')')[0])
+           kills     = int(raw_text.split('(')[0].strip())
+      5. If the "(hs)" format is absent from the cell — do NOT guess.
+         Emit [ERROR] and return (None, None).
 
-    Extraction logic per the user spec:
-      headshots = text.split('(')[1].replace(')', '')
-
-    The K(hs) column is typically the 5th column (index 4) but we detect it by
-    scanning headers for text that contains both "K" and "(" or "hs".
-
-    Returns (kills, headshots) or (None, None) if not found.
+    Returns (kills, headshots) or (None, None) with explicit error logging.
     """
     soup = BeautifulSoup(html, 'html.parser')
     slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+    ctx = f"Series {series_num} Map {map_num}"  # for audit / error messages
 
-    # Locate the stats table — HLTV uses class="stats-table" on the main table
+    # ── Step 1: Locate the stats table ────────────────────────────────────────
+    # Priority: class="stats-table" → any table with "stats" in class → all tables
     stats_tables = (
         soup.find_all(class_='stats-table') or
-        soup.find_all('table', class_=re.compile(r'stats.?table', re.I)) or
+        soup.find_all('table', class_=re.compile(r'stats', re.I)) or
         soup.find_all('table')
     )
 
-    for tbl in stats_tables:
-        # Find header row
-        header_row = tbl.find('tr')
-        if not header_row:
-            continue
-        headers = header_row.find_all(['th', 'td'])
+    if not stats_tables:
+        logger.error(
+            f"[HS][{ctx}] No tables found on stats page for {player_slug!r}"
+        )
+        return None, None
 
-        # Identify the K(hs) column — contains "K" and "(" or "hs" in header text
+    for tbl in stats_tables:
+        all_rows = tbl.find_all('tr')
+        if len(all_rows) < 2:
+            continue
+
+        header_row = all_rows[0]
+        headers    = header_row.find_all(['th', 'td'])
+
+        # ── Step 2: Identify the K (hs) column ────────────────────────────────
         khs_col = None
-        d_col   = None
         for ci, hdr in enumerate(headers):
             ht = hdr.get_text(strip=True).lower()
-            # Exact match: "k (hs)", "k(hs)", "kills (hs)", etc.
-            if khs_col is None and re.search(r'k.*\(.*hs|hs.*\)', ht):
+            # Matches: "k (hs)", "k(hs)", "kills (hs)", "k / hs", etc.
+            if re.search(r'k[^a-z]*\(?hs|hs.*\)', ht):
                 khs_col = ci
-                logger.debug(f"[map_stats] K(hs) col={ci} header={ht!r}")
-            # Death column: "d (t)" or just "d"
-            if d_col is None and re.search(r'^d[\s(]|^deaths', ht):
-                d_col = ci
+                logger.debug(f"[HS][{ctx}] K(hs) column found at index {ci}, header={ht!r}")
+                break
 
-        # If no explicit K(hs) header found, try column index 4 then 5 (user spec)
+        # Fallback: if no labelled header, probe data rows for "N (N)" pattern
         if khs_col is None:
             all_headers_text = [h.get_text(strip=True) for h in headers]
-            logger.debug(f"[map_stats] Table headers: {all_headers_text}")
-            # Check columns 4 and 5 for "(N)" pattern in first data row
-            first_data_row = tbl.find_all('tr')[1] if len(tbl.find_all('tr')) > 1 else None
-            if first_data_row:
-                data_cells = first_data_row.find_all('td')
-                for probe_col in (4, 5, 3):
-                    if probe_col < len(data_cells):
-                        ct = data_cells[probe_col].get_text(strip=True)
-                        if re.search(r'\d+\s*\(\d+\)', ct):
-                            khs_col = probe_col
-                            logger.info(f"[map_stats] K(hs) col probed at index {probe_col}: {ct!r}")
-                            break
+            logger.debug(f"[HS][{ctx}] No K(hs) header in: {all_headers_text}")
+            first_data = all_rows[1]
+            data_cells = first_data.find_all('td')
+            for probe in (4, 5, 3, 2):
+                if probe < len(data_cells):
+                    ct = data_cells[probe].get_text(strip=True)
+                    if re.search(r'^\d+\s*\(\d+\)$', ct):
+                        khs_col = probe
+                        logger.debug(
+                            f"[HS][{ctx}] K(hs) column probed at index {probe}: {ct!r}"
+                        )
+                        break
 
         if khs_col is None:
-            continue  # No K(hs) column found in this table
+            logger.debug(f"[HS][{ctx}] K(hs) column not found in this table — trying next")
+            continue
 
-        # Scan data rows for the player
-        for tr in tbl.find_all('tr')[1:]:
-            row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+        # ── Step 3: Find the player's row ─────────────────────────────────────
+        player_row_found = False
+        for tr in all_rows[1:]:
+            row_text = tr.get_text()
+            row_norm = re.sub(r'[^a-z0-9]', '', row_text.lower())
             if slug_norm not in row_norm:
                 continue
 
+            player_row_found = True
             cells = tr.find_all('td')
             if khs_col >= len(cells):
-                continue
+                logger.error(
+                    f"[HS][{ctx}] {player_slug!r} row found but K(hs) col {khs_col} "
+                    f"out of range (row has {len(cells)} cells)"
+                )
+                return None, None
 
-            cell_text = cells[khs_col].get_text(strip=True)
-            logger.info(f"[map_stats] K(hs) cell for {player_slug!r}: {cell_text!r}")
+            raw_text = cells[khs_col].get_text(strip=True)
+            logger.info(f"[HS][{ctx}] K(hs) cell for {player_slug!r}: {raw_text!r}")
 
-            # --- User-specified parse logic ---
-            # headshots = text.split('(')[1].replace(')', '')
-            kills_hs = None
-            headshots = None
+            # ── Step 4: Strict parse — "21 (11)" format ONLY ──────────────────
+            if '(' not in raw_text or ')' not in raw_text:
+                # The (hs) format is missing — do NOT guess
+                logger.error(
+                    f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+                    f"— cell was {raw_text!r}, expected format '21 (11)'"
+                )
+                print(
+                    f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+                    f"(player={player_slug}, cell={raw_text!r})"
+                )
+                return None, None
 
-            if '(' in cell_text:
-                try:
-                    hs_str = cell_text.split('(')[1].replace(')', '').strip()
-                    headshots = int(hs_str)
-                    # Extract kills: everything before the '('
-                    kills_str = cell_text.split('(')[0].strip()
-                    kills_m = re.search(r'(\d+)', kills_str)
-                    if kills_m:
-                        kills_hs = int(kills_m.group(1))
-                    logger.info(
-                        f"[map_stats] Parsed K(hs) — kills={kills_hs} headshots={headshots}"
-                    )
-                    return kills_hs, headshots
-                except (IndexError, ValueError) as e:
-                    logger.warning(f"[map_stats] Parse error on {cell_text!r}: {e}")
+            try:
+                # Exact user-specified extraction:
+                #   headshots = int(raw_text.split('(')[1].split(')')[0])
+                #   kills     = int(raw_text.split('(')[0].strip())
+                headshots = int(raw_text.split('(')[1].split(')')[0].strip())
+                kills_str = raw_text.split('(')[0].strip()
+                kills_m   = re.search(r'(\d+)', kills_str)
+                kills_hs  = int(kills_m.group(1)) if kills_m else None
 
-            # Fallback: try regex directly on the cell text
-            m = re.search(r'(\d+)\s*\((\d+)\)', cell_text)
-            if m:
-                kills_hs  = int(m.group(1))
-                headshots = int(m.group(2))
                 logger.info(
-                    f"[map_stats] Regex fallback K(hs) — kills={kills_hs} headshots={headshots}"
+                    f"[HS][{ctx}] Parsed — kills={kills_hs}  headshots={headshots}"
                 )
                 return kills_hs, headshots
 
-    logger.info(f"[map_stats] No K(hs) data found for {player_slug!r} in stats page")
+            except (IndexError, ValueError) as e:
+                logger.error(
+                    f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+                    f"— parse error on {raw_text!r}: {e}"
+                )
+                print(
+                    f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+                    f"(player={player_slug}, cell={raw_text!r}, err={e})"
+                )
+                return None, None
+
+        if not player_row_found:
+            logger.warning(
+                f"[HS][{ctx}] Player {player_slug!r} (norm={slug_norm!r}) not found "
+                f"in any data row of this table"
+            )
+
+    logger.error(
+        f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+        f"— player {player_slug!r} not found or no K(hs) column on stats page"
+    )
+    print(
+        f"[ERROR] Missing HS data for Map {map_num} of Series {series_num} "
+        f"(player={player_slug})"
+    )
     return None, None
 
 
@@ -649,7 +688,7 @@ def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[st
 # Step 3 — Parse a match page for per-map kills
 # ---------------------------------------------------------------------------
 
-def _parse_match_kills(html: str, player_slug: str, match_url: str = "") -> dict:
+def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_num: int = 0) -> dict:
     """
     Parse an HLTV match page and return:
       {
@@ -769,7 +808,10 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "") -> dict
         if _stats_url and match_url:
             _stats_html = _fetch_stats_page(_stats_url, match_url)
             if _stats_html:
-                _sk, _shs = _parse_map_stats_hs(_stats_html, player_slug)
+                _sk, _shs = _parse_map_stats_hs(
+                    _stats_html, player_slug,
+                    series_num=series_num, map_num=map_num,
+                )
                 if _sk is not None:
                     kills     = _sk
                     headshots = _shs
@@ -1472,7 +1514,9 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
                 break
             continue
 
-        parsed = _parse_match_kills(html, player_slug, match_url)
+        # series_num is 1-indexed before increment (next series will be bo3_series_count+1)
+        _this_series = bo3_series_count + 1
+        parsed = _parse_match_kills(html, player_slug, match_url, series_num=_this_series)
         if not parsed:
             continue
 
@@ -1492,11 +1536,14 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         pistol_data = _parse_pistol_stats(html, player_slug)
 
         # Take maps 1 and 2 only — store dicts so simulator has stat_value + match_id
-        for m in maps[:2]:
+        _series_maps = maps[:2]
+        _audit_parts = []
+        for m in _series_maps:
             map_num = m.get('map_number', 1)
+            _hs_val = m.get('headshots')
             map_kills.append({
                 'stat_value':    m['kills'],
-                'headshots':     m.get('headshots'),  # actual HS count or None
+                'headshots':     _hs_val,             # actual HS count or None
                 'match_hs_pct':  match_hs,            # per-match scraped HS% (all-maps avg) or None
                 'rounds':        22,
                 'match_id':      match_id,
@@ -1510,11 +1557,31 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
                 'deaths':        m.get('deaths'),
                 'pistol_kills':  pistol_data.get(map_num),
             })
+            # Build the audit line for this map
+            _hs_display = str(_hs_val) if _hs_val is not None else "MISSING"
+            _audit_parts.append(
+                f"Map{map_num}({m['map_name'].title()}): {m['kills']}K / {_hs_display}HS"
+            )
 
         bo3_series_count += 1
+
+        # ── Step 3 Audit: Print total HS per series to console ────────────────
+        _series_hs = [
+            m.get('headshots') for m in _series_maps if m.get('headshots') is not None
+        ]
+        _total_hs = sum(_series_hs) if _series_hs else None
+        _hs_total_str = str(_total_hs) if _total_hs is not None else "MISSING"
+        _audit_line = (
+            f"[AUDIT] Series {bo3_series_count} (match {match_id}): "
+            + " | ".join(_audit_parts)
+            + f" | Total HS (Map1+Map2): {_hs_total_str}"
+        )
+        print(_audit_line)
+        logger.info(_audit_line)
+
         logger.info(
             f"[scraper] Series {bo3_series_count}: match {match_id} — "
-            f"maps: {[(m['map_name'], m['kills']) for m in maps[:2]]}"
+            f"maps: {[(m['map_name'], m['kills']) for m in _series_maps]}"
         )
 
     if len(map_kills) < 4:
