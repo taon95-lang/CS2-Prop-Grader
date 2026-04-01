@@ -1,0 +1,148 @@
+import numpy as np
+import math
+
+class CS2PropGrader:
+    def __init__(self, player_name, match_name, prop_type, prop_line, role, 
+                 recent_average, recent_median, hit_rate, kpr, 
+                 match_odds_implied_prob, hltv_map_pool_factor, stomp_risk):
+        
+        # 1. Core Player & Match Data (HLTV.com exclusively)
+        self.player_name = player_name
+        self.match_name = match_name
+        self.prop_type = prop_type # "Kills" or "Headshots"
+        self.prop_line = prop_line
+        self.role = role
+        
+        # 2. Recent Form (Last 10 BO3 series, Maps 1-2 only)
+        self.recent_average = recent_average
+        self.recent_median = recent_median
+        self.hit_rate = hit_rate
+        self.kpr = kpr
+        self.sample_used = "Last 10 BO3 Series (Maps 1-2 Only via HLTV)"
+        
+        # 3. Match Context & Stomp Risk
+        self.match_odds_implied_prob = match_odds_implied_prob
+        self.hltv_map_pool_factor = hltv_map_pool_factor # >1.0 for good maps, <1.0 for bad maps
+        self.stomp_risk = stomp_risk # Boolean
+        
+        # 4. Simulation Settings
+        self.sim_runs = 100000
+        np.random.seed(42) # Fixed seed for consistency
+
+    def project_rounds(self):
+        # Base expected rounds for Maps 1 and 2 combined
+        base_rounds = 42 
+        
+        # Adjust based on match closeness (implied odds closer to 50% = more rounds)
+        closeness_factor = 1.0 - abs(self.match_odds_implied_prob - 0.5)
+        projected = base_rounds + (closeness_factor * 6)
+        
+        if self.stomp_risk:
+            projected -= 6 # Reduce rounds if blowout is likely
+            
+        return round(projected, 1)
+
+    def run_poisson_simulation(self, projected_rounds):
+        # Base expected kills
+        expected_kills_base = projected_rounds * self.kpr
+        
+        # Adjust for map pool and role volatility
+        adjusted_expected_kills = expected_kills_base * self.hltv_map_pool_factor
+        
+        # Run 100,000 simulations using Poisson distribution for event modeling
+        simulated_totals = np.random.poisson(lam=adjusted_expected_kills, size=self.sim_runs)
+        
+        # Calculate statistics
+        sim_mean = np.mean(simulated_totals)
+        sim_std = np.std(simulated_totals)
+        
+        # Calculate exact percentage of going OVER the line
+        over_hits = np.sum(simulated_totals > self.prop_line)
+        exact_over_percentage = (over_hits / self.sim_runs) * 100
+        
+        return adjusted_expected_kills, sim_mean, sim_std, exact_over_percentage
+
+    def evaluate_edge_and_grade(self, exact_over_percentage):
+        implied_line_prob = 50.0 # Assuming standard -110 / -110 sportsbook odds
+        
+        edge = exact_over_percentage - implied_line_prob
+        
+        # Simple decision rules
+        mispriced = False
+        error = False
+        
+        if self.recent_average > self.prop_line + 3 and self.recent_median > self.prop_line + 2:
+            mispriced = True
+            if self.recent_average > self.prop_line + 6:
+                error = True
+                
+        if self.recent_average < self.prop_line - 3 and self.recent_median < self.prop_line - 2:
+            mispriced = True
+            
+        # Grade scale (1-10)
+        if edge >= 15: grade = "10/10 (Elite edge)"
+        elif edge >= 10: grade = "9/10 (Very strong edge)"
+        elif edge >= 7: grade = "8/10 (Strong playable edge)"
+        elif edge >= 4: grade = "7/10 (Solid lean)"
+        elif edge >= 1: grade = "6/10 (Small edge)"
+        elif edge >= -2: grade = "5/10 (Borderline)"
+        else: grade = "Below 5/10 (No bet)"
+        
+        # Final Recommendation
+        if exact_over_percentage > 55 and not self.stomp_risk:
+            recommendation = "OVER"
+        elif exact_over_percentage < 45 or self.stomp_risk:
+            recommendation = "UNDER"
+        else:
+            recommendation = "NO BET"
+            
+        return edge, mispriced, error, grade, recommendation
+
+    def generate_report(self):
+        proj_rounds = self.project_rounds()
+        exp_kills, sim_mean, sim_std, exact_percentage = self.run_poisson_simulation(proj_rounds)
+        edge, mispriced, error, grade, rec = self.evaluate_edge_and_grade(exact_percentage)
+        
+        misprice_status = "Prop Error (Wildly off)" if error else ("Mispriced" if mispriced else "Accurate Line")
+
+        # Formatting exactly as requested, percentage first
+        report = f"""Exact Simulation Percentage: {exact_percentage:.1f}%
+
+Player: {self.player_name}
+Match: {self.match_name}
+Prop: {self.prop_line} {self.prop_type}
+Role: {self.role}
+Recent sample used: {self.sample_used}
+Recent average: {self.recent_average}
+Recent median: {self.recent_median}
+Hit rate: {self.hit_rate}%
+Projected rounds: {proj_rounds}
+Expected {self.prop_type.lower()}: {exp_kills:.1f}
+Simulated mean: {sim_mean:.1f}
+Standard deviation: {sim_std:.2f}
+Edge vs line: {edge:+.1f}%
+Mispriced or not: {misprice_status}
+Final grade: {grade}
+Bet recommendation: {rec}"""
+
+        return report
+
+# --- Execution Example ---
+if __name__ == "__main__":
+    # Example inputs based on the 100-point checklist rules
+    grader = CS2PropGrader(
+        player_name="m0NESY",
+        match_name="G2 vs. FaZe",
+        prop_type="Kills",
+        prop_line=34.5,
+        role="AWPer",
+        recent_average=38.2,
+        recent_median=37.0,
+        hit_rate=70.0,
+        kpr=0.82,
+        match_odds_implied_prob=0.52, # Close match odds
+        hltv_map_pool_factor=1.05, # Good map pool for player
+        stomp_risk=False
+    )
+    
+    print(grader.generate_report())
