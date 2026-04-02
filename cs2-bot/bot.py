@@ -645,6 +645,21 @@ def _analyze_player(
         logger.error(f"Simulation failed ({err_name}): {e}")
         return {"sim_error": err_name, "error": str(e)[:300]}
 
+    # Override hist_avg / hist_median with RAW unscaled values so the displayed
+    # average matches what the user sees in the Series Breakdown.
+    # The opponent-adjustment multiplier is already captured in over_prob / edge
+    # — the average shown in the embed should reflect actual history, not
+    # inflated/deflated numbers the player never actually produced.
+    if map_stats_hist:
+        from statistics import mean as _mean, median as _median
+        _series_ids_raw: dict[str, list] = {}
+        for _m in map_stats_hist:
+            _series_ids_raw.setdefault(_m["match_id"], []).append(_m["stat_value"])
+        _raw_totals = [sum(v) for v in _series_ids_raw.values()]
+        if _raw_totals:
+            sim_result["hist_avg"]    = round(_mean(_raw_totals), 2)
+            sim_result["hist_median"] = round(_median(_raw_totals), 2)
+
     sim_result["data_source"]   = data_source
     sim_result["used_fallback"] = used_fallback
     sim_result["player_name"]   = player_name
