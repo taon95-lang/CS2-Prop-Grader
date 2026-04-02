@@ -1239,7 +1239,14 @@ def build_result_embed(
     _breakdown  = result.get("series_breakdown", [])
     _is_hs_prop = stat_unit == "HS"
     _hs_src     = result.get("hs_rate_src", "")
-    if _breakdown:
+    if used_fb:
+        # Fallback data is generated/estimated — never show it as real historical series
+        embed.add_field(
+            name="📋 Series Breakdown",
+            value="_No real match history found — breakdown unavailable.\nUsing estimated stats only._",
+            inline=False,
+        )
+    elif _breakdown:
         rows = []
         for i, s in enumerate(_breakdown[:10], 1):
             _maps_str = " + ".join(s.get("per_map", []))
