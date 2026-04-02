@@ -387,6 +387,15 @@ def calculate_grade(
         else:
             decision = "PASS"
 
+    # --- Probability override: simulation must agree with the directional call ---
+    # If we called OVER but the MC simulation says it's more likely to go UNDER
+    # (or vice versa), that's a direct contradiction — force PASS instead.
+    # This prevents the historical-average logic from overriding the simulation.
+    if decision == "OVER" and over_prob < 0.50:
+        decision = "PASS"
+    elif decision == "UNDER" and over_prob > 0.50:
+        decision = "PASS"
+
     # --- Misprice check (from CS2PropGrader avg/median gap logic) ---
     avg_gap    = hist_avg - line       # positive = avg above line
     median_gap = hist_median - line    # positive = median above line

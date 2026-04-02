@@ -1691,6 +1691,21 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         if len(maps) < 2:
             continue  # Not enough map data — skip
 
+        # CS2-only filter: skip series containing maps that don't exist in CS2.
+        # Train, Cache, Cobblestone etc. are CS:GO-only — their presence means
+        # this is a historical CS:GO match and should not be used for CS2 props.
+        _CS2_MAPS = {
+            'dust2', 'mirage', 'inferno', 'nuke', 'anubis',
+            'ancient', 'overpass', 'vertigo',
+        }
+        _series_map_names = [m['map_name'].lower() for m in maps[:2]]
+        if any(mn not in _CS2_MAPS for mn in _series_map_names if mn):
+            logger.info(
+                f"[cs2_filter] Skipping match {match_id} — "
+                f"non-CS2 maps detected: {_series_map_names}"
+            )
+            continue
+
         # Collect HS% from the match-level overview (all-maps combined stats row)
         # This is parsed from the same page we already fetched — no extra requests.
         match_hs = _parse_match_hs_pct(html, player_slug)
