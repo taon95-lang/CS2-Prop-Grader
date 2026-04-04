@@ -684,6 +684,39 @@ def _analyze_player(
         sim_result["grade"] = "N/A"
         logger.info(f"[grade] Fallback data → forced PASS for {player_name}")
 
+    # --- Map Intelligence Override ---
+    # When the player's historical per-map average on the specific maps expected
+    # in this match projects a series total materially BELOW the line, the OVER
+    # call is contradicted by map-specific data regardless of the overall average.
+    # This prevents the global mean from overriding map-pool reality.
+    if (
+        sim_result.get("decision") == "OVER"
+        and likely_maps
+        and map_stats_hist
+    ):
+        _likely_set = {m.lower() for m in likely_maps}
+        _map_intel_vals = [
+            m["stat_value"] for m in map_stats_hist
+            if m.get("map_name", "").lower() in _likely_set
+        ]
+        if len(_map_intel_vals) >= 4:  # need at least 4 data points (2 series × 2 maps)
+            _map_intel_per_map = sum(_map_intel_vals) / len(_map_intel_vals)
+            # Multiply by 2 (Maps 1+2) to get projected series total
+            _map_intel_series_proj = _map_intel_per_map * 2
+            _map_intel_gap_pct = (_map_intel_series_proj - line) / max(line, 1)
+            if _map_intel_gap_pct < -0.10:  # projected total >10% below the line
+                sim_result["decision"] = "PASS"
+                sim_result["recommendation"] = (
+                    f"⚠️ PASS — Map intel projects {round(_map_intel_series_proj, 1)} "
+                    f"on expected maps ({round(_map_intel_gap_pct * 100, 1)}% vs line)"
+                )
+                logger.info(
+                    f"[map_intel_override] {player_name}: projected series total "
+                    f"{round(_map_intel_series_proj, 1)} is "
+                    f"{round(_map_intel_gap_pct * 100, 1)}% vs line {line} "
+                    f"— OVER suppressed to PASS"
+                )
+
     # Apply +5% Over bonus for confirmed matchup favorites
     if deep and deep.get("matchup_favorite_bonus"):
         over_p  = sim_result.get("over_prob",  50)

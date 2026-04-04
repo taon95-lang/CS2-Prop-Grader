@@ -387,6 +387,13 @@ def calculate_grade(
         else:
             decision = "PASS"
 
+    # --- Hit rate reality check ---
+    # If the player has historically cleared this line in fewer than 30% of
+    # series, the high simulation mean is being driven by outlier blowup games
+    # inflating the distribution. Never call OVER against that weight of evidence.
+    if decision == "OVER" and hit_rate < 0.30:
+        decision = "PASS"
+
     # --- Probability override: simulation must agree with the directional call ---
     # If we called OVER but the MC simulation says it's more likely to go UNDER
     # (or vice versa), that's a direct contradiction — force PASS instead.
