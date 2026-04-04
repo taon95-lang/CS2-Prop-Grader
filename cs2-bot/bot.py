@@ -705,15 +705,20 @@ def _analyze_player(
             _map_intel_series_proj = _map_intel_per_map * 2
             _map_intel_gap_pct = (_map_intel_series_proj - line) / max(line, 1)
             if _map_intel_gap_pct < -0.10:  # projected total >10% below the line
+                _proj_str = round(_map_intel_series_proj, 1)
+                _pct_str  = round(_map_intel_gap_pct * 100, 1)
                 sim_result["decision"] = "PASS"
                 sim_result["recommendation"] = (
-                    f"⚠️ PASS — Map intel projects {round(_map_intel_series_proj, 1)} "
-                    f"on expected maps ({round(_map_intel_gap_pct * 100, 1)}% vs line)"
+                    f"⚠️ PASS — Map intel projects {_proj_str} "
+                    f"on expected maps ({_pct_str}% vs line)"
+                )
+                sim_result["_map_intel_warning"] = (
+                    f"🗺️ Map intel override — projected series total {_proj_str} "
+                    f"({_pct_str}% vs line {line}) suppressed OVER call"
                 )
                 logger.info(
                     f"[map_intel_override] {player_name}: projected series total "
-                    f"{round(_map_intel_series_proj, 1)} is "
-                    f"{round(_map_intel_gap_pct * 100, 1)}% vs line {line} "
+                    f"{_proj_str} is {_pct_str}% vs line {line} "
                     f"— OVER suppressed to PASS"
                 )
 
@@ -1211,9 +1216,10 @@ def build_result_embed(
     mi_parts = []
     if map_intel.get("projected_labels"):
         mi_parts.append("**Expected:** " + " · ".join(map_intel["projected_labels"][:3]))
-    if map_intel.get("projected_avg") is not None:
+    if map_intel.get("projected_series") is not None:
         pvs = map_intel.get("projected_vs_line", "")
-        mi_parts.append(f"**Avg on these:** `{map_intel['projected_avg']}` {pvs}")
+        # Show projected series total (per-map avg × 2) not the raw per-map avg
+        mi_parts.append(f"**Series proj on these maps:** `{map_intel['projected_series']}` {pvs}")
     if map_intel.get("best_map") and map_intel.get("worst_map"):
         bm = map_intel["best_map"]
         wm = map_intel["worst_map"]

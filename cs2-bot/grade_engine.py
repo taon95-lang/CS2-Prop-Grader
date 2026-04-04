@@ -210,21 +210,38 @@ def compute_confidence_score(
     else:
         if avg_above != med_above:      score -= 4
 
-    # ── Hit rate ─────────────────────────────────────────────────────────────
+    # ── Hit rate (direction-aware) ────────────────────────────────────────────
+    # For an OVER call: high hit rate = good, low hit rate = bad.
+    # For an UNDER call: low hit rate = good (player rarely clears = under is likely),
+    #   high hit rate = bad (player usually clears = under is risky).
     hit_rate = sim_result.get("hit_rate", 50) or 50
-    if hit_rate >= 75:      score += 12
-    elif hit_rate >= 65:    score += 8
-    elif hit_rate >= 57:    score += 4
-    elif hit_rate <= 30:    score -= 12
-    elif hit_rate <= 40:    score -= 8
-    elif hit_rate <= 48:    score -= 4
+    under_rate = 100 - hit_rate  # how often the prop went UNDER historically
+
+    if decision == "OVER":
+        if hit_rate >= 75:      score += 12
+        elif hit_rate >= 65:    score += 8
+        elif hit_rate >= 57:    score += 4
+        elif hit_rate <= 30:    score -= 14
+        elif hit_rate <= 40:    score -= 10
+        elif hit_rate <= 48:    score -= 5
+    elif decision == "UNDER":
+        if under_rate >= 75:    score += 12   # player clears < 25% of the time
+        elif under_rate >= 65:  score += 8
+        elif under_rate >= 57:  score += 4
+        elif under_rate <= 30:  score -= 14   # player clears > 70% — bad for under
+        elif under_rate <= 40:  score -= 10
+        elif under_rate <= 48:  score -= 5
+    else:
+        # PASS/MISPRICED — neutral directional penalty for extreme mismatch
+        if hit_rate <= 30 or hit_rate >= 75:
+            score -= 3
 
     # ── Variance ─────────────────────────────────────────────────────────────
     vtier = variance.get("tier", "MEDIUM")
     if vtier == "LOW":          score += 10
     elif vtier == "MEDIUM":     score += 0
-    elif vtier == "HIGH":       score -= 7
-    elif vtier == "VERY_HIGH":  score -= 12
+    elif vtier == "HIGH":       score -= 10   # was -7; σ>6 is meaningful volatility
+    elif vtier == "VERY_HIGH":  score -= 16   # was -12; σ>9 makes props nearly random
 
     # ── Form streak ──────────────────────────────────────────────────────────
     ftype   = form.get("type", "NEUTRAL")
@@ -354,23 +371,30 @@ def compute_map_intel(map_stats: list, likely_maps: list | None, line: float) ->
             if mn in per_map and per_map[mn]:
                 avg = map_avgs[mn]
                 projected_vals.extend(per_map[mn])
-                arrow = "↑" if avg > line else ("↓" if avg < line else "→")
+                # Arrow compares projected series total (avg × 2 maps) vs series line
+                series_proj = avg * 2
+                arrow = "↑" if series_proj > line else ("↓" if series_proj < line else "→")
                 projected_labels.append(f"{lm.title()} `{avg}` {arrow}")
 
     projected_avg     = round(mean(projected_vals), 1) if projected_vals else None
     projected_vs_line = None
     if projected_avg is not None and line:
-        pct  = round((projected_avg - line) / max(line, 1) * 100, 1)
+        # projected_avg is per-map; multiply by 2 to get expected series total
+        projected_series = projected_avg * 2
+        pct  = round((projected_series - line) / max(line, 1) * 100, 1)
         sign = "+" if pct >= 0 else ""
         projected_vs_line = f"{sign}{pct}% vs line"
 
+    projected_series = round(projected_avg * 2, 1) if projected_avg is not None else None
+
     return {
-        "per_map":          map_avgs,
-        "sorted_maps":      sorted_maps,
-        "best_map":         best_map,
-        "worst_map":        worst_map,
-        "projected_avg":    projected_avg,
-        "projected_labels": projected_labels,
+        "per_map":           map_avgs,
+        "sorted_maps":       sorted_maps,
+        "best_map":          best_map,
+        "worst_map":         worst_map,
+        "projected_avg":     projected_avg,      # per-map avg (used internally)
+        "projected_series":  projected_series,   # series total projection (avg × 2 maps)
+        "projected_labels":  projected_labels,
         "projected_vs_line": projected_vs_line,
     }
 
@@ -426,10 +450,18 @@ def compute_risk_flags(
         if comb < 0.90:
             flags.append(f"🛡️ Tough matchup — deep analysis: {round((comb-1)*100)}% projected adjustment")
 
-    # Very low hit rate
+    # Very low hit rate (direction-aware)
     hr = sim_result.get("hit_rate", 50) or 50
-    if hr < 35:
-        flags.append(f"⚠️ Low historical hit rate — only {hr}% cleared this line")
+    decision_rf = sim_result.get("decision", "PASS")
+    if decision_rf == "OVER" and hr < 40:
+        flags.append(f"⚠️ Low hit rate — only {hr}% cleared this line historically (OVER risk)")
+    elif decision_rf == "UNDER" and hr > 65:
+        flags.append(f"⚠️ High hit rate — player cleared {hr}% of the time (UNDER risk)")
+
+    # Map intelligence warning — projected series total below the line
+    map_intel_obj = sim_result.get("_map_intel_warning")
+    if map_intel_obj:
+        flags.append(map_intel_obj)
 
     return flags
 

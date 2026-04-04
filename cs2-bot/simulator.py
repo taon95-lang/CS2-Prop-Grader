@@ -452,9 +452,12 @@ def calculate_grade(
         grade_num = min(grade_num + 1, 10)
         grade_label = "Prop Error (Wildly off)"
 
-    # Stability penalty: High Volatility + thin edge → drop grade by 1
-    if stability_std > 8 and edge_abs < 0.10:
-        grade_num = max(1, grade_num - 1)
+    # Stability penalty: High Volatility drops grade regardless of edge size.
+    # When a player swings wildly, even a strong simulation is unreliable.
+    if stability_std > 11:
+        grade_num = max(1, grade_num - 2)  # severe boom/bust
+    elif stability_std > 8:
+        grade_num = max(1, grade_num - 1)  # notable volatility
 
     grade_str = f"{grade_num}/10 ({grade_label})"
 
