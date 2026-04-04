@@ -54,8 +54,10 @@ MAP_KILL_MODIFIER: dict[str, float] = {
 
 ALL_MAP_NAMES = set(MAP_TYPE.keys())
 
-# Pro baseline: avg kills per player per map (tier 1/2 CS2)
-BASELINE_KILLS = 18.5
+# CS2 BO3 baseline: avg kills per player per Map 1+2 only (not including Map 3).
+# Based on real CS2 data: typical BO3 player averages ~14-16 kills per map.
+# 18.5 was the CS:GO-era figure and was causing systematic downward H2H bias.
+BASELINE_KILLS = 15.0
 
 # ---------------------------------------------------------------------------
 # In-memory caches

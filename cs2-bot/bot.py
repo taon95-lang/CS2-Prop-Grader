@@ -938,7 +938,8 @@ def _analyze_player(
     if len(adr_vals) >= 3:
         avg_adr = round(sum(adr_vals) / len(adr_vals), 1)
         total_kills_all  = sum(m["stat_value"] for m in map_stats)
-        total_rounds_all = max(len(map_stats) * 22, 1)
+        # Use actual scraped round counts instead of a fixed 22 per map
+        total_rounds_all = max(sum(m.get("rounds", 22) for m in map_stats), 1)
         avg_kpr_all      = total_kills_all / total_rounds_all
         kill_eff         = round(avg_kpr_all / (avg_adr / 100), 3) if avg_adr > 0 else None
 
@@ -1029,22 +1030,9 @@ def _analyze_player(
     except (ValueError, TypeError):
         grade_num_val = 0
 
-    if decision_val in ("OVER", "UNDER"):
-        if grade_num_val >= 8 and conf_grade == "A":
-            unit_rec = "💰 2u — Strong Play"
-        elif grade_num_val >= 6 and conf_grade in ("A", "B"):
-            unit_rec = "💵 1u — Value Play"
-        elif grade_num_val >= 4 and conf_grade in ("A", "B", "C"):
-            unit_rec = "🪙 0.5u — Marginal"
-        else:
-            unit_rec = "🚫 0u — Skip (low grade or confidence)"
-    else:
-        unit_rec = "🚫 0u — Pass"
-
     sim_result["confidence_score"] = conf_score
     sim_result["confidence_grade"] = conf_grade
     sim_result["confidence_label"] = conf_label_final
-    sim_result["unit_recommendation"] = unit_rec
 
     # --- Step 10: Grade Engine Package (new analytics layer) ---
     try:
@@ -1058,6 +1046,30 @@ def _analyze_player(
     except Exception as _ge_err:
         logger.warning(f"[grade_engine] Failed: {_ge_err}")
         sim_result["grade_pkg"] = {}
+
+    # --- Unit Sizing (after grade_pkg so confidence is consistent with the embed) ---
+    # Use the full grade_engine confidence score (same number displayed to the user)
+    # rather than the simplified Step 9 score so unit sizing matches displayed confidence.
+    pkg_conf = (sim_result.get("grade_pkg") or {}).get("confidence", conf_score)
+    if pkg_conf >= 80:     unit_conf_grade = "A"
+    elif pkg_conf >= 65:   unit_conf_grade = "B"
+    elif pkg_conf >= 50:   unit_conf_grade = "C"
+    elif pkg_conf >= 35:   unit_conf_grade = "D"
+    else:                  unit_conf_grade = "F"
+
+    if decision_val in ("OVER", "UNDER"):
+        if grade_num_val >= 8 and unit_conf_grade == "A":
+            unit_rec = "💰 2u — Strong Play"
+        elif grade_num_val >= 6 and unit_conf_grade in ("A", "B"):
+            unit_rec = "💵 1u — Value Play"
+        elif grade_num_val >= 4 and unit_conf_grade in ("A", "B", "C"):
+            unit_rec = "🪙 0.5u — Marginal"
+        else:
+            unit_rec = "🚫 0u — Skip (low grade or confidence)"
+    else:
+        unit_rec = "🚫 0u — Pass"
+
+    sim_result["unit_recommendation"] = unit_rec
 
     return sim_result
 
