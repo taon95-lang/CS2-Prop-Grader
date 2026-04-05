@@ -16,6 +16,7 @@ from scraper import (
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
+from prizepicks import get_cs2_lines, get_player_line, get_all_cs2_props, invalidate_cache as pp_invalidate
 from grade_engine import (
     compute_grade_package,
     run_lines_table,
@@ -150,7 +151,7 @@ async def on_ready():
 
 @bot.command(name="grade")
 async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: str = "Kills", opponent: str = None):
-    if not player_name or not line:
+    if not player_name:
         await ctx.send(
             embed=discord.Embed(
                 title="❌ Usage Error",
@@ -160,7 +161,41 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
                     "**Examples:**\n"
                     "`!grade ZywOo 38.5 Kills`\n"
                     "`!grade ZywOo 38.5 Kills NaVi`\n"
-                    "`!grade s1mple 14.5 HS FaZe`"
+                    "`!grade s1mple 14.5 HS FaZe`\n"
+                    "`!grade ZywOo` ← auto-fetches live line from PrizePicks"
+                ),
+                color=0xFF4136,
+            )
+        )
+        return
+
+    stat_type = stat_type.capitalize()
+    if stat_type not in ("Kills", "Hs"):
+        stat_type = "Kills"
+    if stat_type == "Hs":
+        stat_type = "HS"
+
+    # If no line provided, try to pull it from PrizePicks live board
+    pp_line_fetched = False
+    if not line:
+        try:
+            pp_item = await asyncio.to_thread(get_player_line, player_name, stat_type)
+            if pp_item:
+                raw_score = pp_item.get("line_score") or pp_item.get("line")
+                if raw_score is not None:
+                    line = str(raw_score)
+                    pp_line_fetched = True
+                    logger.info(f"[grade] Auto-fetched PrizePicks line {line} for {player_name}")
+        except Exception as _pp_exc:
+            logger.warning(f"[grade] PrizePicks auto-fetch failed: {_pp_exc}")
+
+    if not line:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ No Line Found",
+                description=(
+                    f"No line provided and no PrizePicks line found for **{player_name}** ({stat_type}).\n"
+                    "Please provide a line manually: `!grade ZywOo 38.5 Kills`"
                 ),
                 color=0xFF4136,
             )
@@ -172,12 +207,6 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     except ValueError:
         await ctx.send(f"❌ Invalid line `{line}`. Please provide a number, e.g. `38.5`.")
         return
-
-    stat_type = stat_type.capitalize()
-    if stat_type not in ("Kills", "Hs"):
-        stat_type = "Kills"
-    if stat_type == "Hs":
-        stat_type = "HS"
 
     # Normalise opponent (strip quotes if the user wrapped it)
     if opponent:
@@ -206,11 +235,12 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         filled = min(10, elapsed // 4)
         bar = "▓" * filled + "░" * (10 - filled)
         matchup_line = f" vs **{opponent}**" if opponent else ""
+        pp_note = " _(line auto-fetched from PrizePicks)_" if pp_line_fetched else ""
         return discord.Embed(
             title="⚙️ Analyzing...",
             description=(
                 f"**Player:** {player_name}{matchup_line}\n"
-                f"**Prop:** {line_val} {stat_type}\n\n"
+                f"**Prop:** {line_val} {stat_type}{pp_note}\n\n"
                 f"{_STAGES[stage_idx]}\n\n"
                 f"`[{bar}]` ⏱️ {elapsed}s elapsed  _(ETA {ETA} — please wait)_"
             ),
@@ -1660,6 +1690,141 @@ async def cmd_lines(ctx, player_arg: str = "", stat_type_arg: str = "Kills"):
             embed=discord.Embed(
                 title="❌ Error",
                 description=f"Lines table failed for **{player_name}**: {str(e)[:200]}",
+                color=0xFF4136,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# !pp — PrizePicks live CS2 lines
+# ---------------------------------------------------------------------------
+
+@bot.command(name="pp")
+async def cmd_pp(ctx, *, player_arg: str = ""):
+    """
+    Usage:
+      !pp               — show all live CS2 props on PrizePicks
+      !pp <Player>      — show lines for a specific player
+      !pp refresh       — force-refresh the PrizePicks cache
+    """
+    arg = player_arg.strip()
+
+    if arg.lower() == "refresh":
+        pp_invalidate()
+        await ctx.send(
+            embed=discord.Embed(
+                title="🔄 Cache Cleared",
+                description="PrizePicks line cache refreshed. Next `!pp` call will pull fresh data.",
+                color=0x7289DA,
+            )
+        )
+        return
+
+    status_msg = await ctx.send(
+        embed=discord.Embed(
+            title="📡 Fetching PrizePicks CS2 Lines…",
+            description="Pulling live data from PrizePicks via Apify…",
+            color=0x7289DA,
+        )
+    )
+
+    try:
+        if arg:
+            items = await asyncio.to_thread(get_cs2_lines, arg)
+            title_suffix = f" — {arg}"
+        else:
+            items = await asyncio.to_thread(get_all_cs2_props)
+            title_suffix = " — All CS2 Props"
+
+        if not items:
+            no_data_desc = (
+                f"No CS2 props found for **{arg}**.\n"
+                f"Check spelling or try without a name to see all available lines."
+            ) if arg else (
+                "No CS2/CSGO props are live on PrizePicks right now.\n"
+                "Props are usually posted a few hours before matches start."
+            )
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="📭 No Lines Found",
+                    description=no_data_desc,
+                    color=0xFFDC00,
+                )
+            )
+            return
+
+        # Group by player → list of prop lines
+        from collections import defaultdict
+        by_player: dict[str, list] = defaultdict(list)
+        for item in items:
+            pn = item.get("player_name") or "Unknown"
+            by_player[pn].append(item)
+
+        embed = discord.Embed(
+            title=f"🎮 PrizePicks CS2 Lines{title_suffix}",
+            color=0x00C2FF,
+        )
+
+        player_count = 0
+        for pname, props in list(by_player.items())[:15]:  # cap at 15 players per embed
+            lines_parts = []
+            for p in props:
+                stat  = p.get("stat_display_name") or p.get("stat_type") or "—"
+                score = p.get("line_score") or p.get("line") or "—"
+                ptype = p.get("projection_type_name") or ""
+                ptype_str = f" _(_{ptype}_)_" if ptype and ptype != "Single Stat" else ""
+                lines_parts.append(f"**{stat}:** `{score}`{ptype_str}")
+
+            # Game info from first prop
+            first = props[0]
+            home     = first.get("home_team_name") or first.get("home_team") or "?"
+            away     = first.get("away_team_name") or first.get("away_team") or "?"
+            team     = first.get("player_team_name") or first.get("player_team") or "?"
+            gstart   = first.get("game_start") or ""
+            position = first.get("player_position") or ""
+
+            # Format game time nicely (strip timezone fluff)
+            time_str = ""
+            if gstart:
+                # ISO format: 2026-04-05T18:30:00.000-04:00
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    dt = datetime.fromisoformat(gstart)
+                    time_str = dt.strftime("%b %d %H:%M UTC") if dt.tzinfo else gstart[:16]
+                except Exception:
+                    time_str = gstart[:16]
+
+            meta_parts = [f"{away} @ {home}"]
+            if time_str:
+                meta_parts.append(time_str)
+            if team:
+                meta_parts.append(f"Team: {team}")
+            if position:
+                meta_parts.append(f"Pos: {position}")
+
+            field_val = "\n".join(lines_parts) + f"\n_{' · '.join(meta_parts)}_"
+            embed.add_field(name=f"👤 {pname}", value=field_val, inline=False)
+            player_count += 1
+
+        if len(by_player) > 15:
+            embed.add_field(
+                name="…",
+                value=f"_{len(by_player) - 15} more players not shown. Use `!pp <Name>` to filter._",
+                inline=False,
+            )
+
+        embed.set_footer(
+            text=f"PrizePicks · {len(items)} prop(s) · "
+                 "Use !grade <Player> <Line> to analyse a prop · Data via Apify"
+        )
+        await status_msg.edit(embed=embed)
+
+    except Exception as exc:
+        logger.exception(f"[pp] Error: {exc}")
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ PrizePicks Error",
+                description=f"Failed to fetch lines: `{str(exc)[:200]}`",
                 color=0xFF4136,
             )
         )
