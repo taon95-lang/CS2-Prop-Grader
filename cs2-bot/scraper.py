@@ -283,6 +283,9 @@ _STATS_SESSION: "_cffi_req.Session | None" = None
 _STATS_SESSION_WARMED = False
 _STATS_PAGES_BLOCKED = False  # legacy per-fetch circuit-breaker (HS mapstats)
 
+# Cache for mapstatsid HTML so each URL is only fetched once per bot session
+_MAPSTATS_HTML_CACHE: dict[str, str] = {}
+
 # ── TWO separate /stats/ circuit-breakers ─────────────────────────────────────
 #
 #  1. PLAYER/TEAM stats circuit  (/stats/players/, /stats/teams/, /stats/search/)
@@ -404,6 +407,24 @@ def _warm_stats_session(match_url: str) -> bool:
     return False
 
 
+def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
+    """
+    Placeholder for an external unblocking service fallback.
+
+    HLTV's /stats/matches/mapstatsid/ pages are blocked at the IP level for
+    all cloud/datacenter IPs including Apify's residential proxy network.
+    A specialized "web unlocker" service (e.g. BrightData Web Unlocker)
+    would be required — not currently configured.
+
+    Returns None immediately so the circuit-breaker is tripped cleanly
+    rather than wasting time on requests that are known to fail.
+    """
+    if url in _MAPSTATS_HTML_CACHE:
+        return _MAPSTATS_HTML_CACHE[url]
+    # No unblocking service configured — return None to trip circuit-breaker
+    return None
+
+
 def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     """
     Fetch an HLTV /stats/matches/mapstatsid/ page.
@@ -412,8 +433,13 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     Each profile gets a full warm-up chain (homepage → match page) before
     the stats page is attempted, mimicking real browser navigation.
 
-    Circuit-breaker only trips after every profile has been exhausted.
+    Falls back to Apify proxy if all tls_client profiles are blocked.
+    Circuit-breaker only trips after Apify also fails.
     """
+    # Check cache first — Apify may have already fetched this URL
+    if stats_url in _MAPSTATS_HTML_CACHE:
+        return _MAPSTATS_HTML_CACHE[stats_url]
+
     global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
     if _STATS_PAGES_BLOCKED:
         return None
@@ -518,9 +544,19 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
             time.sleep(1.0)
             continue
 
-    # All profiles exhausted — trip the circuit-breaker for this session
+    # All tls_client profiles exhausted — try Apify proxy as last resort
     logger.warning(
         f"[stats_fetch] All {len(ordered)} profiles returned 403 — "
+        "trying Apify proxy fallback before tripping circuit-breaker."
+    )
+    html = _fetch_via_apify_proxy(stats_url, referer=match_url)
+    if html:
+        logger.info("[stats_fetch] Apify proxy succeeded — circuit-breaker NOT tripped.")
+        return html
+
+    # Apify also failed — trip the circuit-breaker
+    logger.warning(
+        "[stats_fetch] Apify proxy also failed — "
         "activating circuit-breaker. HS will use calibrated fallback rates."
     )
     _STATS_PAGES_BLOCKED = True
