@@ -1828,7 +1828,17 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         if key in seen:
             continue
         seen.add(key)
-        jobs.append({"player": pname, "stat": stat, "line": score, "item": item})
+
+        # Resolve opponent: whichever team is NOT the player's team
+        player_team = (item.get("player_team") or "").strip().lower()
+        home        = (item.get("home_team_name") or item.get("home_team") or "").strip()
+        away        = (item.get("away_team_name") or item.get("away_team") or "").strip()
+        if player_team and home and away:
+            opponent = away if home.lower() == player_team else home
+        else:
+            opponent = home or away or None   # best guess if player_team missing
+
+        jobs.append({"player": pname, "stat": stat, "line": score, "item": item, "opponent": opponent})
 
     if not jobs:
         _no_props_desc = (
@@ -1889,8 +1899,9 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         away       = item.get("away_team_name") or item.get("away_team") or "?"
         gtime      = _pp_game_time(item)
         match_str  = f"{away} @ {home}" + (f" · {gtime}" if gtime else "")
+        opp_str    = f" vs **{job['opponent']}**" if job.get("opponent") else ""
         return (
-            f"{icon} **{job['player']}** · `{job['line']} {job['stat']}`\n"
+            f"{icon} **{job['player']}**{opp_str} · `{job['line']} {job['stat']}`\n"
             f"  OVER {over_p}% · Grade {grade_str} · Conf {conf}/100\n"
             f"  _{match_str}_"
         )
@@ -2004,7 +2015,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             await _update_scoreboard()
             try:
                 res = await asyncio.wait_for(
-                    asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], None),
+                    asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], job.get("opponent")),
                     timeout=90,   # fixed 90s per player — independent of slate size
                 )
                 results[idx] = res
