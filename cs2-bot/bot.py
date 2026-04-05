@@ -1807,8 +1807,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         score = _pp_line_score(item)
         if not pname or score is None:
             continue
-        if stat == "HS":          # skip headshot props — grade Kills only
-            continue
+
         key = (pname.lower(), stat)
         if key in seen:
             continue
