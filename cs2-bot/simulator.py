@@ -173,8 +173,9 @@ def run_simulation(
     recent_kpr_vals = kpr_values[:recent_n] if n_kpr >= recent_n else kpr_values
     recent_avg_kpr = mean(recent_kpr_vals)
 
-    # Blend: 70% recent form, 30% map-weighted (or overall) avg
-    blended_kpr = 0.70 * recent_avg_kpr + 0.30 * avg_kpr
+    # Blend: 60% recent form, 40% map-weighted (or overall) avg
+    # (was 70/30 — reduced because 2-4 map samples were over-weighting hot streaks)
+    blended_kpr = 0.60 * recent_avg_kpr + 0.40 * avg_kpr
 
     # If HLTV period stats provides an aggregate KPR (90-day), fold it in as a
     # 3rd signal. It captures a broader date window than the 10-series scrape
@@ -347,9 +348,10 @@ def calculate_grade(
     median_above = hist_median > line
     hot_form  = trend_pct >= 12   # recent 4 maps running 12%+ above average
     cold_form = trend_pct <= -12  # recent 4 maps running 12%+ below average
-    # Sportsbooks shade lines slightly low — lower OVER bar, tighten UNDER bar
-    strong_hit_rate = hit_rate >= 0.55   # was 0.60
-    weak_hit_rate   = hit_rate < 0.35    # was 0.40 — need stronger evidence for UNDER
+    # Require at least 60% historical clearance for a primary OVER call.
+    # 55% was too loose — barely coin-flip territory was triggering OVERs.
+    strong_hit_rate = hit_rate >= 0.60
+    weak_hit_rate   = hit_rate < 0.35    # UNDER still needs strong evidence
 
     if avg_above and median_above and strong_hit_rate and not stomp_trap:
         decision = "OVER"
@@ -394,14 +396,24 @@ def calculate_grade(
     if decision == "OVER" and hit_rate < 0.30:
         decision = "PASS"
 
-    # --- Probability override: simulation must agree with the directional call ---
-    # If we called OVER but the MC simulation says it's more likely to go UNDER
-    # (or vice versa), that's a direct contradiction — force PASS instead.
-    # This prevents the historical-average logic from overriding the simulation.
-    if decision == "OVER" and over_prob < 0.50:
+    # --- Probability override: simulation must positively confirm the call ---
+    # Raised from 0.50 → 0.52 for OVER: the simulation must show at least a
+    # slight positive edge, not just "not disagree."  Prevents OVER calls on
+    # 50.x% sim results that are effectively coin-flips.
+    # Mirrored for UNDER: over_prob must be below 0.48 (not just below 0.50).
+    if decision == "OVER" and over_prob < 0.52:
         decision = "PASS"
-    elif decision == "UNDER" and over_prob > 0.50:
+    elif decision == "UNDER" and over_prob > 0.48:
         decision = "PASS"
+
+    # --- Margin check: thin historical edge needs stronger simulation backing ---
+    # If hist_avg is only marginally above the line (<5% gap), the historical
+    # signal is weak.  Require the simulation to also confirm at >= 56% before
+    # committing to OVER — a thin avg edge + weak sim = PASS.
+    if decision == "OVER" and hist_avg > line:
+        margin_pct = (hist_avg - line) / max(line, 1)
+        if margin_pct < 0.05 and over_prob < 0.56:
+            decision = "PASS"
 
     # --- Misprice check (from CS2PropGrader avg/median gap logic) ---
     avg_gap    = hist_avg - line       # positive = avg above line
