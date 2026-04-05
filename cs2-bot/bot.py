@@ -1832,7 +1832,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
     # ── shared state ─────────────────────────────────────────────────────────
     import time as _t
     _start = _t.monotonic()
-    HARD_TIMEOUT = 240   # 4 minutes max for entire slate
+    HARD_TIMEOUT = 3600  # 60 minutes max for entire slate (280 props × ~30s / 5 concurrent ≈ 28 min)
 
     results: list[dict | None] = [None] * n
     completed: list[int] = []           # indices finished so far
@@ -1955,14 +1955,14 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         if pending == 0:
             emb.set_footer(text=f"✅ {len(over_lines)} OVER  ❌ {len(under_lines)} UNDER  ⏸️ {len(pass_lines)} PASS · Strong plays follow · Not financial advice")
         else:
-            emb.set_footer(text=f"{pending} props still in queue · semaphore=3 concurrent")
+            emb.set_footer(text=f"{pending} props still in queue · 5 concurrent")
         try:
             await status_msg.edit(embed=emb)
         except Exception:
             pass
 
     # ── grade all props concurrently (semaphore = 3 to avoid HLTV bans) ────
-    sem = asyncio.Semaphore(3)
+    sem = asyncio.Semaphore(5)
 
     async def _grade_one(idx: int, job: dict):
         async with sem:
@@ -1970,11 +1970,9 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             live_rows[idx] = _fmt_row(idx, job, None)
             await _update_scoreboard()
             try:
-                elapsed = _t.monotonic() - _start
-                remaining = max(10, HARD_TIMEOUT - int(elapsed) - 5)
                 res = await asyncio.wait_for(
                     asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], None),
-                    timeout=remaining,
+                    timeout=90,   # fixed 90s per player — independent of slate size
                 )
                 results[idx] = res
             except asyncio.TimeoutError:
