@@ -1889,6 +1889,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             return f"⏳ **{job['player']}** `{job['line']} {job['stat']}` — grading…"
         if "error" in res:
             return f"⚠️ **{job['player']}** — failed"
+        if res.get("used_fallback"):
+            return f"🚫 **{job['player']}** `{job['line']} {job['stat']}` — no HLTV profile, skipped"
         decision   = res.get("decision", "PASS")
         over_p     = res.get("over_prob", 50)
         grade_str  = res.get("grade", "?/10")
@@ -2000,14 +2002,14 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         if pending == 0:
             emb.set_footer(text=f"✅ {len(over_lines)} OVER  ❌ {len(under_lines)} UNDER  ⏸️ {len(pass_lines)} PASS · Strong plays follow · Not financial advice")
         else:
-            emb.set_footer(text=f"{pending} props still in queue · 5 concurrent")
+            emb.set_footer(text=f"{pending} props still in queue · 2 concurrent")
         try:
             await status_msg.edit(embed=emb)
         except Exception:
             pass
 
-    # ── grade all props concurrently (semaphore = 3 to avoid HLTV bans) ────
-    sem = asyncio.Semaphore(5)
+    # ── grade all props concurrently (semaphore = 2 to avoid HLTV rate limits) ──
+    sem = asyncio.Semaphore(2)
 
     async def _grade_one(idx: int, job: dict):
         async with sem:
@@ -2031,8 +2033,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         res = results[idx]
         live_rows[idx] = _fmt_row(idx, job, res)
 
-        # Stream full detail embed immediately for every completed grade
-        if res and "error" not in res:
+        # Stream full detail embed — skip players with no HLTV data (fallback PASS)
+        if res and "error" not in res and not res.get("used_fallback"):
             try:
                 await ctx.send(embed=build_result_embed(job["player"], job["line"], job["stat"], res))
             except Exception as _e:
@@ -2070,6 +2072,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             if "error" in res:
                 err_rec.append(f"⚠️ **{job['player']}**")
                 continue
+            if res.get("used_fallback"):
+                continue   # no HLTV data — omit from recap entirely
             dec       = res.get("decision", "PASS")
             over_p    = res.get("over_prob", 50)
             grade_str = res.get("grade", "?/10")

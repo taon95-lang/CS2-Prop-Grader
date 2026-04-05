@@ -24,6 +24,7 @@ import json
 import time
 import logging
 import urllib.request
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,29 @@ def get_cs2_lines(player_name: str | None = None) -> list[dict]:
             items = _fetch_last_run_cs2() or []
         _CACHE    = {"items": items}
         _CACHE_TS = now
+
+    # Drop props where the game has already started or is in the past
+    now_utc = datetime.now(timezone.utc)
+    live_items = []
+    dropped = 0
+    for it in items:
+        gs = it.get("game_start") or ""
+        if gs:
+            try:
+                # ISO format e.g. "2026-04-05T20:00:00Z" or "2026-04-05T20:00:00+00:00"
+                gs_clean = gs.replace("Z", "+00:00")
+                game_dt  = datetime.fromisoformat(gs_clean)
+                if game_dt.tzinfo is None:
+                    game_dt = game_dt.replace(tzinfo=timezone.utc)
+                if game_dt <= now_utc:
+                    dropped += 1
+                    continue
+            except Exception:
+                pass  # can't parse → keep it
+        live_items.append(it)
+    if dropped:
+        logger.info(f"[prizepicks] Dropped {dropped} props with game_start in the past")
+    items = live_items
 
     if player_name:
         needle = player_name.lower().strip()
