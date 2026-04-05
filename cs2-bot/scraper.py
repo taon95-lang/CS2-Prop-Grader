@@ -283,41 +283,92 @@ _STATS_SESSION: "_cffi_req.Session | None" = None
 _STATS_SESSION_WARMED = False
 _STATS_PAGES_BLOCKED = False  # legacy per-fetch circuit-breaker (HS mapstats)
 
-# ── Global /stats/ subdomain circuit-breaker ──────────────────────────────────
-# The ENTIRE hltv.org/stats/ path returns 403 from Replit datacenter IPs.
-# This flag trips on the FIRST 403 from any /stats/ URL and prevents the
-# default 6-profile × 3-retry retry storm (~90 seconds wasted per command).
-# Auto-resets after 30 minutes to retry periodically.
+# ── TWO separate /stats/ circuit-breakers ─────────────────────────────────────
+#
+#  1. PLAYER/TEAM stats circuit  (/stats/players/, /stats/teams/, /stats/search/)
+#     These return 403 from Replit datacenter IPs immediately.
+#     TTL = 30 min.
+#
+#  2. MAPSTATS circuit  (/stats/matches/mapstatsid/)
+#     These are the per-map pages containing the K (hs) column.
+#     They are fetched with a full browser warm-up and may succeed even when
+#     the player-stats circuit is open.  Separate TTL = 5 min so they retry
+#     more often.
+#
+# Keeping them separate means a 403 on a player stats page does NOT block
+# mapstatsid page fetches (which is where live HS data comes from).
+
 _STATS_SUBDOMAIN_BLOCKED: bool = False
 _STATS_SUBDOMAIN_BLOCKED_AT: float = 0.0
-_STATS_SUBDOMAIN_BLOCK_TTL: int = 30 * 60   # 30 minutes
+_STATS_SUBDOMAIN_BLOCK_TTL: int = 30 * 60   # 30 minutes (player/team stats)
+
+_MAPSTATS_CIRCUIT_BLOCKED: bool = False
+_MAPSTATS_CIRCUIT_BLOCKED_AT: float = 0.0
+_MAPSTATS_CIRCUIT_BLOCK_TTL: int = 5 * 60   # 5 minutes (mapstatsid HS pages)
+
+
+def _is_mapstats_url(url: str) -> bool:
+    return '/stats/matches/mapstatsid/' in url
 
 
 def _is_stats_blocked(url: str) -> bool:
-    """Return True if the /stats/ subdomain circuit-breaker is active for this URL."""
+    """
+    Return True if the relevant circuit-breaker is active for this URL.
+    mapstatsid URLs use their own narrower circuit; everything else uses
+    the global /stats/ circuit.
+    """
     global _STATS_SUBDOMAIN_BLOCKED, _STATS_SUBDOMAIN_BLOCKED_AT
+    global _MAPSTATS_CIRCUIT_BLOCKED, _MAPSTATS_CIRCUIT_BLOCKED_AT
+
     if '/stats/' not in url:
         return False
-    if not _STATS_SUBDOMAIN_BLOCKED:
-        return False
-    elapsed = time.time() - _STATS_SUBDOMAIN_BLOCKED_AT
-    if elapsed > _STATS_SUBDOMAIN_BLOCK_TTL:
-        _STATS_SUBDOMAIN_BLOCKED = False
-        logger.info("[circuit] /stats/ block TTL expired — will retry stats URLs")
-        return False
-    return True
+
+    if _is_mapstats_url(url):
+        # mapstatsid has its own 5-min circuit
+        if not _MAPSTATS_CIRCUIT_BLOCKED:
+            return False
+        elapsed = time.time() - _MAPSTATS_CIRCUIT_BLOCKED_AT
+        if elapsed > _MAPSTATS_CIRCUIT_BLOCK_TTL:
+            _MAPSTATS_CIRCUIT_BLOCKED = False
+            logger.info("[circuit] mapstatsid circuit expired — retrying HS pages")
+            return False
+        return True
+    else:
+        # Player/team/search stats — 30-min circuit
+        if not _STATS_SUBDOMAIN_BLOCKED:
+            return False
+        elapsed = time.time() - _STATS_SUBDOMAIN_BLOCKED_AT
+        if elapsed > _STATS_SUBDOMAIN_BLOCK_TTL:
+            _STATS_SUBDOMAIN_BLOCKED = False
+            logger.info("[circuit] /stats/ block TTL expired — will retry stats URLs")
+            return False
+        return True
 
 
 def _trip_stats_circuit(url: str) -> None:
-    """Trip the /stats/ circuit-breaker on first 403 from a /stats/ URL."""
+    """Trip the appropriate circuit-breaker on first 403 from a /stats/ URL."""
     global _STATS_SUBDOMAIN_BLOCKED, _STATS_SUBDOMAIN_BLOCKED_AT
-    if '/stats/' in url and not _STATS_SUBDOMAIN_BLOCKED:
-        _STATS_SUBDOMAIN_BLOCKED = True
-        _STATS_SUBDOMAIN_BLOCKED_AT = time.time()
-        logger.warning(
-            "[circuit] /stats/ circuit-breaker TRIPPED — all HLTV stats URLs "
-            "blocked for 30 min. Kill data unaffected (comes from match pages)."
-        )
+    global _MAPSTATS_CIRCUIT_BLOCKED, _MAPSTATS_CIRCUIT_BLOCKED_AT
+
+    if '/stats/' not in url:
+        return
+
+    if _is_mapstats_url(url):
+        if not _MAPSTATS_CIRCUIT_BLOCKED:
+            _MAPSTATS_CIRCUIT_BLOCKED = True
+            _MAPSTATS_CIRCUIT_BLOCKED_AT = time.time()
+            logger.warning(
+                "[circuit] mapstatsid circuit TRIPPED (403 on HS page) — "
+                "retrying in 5 min. HS will use calibrated fallback."
+            )
+    else:
+        if not _STATS_SUBDOMAIN_BLOCKED:
+            _STATS_SUBDOMAIN_BLOCKED = True
+            _STATS_SUBDOMAIN_BLOCKED_AT = time.time()
+            logger.warning(
+                "[circuit] /stats/ circuit-breaker TRIPPED — player/team stats "
+                "blocked for 30 min. Kill data unaffected (comes from match pages)."
+            )
 
 
 def _get_stats_session() -> "_cffi_req.Session | None":
@@ -437,15 +488,17 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
                 return resp.text
 
             if resp.status_code == 403:
-                _trip_stats_circuit(stats_url)   # trips global circuit on first 403
-                if _STATS_SUBDOMAIN_BLOCKED:
+                _trip_stats_circuit(stats_url)   # trips only the relevant circuit
+                # For mapstatsid: trip sets _MAPSTATS_CIRCUIT_BLOCKED; rotate profile
+                # For player/team stats: trip sets _STATS_SUBDOMAIN_BLOCKED; bail fast
+                if not _is_mapstats_url(stats_url) and _STATS_SUBDOMAIN_BLOCKED:
                     logger.warning(
-                        f"[stats_fetch] /stats/ circuit TRIPPED on 403 — "
-                        f"abandoning all stats for 30 min"
+                        f"[stats_fetch] player-stats circuit TRIPPED on 403 — "
+                        f"abandoning player stats for 30 min"
                     )
                     return None
                 logger.warning(
-                    f"[stats_fetch] 403 on profile={profile} "
+                    f"[stats_fetch] 403 on profile={profile} url={stats_url[-60:]} "
                     f"(attempt {profile_attempt + 1}/{len(ordered)}) — rotating"
                 )
                 _STATS_SESSION_WARMED = False
