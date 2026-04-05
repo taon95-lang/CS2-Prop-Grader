@@ -1742,14 +1742,24 @@ def _decision_icon(decision: str) -> str:
     return {"OVER": "✅", "UNDER": "❌", "PASS": "⏸️"}.get(decision, "❓")
 
 
-@bot.command(name="pp")
+@bot.command(name="pp", aliases=["pphs", "ppkills"])
 async def cmd_pp(ctx, *, player_arg: str = ""):
     """
-    !pp               — fetch all live CS2 PrizePicks props and grade every one
+    !pp               — grade all live CS2 PrizePicks props (Kills + HS)
+    !pphs             — grade only Headshots props
+    !ppkills          — grade only Kills props
     !pp <Player>      — grade that player's live PrizePicks line
     !pp refresh       — force-refresh the PrizePicks cache
     """
     arg = player_arg.strip()
+
+    # Determine stat filter from the command alias used
+    _invoked = ctx.invoked_with.lower()
+    stat_filter: str | None = (
+        "HS"    if _invoked == "pphs"    else
+        "Kills" if _invoked == "ppkills" else
+        None    # !pp → all stats
+    )
 
     # ── refresh shortcut ────────────────────────────────────────────────────
     if arg.lower() == "refresh":
@@ -1764,9 +1774,12 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         return
 
     # ── fetch slate (uses last successful Apify run — near-instant) ─────────
+    _slate_label = (
+        f"CS2 {stat_filter} Props" if stat_filter else "CS2 Lines"
+    )
     status_msg = await ctx.send(
         embed=discord.Embed(
-            title="📡 Fetching PrizePicks CS2 Lines…",
+            title=f"📡 Fetching PrizePicks {_slate_label}…",
             description="Reading latest data from Apify…",
             color=0x7289DA,
         )
@@ -1798,7 +1811,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         )
         return
 
-    # De-duplicate: one grade job per (player_name, stat_type) — Kills only
+    # De-duplicate: one grade job per (player_name, stat_type)
+    # Apply stat_filter when invoked as !pphs or !ppkills
     seen: set = set()
     jobs: list[dict] = []
     for item in raw_items:
@@ -1806,6 +1820,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         stat  = _pp_stat_type(item)
         score = _pp_line_score(item)
         if not pname or score is None:
+            continue
+        if stat_filter and stat != stat_filter:
             continue
 
         key = (pname.lower(), stat)
@@ -1815,21 +1831,28 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         jobs.append({"player": pname, "stat": stat, "line": score, "item": item})
 
     if not jobs:
+        _no_props_desc = (
+            f"No **{stat_filter}** props found on the current slate. "
+            f"Try `!pp` to see all available props."
+            if stat_filter else
+            "Props found but none had parseable player names or line scores."
+        )
         await status_msg.edit(
             embed=discord.Embed(
                 title="📭 No Gradeable Props",
-                description="Props found but none had parseable player names or line scores.",
+                description=_no_props_desc,
                 color=0xFFDC00,
             )
         )
         return
 
     n = len(jobs)
+    _grade_label = f"CS2 {stat_filter} Prop" if stat_filter else "CS2 Prop"
     await status_msg.edit(
         embed=discord.Embed(
-            title=f"⚙️ Grading {n} CS2 Prop{'s' if n != 1 else ''}…",
+            title=f"⚙️ Grading {n} {_grade_label}{'s' if n != 1 else ''}…",
             description=(
-                f"Found **{n}** prop{'s' if n != 1 else ''} on the slate.\n"
+                f"Found **{n}** {_grade_label.lower()}{'s' if n != 1 else ''} on the slate.\n"
                 f"Results stream in as each player finishes (~30s each).\n"
                 f"_Strong plays (grade 6+) get full detail embeds automatically._"
             ),
