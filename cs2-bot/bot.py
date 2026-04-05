@@ -1968,9 +1968,11 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
                         over_p    = res.get("over_prob", 50)
                         grade_str = res.get("grade", "?/10")
                         icon      = _decision_icon(dec)
+                        pkg_r     = results[i].get("grade_pkg") or {}
+                        conf_r    = pkg_r.get("confidence", results[i].get("confidence_score", 50))
                         recent_rows.append(
                             f"{icon} **{jobs[i]['player']}** `{jobs[i]['line']} {jobs[i]['stat']}` "
-                            f"OVER {over_p}% · {grade_str}"
+                            f"OVER {over_p}% · Grade {grade_str} · Conf {conf_r}/100"
                         )
                     else:
                         recent_rows.append(f"⚠️ **{jobs[i]['player']}** — failed")
@@ -1979,7 +1981,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             desc = "\n\n".join(parts)
 
         emb = discord.Embed(
-            title=f"⚙️ Grading {n} CS2 props — {done}/{n} done" + (" ✅" if pending == 0 else "…"),
+            title=f"⚙️ Grading {n} {_grade_label}s — {done}/{n} done" + (" ✅" if pending == 0 else "…"),
             description=desc[:4000],   # hard cap for safety
             color=color,
         )
@@ -2069,8 +2071,13 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             dec       = res.get("decision", "PASS")
             over_p    = res.get("over_prob", 50)
             grade_str = res.get("grade", "?/10")
+            pkg_rec   = res.get("grade_pkg") or {}
+            conf_rec  = pkg_rec.get("confidence", res.get("confidence_score", 50))
             icon      = _decision_icon(dec)
-            entry     = f"{icon} **{job['player']}** `{job['line']} {job['stat']}` · OVER {over_p}% · {grade_str}"
+            entry     = (
+                f"{icon} **{job['player']}** `{job['line']} {job['stat']}` · "
+                f"OVER {over_p}% · Grade {grade_str} · Conf {conf_rec}/100"
+            )
             if dec == "OVER":
                 over_rec.append(entry)
             elif dec == "UNDER":
@@ -2092,11 +2099,12 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
                 embeds.append(discord.Embed(title=title, description="\n".join(buf), color=color))
             return embeds
 
+        _sfx = f" — {stat_filter}" if stat_filter else ""
         if over_rec:
-            for emb in _chunk_embed(f"✅ OVER Calls ({len(over_rec)})", over_rec, 0x2ECC40):
+            for emb in _chunk_embed(f"✅ OVER Calls ({len(over_rec)}){_sfx}", over_rec, 0x2ECC40):
                 await ctx.send(embed=emb)
         if under_rec:
-            for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)})", under_rec, 0xFF4136):
+            for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)}){_sfx}", under_rec, 0xFF4136):
                 await ctx.send(embed=emb)
 
     # ── send detailed embeds for strong plays ────────────────────────────────
