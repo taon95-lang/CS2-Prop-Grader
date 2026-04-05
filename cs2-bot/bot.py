@@ -1700,8 +1700,10 @@ async def cmd_lines(ctx, player_arg: str = "", stat_type_arg: str = "Kills"):
 # ---------------------------------------------------------------------------
 
 def _pp_stat_type(item: dict) -> str:
-    """Map a PrizePicks item to our internal stat_type string."""
-    raw = (item.get("stat_display_name") or item.get("stat_type") or "").lower()
+    """Map a PrizePicks item to our internal stat_type string.
+    Confirmed CS2 values: 'MAPS 1-2 Kills' | 'MAPS 1-2 Headshots'
+    """
+    raw = (item.get("stat") or "").lower()
     if "headshot" in raw:
         return "HS"
     return "Kills"

@@ -1,12 +1,20 @@
 """
 PrizePicks live line fetcher via Apify (zen-studio/prizepicks-player-props).
 
-Strategy:
-  1. PRIMARY — read the most recent SUCCEEDED run's dataset (near-instant).
-  2. FALLBACK — start a fresh sync run filtered to CS2 if no recent data or cache stale.
+CONFIRMED field names from live CS2 data (2026-04-05):
+  "league"      — "CS2"
+  "stat"        — "MAPS 1-2 Kills" | "MAPS 1-2 Headshots"
+  "line"        — numeric line e.g. 29
+  "player_name" — e.g. "shane"
+  "player_team" — team name (player_team_name is null for CS2)
+  "home_team"   — team name (home_team_name is null for CS2)
+  "away_team"   — team name (away_team_name is null for CS2)
+  "game_start"  — ISO datetime
 
-CS2 league names seen in PrizePicks data: "CSGO", "CS2", "CS:GO", "Counter-Strike"
-(We accept any of these and also filter by stat type as a safety net.)
+CRITICAL INPUT BUG FIXED:
+  The Apify actor uses the key "leagues" (array), NOT "league" (string).
+  Old broken call: {"league": "CSGO"}  → actor used default {"leagues": ["NBA"]}
+  Correct call:    {"leagues": ["CS2"]} → returns 296 real CS2 props
 
 Cache TTL = 5 minutes.
 """
@@ -16,25 +24,19 @@ import json
 import time
 import logging
 import urllib.request
-import urllib.error
 
 logger = logging.getLogger(__name__)
 
 APIFY_ACTOR_ID = "zen-studio~prizepicks-player-props"
 APIFY_BASE     = "https://api.apify.com/v2"
 
-# All known CS2 league name variants (lower-cased for comparison)
-CS2_LEAGUE_NAMES = {"cs2", "csgo", "cs:go", "counter-strike", "counter strike"}
-# Stats that only exist in CS2 (not NBA/NFL/etc.)
-CS2_STAT_KEYWORDS = {"kill", "headshot", "death", "assist", "adr", "kast", "rating"}
-
-_CACHE: dict   = {}
+_CACHE: dict    = {}
 _CACHE_TS: float = 0.0
 _CACHE_TTL: int  = 300   # 5 minutes
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# HTTP helpers
 # ---------------------------------------------------------------------------
 
 def _token() -> str:
@@ -60,106 +62,119 @@ def _post(url: str, payload: dict, timeout: int = 110) -> dict | list:
         return json.loads(resp.read().decode("utf-8"))
 
 
+# ---------------------------------------------------------------------------
+# CS2 item filter
+# ---------------------------------------------------------------------------
+
 def _is_cs2_item(item: dict) -> bool:
-    """Return True only if the item is a CS2/CSGO prop."""
-    league = (item.get("league") or item.get("league_name") or "").lower().strip()
-    if league in CS2_LEAGUE_NAMES:
+    """Return True if this item is a CS2 prop (league == 'CS2')."""
+    league = (item.get("league") or "").strip()
+    if league == "CS2":
         return True
-    # Secondary: stat name contains a CS2-specific keyword
-    stat = (item.get("stat_display_name") or item.get("stat_type") or "").lower()
-    if any(kw in stat for kw in CS2_STAT_KEYWORDS):
-        # But guard against false positives: make sure there's NO obvious non-CS2 league
-        non_cs2 = {"nba", "nfl", "mlb", "nhl", "nfl", "soccer", "tennis",
-                   "mma", "golf", "esports", "valorant", "lol", "dota"}
-        if league not in non_cs2:
-            return True
+    # Broader fallback in case future data uses variant spellings
+    league_lc = league.lower()
+    if league_lc in ("csgo", "cs:go", "counter-strike", "counter-strike 2"):
+        return True
+    # Stat-based fallback: "MAPS 1-2 Kills" / "MAPS 1-2 Headshots"
+    stat = (item.get("stat") or "").lower()
+    if ("kill" in stat or "headshot" in stat) and "maps" in stat:
+        return True
     return False
+
+
+def _dataset_items(dataset_id: str, limit: int = 5000) -> list[dict]:
+    """Fetch up to `limit` items from an Apify dataset."""
+    tok = _token()
+    url = (
+        f"{APIFY_BASE}/datasets/{dataset_id}/items"
+        f"?token={tok}&clean=true&limit={limit}"
+    )
+    raw = _get(url, timeout=30)
+    return raw if isinstance(raw, list) else []
 
 
 # ---------------------------------------------------------------------------
 # Fetch strategies
 # ---------------------------------------------------------------------------
 
-def _fetch_last_run_items() -> list[dict] | None:
+def _fetch_last_run_cs2() -> list[dict] | None:
     """
-    Read items from the most recent SUCCEEDED actor run.
-    Returns None if no run exists or the result contains no CS2 items.
+    Read items from the most recent SUCCEEDED run that used CS2 input.
+    Checks the run's INPUT key-value store to confirm it was a CS2 run.
+    Returns None if no suitable run found.
     """
     try:
         tok = _token()
         runs_url = (
             f"{APIFY_BASE}/acts/{APIFY_ACTOR_ID}/runs"
-            f"?token={tok}&status=SUCCEEDED&limit=1&desc=1"
+            f"?token={tok}&status=SUCCEEDED&limit=10&desc=1"
         )
         data = _get(runs_url, timeout=15)
         runs = (data.get("data", {}).get("items", [])
                 if isinstance(data, dict) else [])
-        if not runs:
-            logger.info("[prizepicks] No recent SUCCEEDED run — will start fresh")
-            return None
 
-        dataset_id = runs[0].get("defaultDatasetId")
-        if not dataset_id:
-            return None
+        for run in runs:
+            kv_id = run.get("defaultKeyValueStoreId")
+            if not kv_id:
+                continue
+            # Check if this run used CS2 input
+            try:
+                kv_url = f"{APIFY_BASE}/key-value-stores/{kv_id}/records/INPUT?token={tok}"
+                inp = _get(kv_url, timeout=8)
+                leagues_input = inp.get("leagues", []) if isinstance(inp, dict) else []
+                if "CS2" not in leagues_input:
+                    continue
+            except Exception:
+                continue
 
-        items_url = (
-            f"{APIFY_BASE}/datasets/{dataset_id}/items"
-            f"?token={tok}&clean=true&limit=500"
-        )
-        raw = _get(items_url, timeout=20)
-        items = raw if isinstance(raw, list) else []
+            dataset_id = run.get("defaultDatasetId")
+            if not dataset_id:
+                continue
 
-        # Log what leagues came back so we can tune the filter
-        leagues_seen = {(it.get("league") or "?") for it in items}
-        logger.info(f"[prizepicks] Last run: {len(items)} items, leagues: {leagues_seen}")
+            items = _dataset_items(dataset_id, limit=5000)
+            cs2 = [it for it in items if _is_cs2_item(it)]
+            logger.info(f"[prizepicks] Last CS2 run: {len(cs2)}/{len(items)} CS2 items (run {run.get('id','?')[:8]})")
+            if cs2:
+                return cs2
 
-        cs2 = [it for it in items if _is_cs2_item(it)]
-        logger.info(f"[prizepicks] CS2 filter: {len(cs2)}/{len(items)} items kept")
-
-        # If we got items but NONE are CS2, the run had no CS2 data — trigger fresh run
-        if items and not cs2:
-            logger.info("[prizepicks] Last run had no CS2 props — starting fresh run")
-            return None
-
-        return cs2
+        logger.info("[prizepicks] No recent CS2 run found — starting fresh")
+        return None
 
     except Exception as exc:
-        logger.warning(f"[prizepicks] _fetch_last_run_items failed: {exc}")
+        logger.warning(f"[prizepicks] _fetch_last_run_cs2 failed: {exc}")
         return None
 
 
-def _fetch_fresh_run_items() -> list[dict]:
+def _fetch_fresh_cs2_run() -> list[dict]:
     """
-    Start a fresh actor run filtered to CSGO/CS2 and wait for results.
-    We trust the actor's own league filter — do NOT re-filter the results,
-    since the league/stat field names may differ from our internal list.
-    Tries "CSGO" first; if that returns 0 items, tries "CS2".
+    Start a fresh sync actor run with {"leagues": ["CS2"]} and return items.
     """
     tok = _token()
     url = (
         f"{APIFY_BASE}/acts/{APIFY_ACTOR_ID}/run-sync-get-dataset-items"
         f"?token={tok}&timeout=90&memory=512"
     )
-    for league_input in ("CSGO", "CS2"):
-        try:
-            logger.info(f"[prizepicks] Starting fresh run with league={league_input}…")
-            raw = _post(url, {"league": league_input}, timeout=110)
-            items = raw if isinstance(raw, list) else []
-            if items:
-                # Log a sample item's keys + league field so we can inspect the structure
-                sample = items[0]
-                leagues_seen = {(it.get("league") or it.get("league_name") or "?") for it in items}
-                stat_seen    = {(it.get("stat_display_name") or it.get("stat_type") or "?") for it in items[:20]}
-                logger.info(
-                    f"[prizepicks] Fresh run ({league_input}): {len(items)} items | "
-                    f"leagues={leagues_seen} | stats={stat_seen} | "
-                    f"sample_keys={list(sample.keys())[:12]}"
-                )
-                return items   # trust the actor's filter — these ARE CS2 items
-        except Exception as exc:
-            logger.warning(f"[prizepicks] Fresh run ({league_input}) failed: {exc}")
+    try:
+        logger.info("[prizepicks] Starting fresh CS2 run with leagues=['CS2']…")
+        raw = _post(url, {"leagues": ["CS2"]}, timeout=110)
+        items = raw if isinstance(raw, list) else []
 
-    return []
+        leagues = {}
+        stats = {}
+        for it in items:
+            lg = it.get("league", "?")
+            st = it.get("stat", "?")
+            leagues[lg] = leagues.get(lg, 0) + 1
+            stats[st]   = stats.get(st, 0) + 1
+        logger.info(f"[prizepicks] Fresh CS2 run: {len(items)} items | leagues={leagues} | stats={stats}")
+
+        cs2 = [it for it in items if _is_cs2_item(it)]
+        logger.info(f"[prizepicks] CS2 filter kept {len(cs2)}/{len(items)}")
+        return cs2
+
+    except Exception as exc:
+        logger.warning(f"[prizepicks] Fresh CS2 run failed: {exc}")
+        return []
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +183,8 @@ def _fetch_fresh_run_items() -> list[dict]:
 
 def get_cs2_lines(player_name: str | None = None) -> list[dict]:
     """
-    Return CS2/CSGO props. Cached for _CACHE_TTL seconds.
-    Optionally filters to a specific player name (case-insensitive).
+    Return CS2 props. Cached for _CACHE_TTL seconds.
+    Optionally filters to a specific player name (case-insensitive substring).
     """
     global _CACHE, _CACHE_TS
 
@@ -178,9 +193,9 @@ def get_cs2_lines(player_name: str | None = None) -> list[dict]:
         items = _CACHE.get("items", [])
         logger.info(f"[prizepicks] Cache hit: {len(items)} CS2 items")
     else:
-        items = _fetch_last_run_items()
+        items = _fetch_last_run_cs2()
         if items is None:
-            items = _fetch_fresh_run_items()
+            items = _fetch_fresh_cs2_run()
         _CACHE    = {"items": items or []}
         _CACHE_TS = now
 
@@ -198,13 +213,14 @@ def get_player_line(player_name: str, stat_type: str = "Kills") -> dict | None:
     """
     Return the best-matching PrizePicks line for this player + stat type.
     stat_type: "Kills" or "HS"
+    Uses 'stat' field which contains 'MAPS 1-2 Kills' / 'MAPS 1-2 Headshots'.
     """
     items = get_cs2_lines(player_name)
     if not items:
         return None
     kw = "headshot" if stat_type.upper() == "HS" else "kill"
     for item in items:
-        stat_raw = (item.get("stat_display_name") or item.get("stat_type") or "").lower()
+        stat_raw = (item.get("stat") or "").lower()
         if kw in stat_raw:
             return item
     return items[0] if items else None
