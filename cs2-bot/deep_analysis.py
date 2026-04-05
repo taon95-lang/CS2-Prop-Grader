@@ -383,11 +383,17 @@ def get_h2h_stats(
     player_match_ids: list[tuple[str, str]],
     opponent_team_id: str,
     n: int = 3,
+    line: float = 0.0,
 ) -> list[dict]:
     """
     Scan the player's recent match IDs for matches that involved the opponent.
     Returns up to n match records:
-      [{'match_id': ..., 'kills_by_map': [22, 18], 'avg_kills': 20.0}, ...]
+      [{'match_id': ..., 'kills_by_map': [22, 18], 'total_kills': 40,
+        'avg_kills': 20.0, 'cleared': True, 'maps_found': 2}, ...]
+
+    Only records with data from BOTH maps 1 and 2 are counted as valid for the
+    cleared check.  Partial records (only 1 map parsed) are flagged but still
+    included so callers can at least display them.
     """
     results: list[dict] = []
 
@@ -412,12 +418,26 @@ def get_h2h_stats(
         if not kills_by_map:
             continue
 
-        results.append({
-            'match_id': match_id,
+        maps_found   = len(kills_by_map)
+        total_kills  = sum(kills_by_map)
+        # Only mark as cleared if we have data from both maps — a single-map
+        # result would undercount and produce a false "not cleared" verdict.
+        cleared = (maps_found >= 2 and line > 0 and total_kills >= line)
+
+        rec = {
+            'match_id':   match_id,
             'kills_by_map': kills_by_map,
-            'avg_kills': round(_stats.mean(kills_by_map), 1),
-        })
-        logger.info(f"[h2h] match {match_id}: kills={kills_by_map}")
+            'total_kills': total_kills,
+            'avg_kills':  round(_stats.mean(kills_by_map), 1),
+            'maps_found': maps_found,
+            'cleared':    cleared,
+            'partial':    maps_found < 2,
+        }
+        results.append(rec)
+        logger.info(
+            f"[h2h] match {match_id}: kills={kills_by_map} total={total_kills} "
+            f"maps={maps_found} cleared={cleared} (line={line})"
+        )
 
     return results
 
@@ -492,7 +512,7 @@ def run_deep_analysis(
     player_rank = get_team_rank(player_team_id, player_team_slug) if player_team_id and player_team_slug else None
 
     # ── H2H ─────────────────────────────────────────────────────────────────
-    h2h = get_h2h_stats(player_id, player_slug, player_match_ids, opp_id, n=3)
+    h2h = get_h2h_stats(player_id, player_slug, player_match_ids, opp_id, n=3, line=line)
     out['h2h'] = h2h
 
     # ════════════════════════════════════════════════════════════════════════
@@ -749,19 +769,33 @@ def run_deep_analysis(
     out['hs_vulnerability'] = {'label': hs_rating, 'modifier': round(hs_adj, 4)}
 
     # ── [H] H2H line clearing — Matchup Favorite check ───────────────────────
+    # Use the pre-stamped 'cleared' field from get_h2h_stats (which already
+    # guards against partial-data false negatives).  Only count records where
+    # we had data from BOTH maps; partial records are excluded from of_n so
+    # the fraction shown to the user isn't misleading.
     h2h_cleared   = 0
-    h2h_of_n      = min(2, len(h2h))
+    h2h_of_n      = 0
+    h2h_partial   = 0
     matchup_fav   = False
 
     if h2h and line > 0:
-        for rec in h2h[:2]:
-            total = sum(rec.get('kills_by_map', []))
-            if total >= line:
+        for rec in h2h[:3]:
+            if rec.get('partial'):
+                h2h_partial += 1
+                continue
+            h2h_of_n += 1
+            if rec.get('cleared'):
                 h2h_cleared += 1
-        matchup_fav = (h2h_cleared >= 2)
+        # Clamp to last 2 complete matches for matchup-favorite decision
+        matchup_fav = (h2h_of_n >= 2 and h2h_cleared >= 2)
         if matchup_fav:
             bullets.append(
                 f"Matchup Favorite: cleared {line} line in both recent H2H matches → +5% Over"
+            )
+        if h2h_partial:
+            logger.warning(
+                f"[h2h] {h2h_partial} H2H match(es) had only 1 map scraped "
+                f"— excluded from cleared count to avoid false negatives"
             )
 
     out['matchup_favorite_bonus'] = matchup_fav
@@ -799,6 +833,7 @@ def run_deep_analysis(
         'h2h_line': {
             'matches_cleared':   h2h_cleared,
             'of_n':              h2h_of_n,
+            'h2h_partial':       h2h_partial,
             'matchup_favorite':  matchup_fav,
         },
         'economy_impact': {

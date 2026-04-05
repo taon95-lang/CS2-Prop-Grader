@@ -1296,8 +1296,17 @@ def build_result_embed(
 
         h2h_records = deep.get("h2h", [])
         if h2h_records:
-            h2h_clears = sum(1 for s in h2h_records if s.get("cleared"))
-            h2h_str = f"H2H **{h2h_clears}/{len(h2h_records)}** {'✅' if h2h_clears == len(h2h_records) else '⚠️'}"
+            # Only count complete-data records (both maps scraped) in the cleared tally
+            _h2h_complete = [s for s in h2h_records if not s.get("partial")]
+            h2h_clears    = sum(1 for s in _h2h_complete if s.get("cleared"))
+            _h2h_n        = len(_h2h_complete)
+            _partial_n    = len(h2h_records) - _h2h_n
+            _partial_tag  = f" (+{_partial_n} partial)" if _partial_n else ""
+            h2h_str = (
+                f"H2H **{h2h_clears}/{_h2h_n}** "
+                f"{'✅' if _h2h_n > 0 and h2h_clears == _h2h_n else '⚠️'}"
+                f"{_partial_tag}"
+            )
         else:
             h2h_str = "H2H: no data"
 
@@ -1323,9 +1332,11 @@ def build_result_embed(
         h2h_sc   = scouting.get("h2h_line", {})
         cleared  = h2h_sc.get("matches_cleared", 0)
         of_n     = h2h_sc.get("of_n", 0)
-        if of_n > 0:
-            bonus_tag = "  ✅ +5% Over bonus" if h2h_sc.get("matchup_favorite") else ""
-            opp_val += f"\n_H2H vs line: {cleared}/{of_n} cleared{bonus_tag}_"
+        partial  = h2h_sc.get("h2h_partial", 0)
+        if of_n > 0 or partial > 0:
+            bonus_tag   = "  ✅ +5% Over bonus" if h2h_sc.get("matchup_favorite") else ""
+            partial_tag = f"  ⚠️ {partial} match(es) incomplete data" if partial else ""
+            opp_val += f"\n_H2H vs line: {cleared}/{of_n} cleared{bonus_tag}{partial_tag}_"
 
         if result.get("stomp_high_line_warning"):
             opp_val += "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
