@@ -131,7 +131,9 @@ def _fetch_last_run_items() -> list[dict] | None:
 def _fetch_fresh_run_items() -> list[dict]:
     """
     Start a fresh actor run filtered to CSGO/CS2 and wait for results.
-    Tries "CSGO" first, then "CS2" if that returns nothing.
+    We trust the actor's own league filter — do NOT re-filter the results,
+    since the league/stat field names may differ from our internal list.
+    Tries "CSGO" first; if that returns 0 items, tries "CS2".
     """
     tok = _token()
     url = (
@@ -143,10 +145,17 @@ def _fetch_fresh_run_items() -> list[dict]:
             logger.info(f"[prizepicks] Starting fresh run with league={league_input}…")
             raw = _post(url, {"league": league_input}, timeout=110)
             items = raw if isinstance(raw, list) else []
-            logger.info(f"[prizepicks] Fresh run ({league_input}): {len(items)} items")
-            cs2 = [it for it in items if _is_cs2_item(it)] if items else items
-            if cs2:
-                return cs2
+            if items:
+                # Log a sample item's keys + league field so we can inspect the structure
+                sample = items[0]
+                leagues_seen = {(it.get("league") or it.get("league_name") or "?") for it in items}
+                stat_seen    = {(it.get("stat_display_name") or it.get("stat_type") or "?") for it in items[:20]}
+                logger.info(
+                    f"[prizepicks] Fresh run ({league_input}): {len(items)} items | "
+                    f"leagues={leagues_seen} | stats={stat_seen} | "
+                    f"sample_keys={list(sample.keys())[:12]}"
+                )
+                return items   # trust the actor's filter — these ARE CS2 items
         except Exception as exc:
             logger.warning(f"[prizepicks] Fresh run ({league_input}) failed: {exc}")
 
