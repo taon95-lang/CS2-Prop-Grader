@@ -1863,8 +1863,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             title=f"⚙️ Grading {n} {_grade_label}{'s' if n != 1 else ''}…",
             description=(
                 f"Found **{n}** {_grade_label.lower()}{'s' if n != 1 else ''} on the slate.\n"
-                f"Results stream in as each player finishes (~30s each).\n"
-                f"_Strong plays (grade 6+) get full detail embeds automatically._"
+                f"Full detail cards stream in as each player finishes (~30s each)."
             ),
             color=0x7289DA,
         )
@@ -1877,7 +1876,6 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
 
     results: list[dict | None] = [None] * n
     completed: list[int] = []           # indices finished so far
-    strong_embeds: list[discord.Embed] = []
 
     # Live scoreboard lines: index → formatted row string
     live_rows: dict[int, str] = {}
@@ -2030,22 +2028,12 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         res = results[idx]
         live_rows[idx] = _fmt_row(idx, job, res)
 
-        # Build and stash strong detail embed immediately
+        # Stream full detail embed immediately for every completed grade
         if res and "error" not in res:
-            decision  = res.get("decision", "PASS")
-            grade_str = res.get("grade", "?/10")
-            grade_num = 0
             try:
-                grade_num = int(str(grade_str).split("/")[0])
-            except (ValueError, TypeError):
-                pass
-            if decision in ("OVER", "UNDER") and grade_num >= 6:
-                try:
-                    strong_embeds.append(
-                        build_result_embed(job["player"], job["line"], job["stat"], res)
-                    )
-                except Exception:
-                    pass
+                await ctx.send(embed=build_result_embed(job["player"], job["line"], job["stat"], res))
+            except Exception as _e:
+                logger.warning(f"[pp] Failed to send detail embed for {job['player']}: {_e}")
 
         await _update_scoreboard()
 
@@ -2118,9 +2106,6 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)}){_sfx}", under_rec, 0xFF4136):
                 await ctx.send(embed=emb)
 
-    # ── send detailed embeds for strong plays ────────────────────────────────
-    for emb in strong_embeds[:12]:   # cap at 12 detail cards
-        await ctx.send(embed=emb)
 
 
 # ---------------------------------------------------------------------------
