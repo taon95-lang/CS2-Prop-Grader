@@ -32,7 +32,7 @@ APIFY_BASE     = "https://api.apify.com/v2"
 
 _CACHE: dict    = {}
 _CACHE_TS: float = 0.0
-_CACHE_TTL: int  = 300   # 5 minutes
+_CACHE_TTL: int  = 900   # 15 minutes — fresh run cached across back-to-back commands
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +193,13 @@ def get_cs2_lines(player_name: str | None = None) -> list[dict]:
         items = _CACHE.get("items", [])
         logger.info(f"[prizepicks] Cache hit: {len(items)} CS2 items")
     else:
-        items = _fetch_last_run_cs2()
-        if items is None:
-            items = _fetch_fresh_cs2_run()
-        _CACHE    = {"items": items or []}
+        # Always run fresh — guarantees we see current PP slate, not stale dataset
+        items = _fetch_fresh_cs2_run()
+        if not items:
+            # Fallback: last stored run if fresh scrape fails
+            logger.warning("[prizepicks] Fresh run returned nothing — falling back to last run")
+            items = _fetch_last_run_cs2() or []
+        _CACHE    = {"items": items}
         _CACHE_TS = now
 
     if player_name:

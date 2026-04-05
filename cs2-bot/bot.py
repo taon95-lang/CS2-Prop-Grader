@@ -1773,14 +1773,17 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         )
         return
 
-    # ── fetch slate (uses last successful Apify run — near-instant) ─────────
+    # ── fetch slate (always fresh scrape, cached 15 min) ─────────────────────
     _slate_label = (
         f"CS2 {stat_filter} Props" if stat_filter else "CS2 Lines"
     )
     status_msg = await ctx.send(
         embed=discord.Embed(
             title=f"📡 Fetching PrizePicks {_slate_label}…",
-            description="Reading latest data from Apify…",
+            description=(
+                "Running a live scrape of PrizePicks — this takes ~60s to pull fresh data.\n"
+                "Subsequent commands within 15 minutes reuse this result instantly."
+            ),
             color=0x7289DA,
         )
     )
