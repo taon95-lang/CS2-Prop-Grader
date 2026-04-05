@@ -1866,7 +1866,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             title=f"⚙️ Grading {n} {_grade_label}{'s' if n != 1 else ''}…",
             description=(
                 f"Found **{n}** {_grade_label.lower()}{'s' if n != 1 else ''} on the slate.\n"
-                f"Full detail cards stream in as each player finishes (~30s each)."
+                f"Grading one at a time — detail cards stream in as each player finishes (~30s each)."
             ),
             color=0x7289DA,
         )
@@ -1875,7 +1875,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
     # ── shared state ─────────────────────────────────────────────────────────
     import time as _t
     _start = _t.monotonic()
-    HARD_TIMEOUT = 3600  # 60 minutes max for entire slate (280 props × ~30s / 5 concurrent ≈ 28 min)
+    HARD_TIMEOUT = 3600  # 60 minutes max — one at a time, ~30s each, 60 props ≈ 30 min
 
     results: list[dict | None] = [None] * n
     completed: list[int] = []           # indices finished so far
@@ -2002,14 +2002,14 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         if pending == 0:
             emb.set_footer(text=f"✅ {len(over_lines)} OVER  ❌ {len(under_lines)} UNDER  ⏸️ {len(pass_lines)} PASS · Strong plays follow · Not financial advice")
         else:
-            emb.set_footer(text=f"{pending} props still in queue · 2 concurrent")
+            emb.set_footer(text=f"{pending} props still in queue · grading one at a time")
         try:
             await status_msg.edit(embed=emb)
         except Exception:
             pass
 
-    # ── grade all props concurrently (semaphore = 2 to avoid HLTV rate limits) ──
-    sem = asyncio.Semaphore(2)
+    # ── grade props one at a time to avoid HLTV rate limits ──────────────────
+    sem = asyncio.Semaphore(1)
 
     async def _grade_one(idx: int, job: dict):
         async with sem:
