@@ -1791,7 +1791,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         )
         return
 
-    # De-duplicate: one grade job per (player_name, stat_type)
+    # De-duplicate: one grade job per (player_name, stat_type) — Kills only
     seen: set = set()
     jobs: list[dict] = []
     for item in raw_items:
@@ -1799,6 +1799,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         stat  = _pp_stat_type(item)
         score = _pp_line_score(item)
         if not pname or score is None:
+            continue
+        if stat == "HS":          # skip headshot props — grade Kills only
             continue
         key = (pname.lower(), stat)
         if key in seen:
