@@ -1696,138 +1696,293 @@ async def cmd_lines(ctx, player_arg: str = "", stat_type_arg: str = "Kills"):
 
 
 # ---------------------------------------------------------------------------
-# !pp — PrizePicks live CS2 lines
+# !pp — PrizePicks live CS2 lines + auto-grade entire slate
 # ---------------------------------------------------------------------------
+
+def _pp_stat_type(item: dict) -> str:
+    """Map a PrizePicks item to our internal stat_type string."""
+    raw = (item.get("stat_display_name") or item.get("stat_type") or "").lower()
+    if "headshot" in raw:
+        return "HS"
+    return "Kills"
+
+
+def _pp_line_score(item: dict) -> float | None:
+    """Extract the numeric line from a PrizePicks item."""
+    val = item.get("line_score") or item.get("line")
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pp_game_time(item: dict) -> str:
+    """Return a short human-readable game start time string."""
+    gstart = item.get("game_start") or ""
+    if not gstart:
+        return ""
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(gstart)
+        return dt.strftime("%b %d  %H:%M UTC")
+    except Exception:
+        return gstart[:16]
+
+
+def _decision_icon(decision: str) -> str:
+    return {"OVER": "✅", "UNDER": "❌", "PASS": "⏸️"}.get(decision, "❓")
+
 
 @bot.command(name="pp")
 async def cmd_pp(ctx, *, player_arg: str = ""):
     """
-    Usage:
-      !pp               — show all live CS2 props on PrizePicks
-      !pp <Player>      — show lines for a specific player
-      !pp refresh       — force-refresh the PrizePicks cache
+    !pp               — fetch all live CS2 PrizePicks props and grade every one
+    !pp <Player>      — grade that player's live PrizePicks line
+    !pp refresh       — force-refresh the PrizePicks cache
     """
     arg = player_arg.strip()
 
+    # ── refresh shortcut ────────────────────────────────────────────────────
     if arg.lower() == "refresh":
         pp_invalidate()
         await ctx.send(
             embed=discord.Embed(
                 title="🔄 Cache Cleared",
-                description="PrizePicks line cache refreshed. Next `!pp` call will pull fresh data.",
+                description="PrizePicks cache cleared — next `!pp` pulls fresh data from Apify.",
                 color=0x7289DA,
             )
         )
         return
 
+    # ── fetch slate ─────────────────────────────────────────────────────────
     status_msg = await ctx.send(
         embed=discord.Embed(
             title="📡 Fetching PrizePicks CS2 Lines…",
-            description="Pulling live data from PrizePicks via Apify…",
+            description="Pulling live slate from Apify…",
             color=0x7289DA,
         )
     )
 
     try:
-        if arg:
-            items = await asyncio.to_thread(get_cs2_lines, arg)
-            title_suffix = f" — {arg}"
-        else:
-            items = await asyncio.to_thread(get_all_cs2_props)
-            title_suffix = " — All CS2 Props"
-
-        if not items:
-            no_data_desc = (
-                f"No CS2 props found for **{arg}**.\n"
-                f"Check spelling or try without a name to see all available lines."
-            ) if arg else (
-                "No CS2/CSGO props are live on PrizePicks right now.\n"
-                "Props are usually posted a few hours before matches start."
-            )
-            await status_msg.edit(
-                embed=discord.Embed(
-                    title="📭 No Lines Found",
-                    description=no_data_desc,
-                    color=0xFFDC00,
-                )
-            )
-            return
-
-        # Group by player → list of prop lines
-        from collections import defaultdict
-        by_player: dict[str, list] = defaultdict(list)
-        for item in items:
-            pn = item.get("player_name") or "Unknown"
-            by_player[pn].append(item)
-
-        embed = discord.Embed(
-            title=f"🎮 PrizePicks CS2 Lines{title_suffix}",
-            color=0x00C2FF,
-        )
-
-        player_count = 0
-        for pname, props in list(by_player.items())[:15]:  # cap at 15 players per embed
-            lines_parts = []
-            for p in props:
-                stat  = p.get("stat_display_name") or p.get("stat_type") or "—"
-                score = p.get("line_score") or p.get("line") or "—"
-                ptype = p.get("projection_type_name") or ""
-                ptype_str = f" _(_{ptype}_)_" if ptype and ptype != "Single Stat" else ""
-                lines_parts.append(f"**{stat}:** `{score}`{ptype_str}")
-
-            # Game info from first prop
-            first = props[0]
-            home     = first.get("home_team_name") or first.get("home_team") or "?"
-            away     = first.get("away_team_name") or first.get("away_team") or "?"
-            team     = first.get("player_team_name") or first.get("player_team") or "?"
-            gstart   = first.get("game_start") or ""
-            position = first.get("player_position") or ""
-
-            # Format game time nicely (strip timezone fluff)
-            time_str = ""
-            if gstart:
-                # ISO format: 2026-04-05T18:30:00.000-04:00
-                try:
-                    from datetime import datetime, timezone, timedelta
-                    dt = datetime.fromisoformat(gstart)
-                    time_str = dt.strftime("%b %d %H:%M UTC") if dt.tzinfo else gstart[:16]
-                except Exception:
-                    time_str = gstart[:16]
-
-            meta_parts = [f"{away} @ {home}"]
-            if time_str:
-                meta_parts.append(time_str)
-            if team:
-                meta_parts.append(f"Team: {team}")
-            if position:
-                meta_parts.append(f"Pos: {position}")
-
-            field_val = "\n".join(lines_parts) + f"\n_{' · '.join(meta_parts)}_"
-            embed.add_field(name=f"👤 {pname}", value=field_val, inline=False)
-            player_count += 1
-
-        if len(by_player) > 15:
-            embed.add_field(
-                name="…",
-                value=f"_{len(by_player) - 15} more players not shown. Use `!pp <Name>` to filter._",
-                inline=False,
-            )
-
-        embed.set_footer(
-            text=f"PrizePicks · {len(items)} prop(s) · "
-                 "Use !grade <Player> <Line> to analyse a prop · Data via Apify"
-        )
-        await status_msg.edit(embed=embed)
-
+        raw_items = await asyncio.to_thread(get_cs2_lines, arg if arg else None)
     except Exception as exc:
-        logger.exception(f"[pp] Error: {exc}")
+        logger.exception(f"[pp] Apify fetch failed: {exc}")
         await status_msg.edit(
             embed=discord.Embed(
-                title="❌ PrizePicks Error",
-                description=f"Failed to fetch lines: `{str(exc)[:200]}`",
+                title="❌ Fetch Failed",
+                description=f"Could not pull PrizePicks data: `{str(exc)[:200]}`",
                 color=0xFF4136,
             )
         )
+        return
+
+    if not raw_items:
+        desc = (
+            f"No CS2 props found for **{arg}**. Check spelling or run `!pp` for all lines."
+            if arg else
+            "No CS2/CSGO props are live on PrizePicks right now.\n"
+            "Props are usually posted a few hours before matches start."
+        )
+        await status_msg.edit(
+            embed=discord.Embed(title="📭 No Lines Found", description=desc, color=0xFFDC00)
+        )
+        return
+
+    # De-duplicate: one grade job per (player_name, stat_type)
+    seen: set = set()
+    jobs: list[dict] = []
+    for item in raw_items:
+        pname = (item.get("player_name") or "").strip()
+        stat  = _pp_stat_type(item)
+        score = _pp_line_score(item)
+        if not pname or score is None:
+            continue
+        key = (pname.lower(), stat)
+        if key in seen:
+            continue
+        seen.add(key)
+        jobs.append({"player": pname, "stat": stat, "line": score, "item": item})
+
+    if not jobs:
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="📭 No Gradeable Props",
+                description="Props found but none had parseable player names or line scores.",
+                color=0xFFDC00,
+            )
+        )
+        return
+
+    n = len(jobs)
+    await status_msg.edit(
+        embed=discord.Embed(
+            title=f"⚙️ Grading {n} CS2 Prop{'s' if n != 1 else ''}…",
+            description=(
+                f"Running HLTV analysis + Monte Carlo for all {n} props.\n"
+                f"_(Grading concurrently — est. {15 + n * 5}–{30 + n * 8}s)_"
+            ),
+            color=0x7289DA,
+        )
+    )
+
+    # ── grade all props concurrently (semaphore = 3 to avoid HLTV bans) ────
+    sem = asyncio.Semaphore(3)
+    results: list[dict | None] = [None] * n
+    done_count = 0
+
+    async def _grade_one(idx: int, job: dict):
+        nonlocal done_count
+        async with sem:
+            try:
+                res = await asyncio.to_thread(
+                    _analyze_player, job["player"], job["line"], job["stat"], None
+                )
+                results[idx] = res
+            except Exception as exc:
+                logger.warning(f"[pp] Grade failed for {job['player']}: {exc}")
+                results[idx] = {"error": str(exc)}
+            finally:
+                done_count += 1
+
+    tasks = [asyncio.create_task(_grade_one(i, j)) for i, j in enumerate(jobs)]
+
+    # Update status every 8s while grading
+    async def _progress_updater():
+        while not all(t.done() for t in tasks):
+            await asyncio.sleep(8)
+            try:
+                await status_msg.edit(
+                    embed=discord.Embed(
+                        title=f"⚙️ Grading {n} CS2 Props…",
+                        description=(
+                            f"✅ {done_count}/{n} graded so far…\n"
+                            f"_(Still working — hang tight)_"
+                        ),
+                        color=0x7289DA,
+                    )
+                )
+            except Exception:
+                pass
+
+    await asyncio.gather(_progress_updater(), *tasks)
+
+    # ── build summary embed ──────────────────────────────────────────────────
+    OVER_COLOR  = 0x2ECC40
+    UNDER_COLOR = 0xFF4136
+    PASS_COLOR  = 0xFFDC00
+    MIX_COLOR   = 0x00C2FF
+
+    over_rows:  list[str] = []
+    under_rows: list[str] = []
+    pass_rows:  list[str] = []
+    error_rows: list[str] = []
+    strong_embeds: list[discord.Embed] = []
+
+    for idx, job in enumerate(jobs):
+        res = results[idx]
+        item = job["item"]
+
+        if res is None or "error" in res:
+            error_rows.append(f"⚠️ **{job['player']}** — analysis failed")
+            continue
+
+        decision   = res.get("decision", "PASS")
+        over_p     = res.get("over_prob",  50)
+        grade_str  = res.get("grade", "?/10")
+        pkg        = res.get("grade_pkg") or {}
+        confidence = pkg.get("confidence", res.get("confidence_score", 50))
+
+        # Game context
+        home  = item.get("home_team_name") or item.get("home_team") or "?"
+        away  = item.get("away_team_name") or item.get("away_team") or "?"
+        gtime = _pp_game_time(item)
+        matchup = f"{away} @ {home}"
+
+        icon = _decision_icon(decision)
+        row = (
+            f"{icon} **{job['player']}** · `{job['line']} {job['stat']}`\n"
+            f"  OVER {over_p}% · Grade {grade_str} · Conf {confidence}/100\n"
+            f"  __{matchup}__" + (f"  ·  {gtime}" if gtime else "")
+        )
+
+        if decision == "OVER":
+            over_rows.append(row)
+        elif decision == "UNDER":
+            under_rows.append(row)
+        else:
+            pass_rows.append(row)
+
+        # Collect detailed embeds for strong directional plays
+        grade_num = 0
+        try:
+            grade_num = int(str(grade_str).split("/")[0])
+        except (ValueError, TypeError):
+            pass
+        if decision in ("OVER", "UNDER") and grade_num >= 6:
+            try:
+                detail_embed = build_result_embed(job["player"], job["line"], job["stat"], res)
+                strong_embeds.append(detail_embed)
+            except Exception:
+                pass
+
+    # Determine overall slate colour
+    if over_rows and not under_rows:
+        slate_color = OVER_COLOR
+    elif under_rows and not over_rows:
+        slate_color = UNDER_COLOR
+    elif not over_rows and not under_rows:
+        slate_color = PASS_COLOR
+    else:
+        slate_color = MIX_COLOR
+
+    summary = discord.Embed(
+        title=f"🎮 PrizePicks CS2 Slate — {n} Prop{'s' if n != 1 else ''} Graded",
+        color=slate_color,
+    )
+
+    if over_rows:
+        summary.add_field(
+            name=f"✅ OVER ({len(over_rows)})",
+            value="\n\n".join(over_rows),
+            inline=False,
+        )
+    if under_rows:
+        summary.add_field(
+            name=f"❌ UNDER ({len(under_rows)})",
+            value="\n\n".join(under_rows),
+            inline=False,
+        )
+    if pass_rows:
+        summary.add_field(
+            name=f"⏸️ PASS ({len(pass_rows)})",
+            value="\n\n".join(pass_rows),
+            inline=False,
+        )
+    if error_rows:
+        summary.add_field(
+            name="⚠️ Errors",
+            value="\n".join(error_rows),
+            inline=False,
+        )
+
+    summary.set_footer(
+        text=(
+            f"Elite CS2 Prop Grader · PrizePicks slate · "
+            f"{'Detailed embeds below for strong plays · ' if strong_embeds else ''}"
+            "Not financial advice"
+        )
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    await ctx.send(embed=summary)
+
+    # Send detailed embeds for grade 6+ directional calls
+    for emb in strong_embeds[:6]:   # cap at 6 to avoid spam
+        await ctx.send(embed=emb)
 
 
 # ---------------------------------------------------------------------------
