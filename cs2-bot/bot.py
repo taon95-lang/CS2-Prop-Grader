@@ -96,6 +96,9 @@ _KNOWN_AWPERS: dict[str, float] = {
 # Set at 0.55 so genuine high-HS rifler readings are NOT blocked.
 _AWPER_HS_CAP = 0.55
 
+# Cancellation flag for !ppstop — set True to abort an in-progress !pp run
+_pp_cancel: bool = False
+
 GRADE_EMOJIS = {
     range(1, 4): "🔴",
     range(4, 6): "🟡",
@@ -1751,6 +1754,7 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
     !pp <Player>      — grade that player's live PrizePicks line
     !pp refresh       — force-refresh the PrizePicks cache
     """
+    global _pp_cancel
     arg = player_arg.strip()
 
     # Determine stat filter from the command alias used
@@ -2008,11 +2012,24 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         except Exception:
             pass
 
+    # Reset cancel flag for this run
+    _pp_cancel = False
+
     # ── grade props one at a time to avoid HLTV rate limits ──────────────────
     sem = asyncio.Semaphore(1)
 
     async def _grade_one(idx: int, job: dict):
+        if _pp_cancel:
+            results[idx] = {"error": "cancelled"}
+            completed.append(idx)
+            live_rows[idx] = f"⛔ **{job['player']}** — stopped"
+            return
         async with sem:
+            if _pp_cancel:
+                results[idx] = {"error": "cancelled"}
+                completed.append(idx)
+                live_rows[idx] = f"⛔ **{job['player']}** — stopped"
+                return
             # Show "grading…" immediately when this slot starts
             live_rows[idx] = _fmt_row(idx, job, None)
             await _update_scoreboard()
@@ -2113,6 +2130,27 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)}){_sfx}", under_rec, 0xFF4136):
                 await ctx.send(embed=emb)
 
+
+
+# ---------------------------------------------------------------------------
+# !ppstop — cancel an in-progress !pp grading run
+# ---------------------------------------------------------------------------
+
+@bot.command(name="ppstop")
+async def cmd_ppstop(ctx):
+    """Stop the currently running !pp grading run after the current player finishes."""
+    global _pp_cancel
+    _pp_cancel = True
+    await ctx.send(
+        embed=discord.Embed(
+            title="⛔ Grading Stopped",
+            description=(
+                "The current `!pp` run will stop after the player being graded right now finishes.\n"
+                "Run `!pp` again to start a fresh grading session."
+            ),
+            color=0xFF4136,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
