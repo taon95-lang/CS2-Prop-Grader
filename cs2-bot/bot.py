@@ -1865,23 +1865,97 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         )
 
     async def _update_scoreboard():
-        """Rebuild and edit the status message with all current results."""
-        done = len(completed)
+        """
+        Rebuild and edit the status embed.
+        For large slates (>20 props) shows a compact dashboard to stay
+        under Discord's 4096-char description limit.
+        """
+        done    = len(completed)
         pending = n - done
-        rows_text = "\n\n".join(
-            live_rows.get(i, f"⏳ **{jobs[i]['player']}** — queued…")
-            for i in range(n)
-        )
-        color = 0x7289DA if pending > 0 else 0x2ECC40
+        color   = 0x7289DA if pending > 0 else 0x2ECC40
+
+        # Tally results so far
+        over_lines, under_lines, pass_lines, err_lines = [], [], [], []
+        active_lines = []   # currently grading (in semaphore)
+        for i in range(n):
+            if i not in live_rows:
+                continue
+            row = live_rows[i]
+            res = results[i]
+            if res is None:
+                # Currently being graded (semaphore acquired)
+                active_lines.append(f"⏳ **{jobs[i]['player']}** `{jobs[i]['line']} {jobs[i]['stat']}`")
+            elif "error" in res:
+                err_lines.append(f"⚠️ **{jobs[i]['player']}**")
+            else:
+                dec = res.get("decision", "PASS")
+                over_p    = res.get("over_prob", 50)
+                grade_str = res.get("grade", "?/10")
+                pkg       = res.get("grade_pkg") or {}
+                conf      = pkg.get("confidence", res.get("confidence_score", 50))
+                icon      = _decision_icon(dec)
+                entry     = f"{icon} **{jobs[i]['player']}** · `{jobs[i]['line']} {jobs[i]['stat']}` · OVER {over_p}% · {grade_str} · {conf}/100"
+                if dec == "OVER":
+                    over_lines.append(entry)
+                elif dec == "UNDER":
+                    under_lines.append(entry)
+                else:
+                    pass_lines.append(entry)
+
+        # Build compact embed for large slates, full list for small ones
+        if n <= 20:
+            # Small slate: show every row
+            rows_text = "\n\n".join(
+                live_rows.get(i, f"⏳ **{jobs[i]['player']}** — queued…")
+                for i in range(n)
+            )
+            desc = rows_text or "Starting…"
+        else:
+            # Large slate: dashboard view
+            parts = []
+            parts.append(
+                f"**Progress:** {done}/{n} graded"
+                + (f"  ·  ~{pending * 10}s remaining" if pending > 0 else "  ·  All done!")
+            )
+            parts.append(
+                f"✅ OVER: **{len(over_lines)}**  ·  "
+                f"❌ UNDER: **{len(under_lines)}**  ·  "
+                f"⏸️ PASS: **{len(pass_lines)}**"
+                + (f"  ·  ⚠️ Errors: {len(err_lines)}" if err_lines else "")
+            )
+            if active_lines:
+                parts.append("**Currently grading:**\n" + "\n".join(active_lines[:3]))
+
+            # Show last 8 completed results
+            recent_done = [i for i in reversed(completed[-8:])]
+            if recent_done:
+                recent_rows = []
+                for i in recent_done:
+                    res = results[i]
+                    if res and "error" not in res:
+                        dec       = res.get("decision", "PASS")
+                        over_p    = res.get("over_prob", 50)
+                        grade_str = res.get("grade", "?/10")
+                        icon      = _decision_icon(dec)
+                        recent_rows.append(
+                            f"{icon} **{jobs[i]['player']}** `{jobs[i]['line']} {jobs[i]['stat']}` "
+                            f"OVER {over_p}% · {grade_str}"
+                        )
+                    else:
+                        recent_rows.append(f"⚠️ **{jobs[i]['player']}** — failed")
+                parts.append("**Recent results:**\n" + "\n".join(recent_rows))
+
+            desc = "\n\n".join(parts)
+
         emb = discord.Embed(
-            title=f"⚙️ Grading slate — {done}/{n} done" + (" ✅" if pending == 0 else "…"),
-            description=rows_text or "Starting…",
+            title=f"⚙️ Grading {n} CS2 props — {done}/{n} done" + (" ✅" if pending == 0 else "…"),
+            description=desc[:4000],   # hard cap for safety
             color=color,
         )
         if pending == 0:
-            emb.set_footer(text="All done · Strong plays below · Not financial advice")
+            emb.set_footer(text=f"✅ {len(over_lines)} OVER  ❌ {len(under_lines)} UNDER  ⏸️ {len(pass_lines)} PASS · Strong plays follow · Not financial advice")
         else:
-            emb.set_footer(text=f"{pending} prop{'s' if pending != 1 else ''} still grading…")
+            emb.set_footer(text=f"{pending} props still in queue · semaphore=3 concurrent")
         try:
             await status_msg.edit(embed=emb)
         except Exception:
@@ -1953,8 +2027,51 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
     # ── final scoreboard update ──────────────────────────────────────────────
     await _update_scoreboard()
 
+    # ── for large slates, send a full recap so nothing gets lost ─────────────
+    if n > 20:
+        over_rec, under_rec, pass_rec, err_rec = [], [], [], []
+        for i, job in enumerate(jobs):
+            res = results[i]
+            if not res:
+                continue
+            if "error" in res:
+                err_rec.append(f"⚠️ **{job['player']}**")
+                continue
+            dec       = res.get("decision", "PASS")
+            over_p    = res.get("over_prob", 50)
+            grade_str = res.get("grade", "?/10")
+            icon      = _decision_icon(dec)
+            entry     = f"{icon} **{job['player']}** `{job['line']} {job['stat']}` · OVER {over_p}% · {grade_str}"
+            if dec == "OVER":
+                over_rec.append(entry)
+            elif dec == "UNDER":
+                under_rec.append(entry)
+            else:
+                pass_rec.append(entry)
+
+        def _chunk_embed(title: str, lines: list, color: int):
+            """Split a list of lines into ≤4000-char embeds."""
+            embeds, buf = [], []
+            for line in lines:
+                candidate = "\n".join(buf + [line])
+                if len(candidate) > 3800:
+                    embeds.append(discord.Embed(title=title, description="\n".join(buf), color=color))
+                    buf = [line]
+                else:
+                    buf.append(line)
+            if buf:
+                embeds.append(discord.Embed(title=title, description="\n".join(buf), color=color))
+            return embeds
+
+        if over_rec:
+            for emb in _chunk_embed(f"✅ OVER Calls ({len(over_rec)})", over_rec, 0x2ECC40):
+                await ctx.send(embed=emb)
+        if under_rec:
+            for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)})", under_rec, 0xFF4136):
+                await ctx.send(embed=emb)
+
     # ── send detailed embeds for strong plays ────────────────────────────────
-    for emb in strong_embeds[:6]:   # cap at 6 to avoid spam
+    for emb in strong_embeds[:12]:   # cap at 12 detail cards
         await ctx.send(embed=emb)
 
 
