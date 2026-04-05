@@ -1886,15 +1886,29 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
             f"(avg of {len(hs_pct_samples)} match overviews)"
         )
     else:
-        # Role-aware HS% default (from Liquipedia role detection)
-        if _liq_role == 'awper':
-            recent_hs_pct = 0.25
-            logger.info(f"[hs_pct] AWPer default 25% for {player_slug} (Liquipedia role)")
-        elif _liq_role == 'igl':
-            recent_hs_pct = 0.38
-            logger.info(f"[hs_pct] IGL default 38% for {player_slug} (Liquipedia role)")
-        else:
-            recent_hs_pct = None   # bot.py will apply _KNOWN_AWPERS table fallback
+        # Priority 1: bo3.gg public API — real career HS% (always accessible, no HLTV block)
+        try:
+            from bo3_scraper import get_career_hs_pct as _bo3_career_hs
+            _bo3_val = _bo3_career_hs(player_slug)
+            if _bo3_val is not None:
+                recent_hs_pct = _bo3_val
+                logger.info(
+                    f"[hs_pct] bo3.gg career HS% for {player_slug}: "
+                    f"{round(_bo3_val * 100, 1)}%"
+                )
+            else:
+                raise ValueError("bo3.gg returned None")
+        except Exception as _bo3_err:
+            logger.info(f"[hs_pct] bo3.gg lookup failed ({_bo3_err}) — using role default")
+            # Priority 2: Role-aware defaults (from Liquipedia role detection)
+            if _liq_role == 'awper':
+                recent_hs_pct = 0.25
+                logger.info(f"[hs_pct] AWPer default 25% for {player_slug} (Liquipedia role)")
+            elif _liq_role == 'igl':
+                recent_hs_pct = 0.38
+                logger.info(f"[hs_pct] IGL default 38% for {player_slug} (Liquipedia role)")
+            else:
+                recent_hs_pct = None   # bot.py will apply _KNOWN_AWPERS table fallback
 
     # Build country string from bo3.gg context (supplements HLTV data)
     _country = None

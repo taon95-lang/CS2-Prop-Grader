@@ -508,18 +508,25 @@ def _analyze_player(
                 )
                 logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
 
-        # Priority 2: career HS% from their HLTV profile page (separate request)
+        # Priority 2: career HS% from bo3.gg public API (always accessible)
+        # HLTV player profile pages don't expose HS% in their HTML, so the
+        # previous get_player_hs_pct() call always returned None.  bo3.gg's
+        # public accuracy API is a reliable replacement.
         if hs_rate is None:
-            _pid   = info.get("player_id")
             _pslug = info.get("player_slug")
-            if _pid and _pslug:
+            if _pslug:
                 try:
-                    profile_rate = get_player_hs_pct(_pid, _pslug)
+                    from bo3_scraper import get_career_hs_pct as _bo3_career_hs_bot
+                    profile_rate = _bo3_career_hs_bot(_pslug)
                     if profile_rate is not None:
                         hs_rate     = profile_rate
-                        hs_rate_src = f"career profile ({round(profile_rate * 100)}%)"
+                        hs_rate_src = f"bo3.gg career avg ({round(profile_rate * 100)}%)"
+                        logger.info(
+                            f"[hs_scale] bo3.gg career HS% for {_pslug}: "
+                            f"{round(profile_rate * 100, 1)}%"
+                        )
                 except Exception as _e:
-                    logger.warning(f"HS% profile scrape failed ({type(_e).__name__}): {_e}")
+                    logger.warning(f"bo3.gg HS% lookup failed ({type(_e).__name__}): {_e}")
 
     if stat_type == "HS":
         # --- Known-rate override ---
