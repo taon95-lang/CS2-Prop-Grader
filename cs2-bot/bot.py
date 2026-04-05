@@ -1748,17 +1748,17 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         await ctx.send(
             embed=discord.Embed(
                 title="🔄 Cache Cleared",
-                description="PrizePicks cache cleared — next `!pp` pulls fresh data from Apify.",
+                description="PrizePicks cache cleared — next `!pp` pulls fresh data.",
                 color=0x7289DA,
             )
         )
         return
 
-    # ── fetch slate ─────────────────────────────────────────────────────────
+    # ── fetch slate (uses last successful Apify run — near-instant) ─────────
     status_msg = await ctx.send(
         embed=discord.Embed(
             title="📡 Fetching PrizePicks CS2 Lines…",
-            description="Pulling live slate from Apify…",
+            description="Reading latest data from Apify…",
             color=0x7289DA,
         )
     )
@@ -1781,7 +1781,8 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             f"No CS2 props found for **{arg}**. Check spelling or run `!pp` for all lines."
             if arg else
             "No CS2/CSGO props are live on PrizePicks right now.\n"
-            "Props are usually posted a few hours before matches start."
+            "Props are usually posted a few hours before matches start.\n"
+            "Run `!pp refresh` then try again if you think there should be lines."
         )
         await status_msg.edit(
             embed=discord.Embed(title="📭 No Lines Found", description=desc, color=0xFFDC00)
@@ -1818,169 +1819,139 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         embed=discord.Embed(
             title=f"⚙️ Grading {n} CS2 Prop{'s' if n != 1 else ''}…",
             description=(
-                f"Running HLTV analysis + Monte Carlo for all {n} props.\n"
-                f"_(Grading concurrently — est. {15 + n * 5}–{30 + n * 8}s)_"
+                f"Found **{n}** prop{'s' if n != 1 else ''} on the slate.\n"
+                f"Results stream in as each player finishes (~30s each).\n"
+                f"_Strong plays (grade 6+) get full detail embeds automatically._"
             ),
             color=0x7289DA,
         )
     )
 
+    # ── shared state ─────────────────────────────────────────────────────────
+    import time as _t
+    _start = _t.monotonic()
+    HARD_TIMEOUT = 240   # 4 minutes max for entire slate
+
+    results: list[dict | None] = [None] * n
+    completed: list[int] = []           # indices finished so far
+    strong_embeds: list[discord.Embed] = []
+
+    # Live scoreboard lines: index → formatted row string
+    live_rows: dict[int, str] = {}
+
+    def _fmt_row(idx: int, job: dict, res: dict | None) -> str:
+        """Build a one-line summary for the running scoreboard."""
+        if res is None:
+            return f"⏳ **{job['player']}** `{job['line']} {job['stat']}` — grading…"
+        if "error" in res:
+            return f"⚠️ **{job['player']}** — failed"
+        decision   = res.get("decision", "PASS")
+        over_p     = res.get("over_prob", 50)
+        grade_str  = res.get("grade", "?/10")
+        pkg        = res.get("grade_pkg") or {}
+        conf       = pkg.get("confidence", res.get("confidence_score", 50))
+        icon       = _decision_icon(decision)
+        item       = job["item"]
+        home       = item.get("home_team_name") or item.get("home_team") or "?"
+        away       = item.get("away_team_name") or item.get("away_team") or "?"
+        gtime      = _pp_game_time(item)
+        match_str  = f"{away} @ {home}" + (f" · {gtime}" if gtime else "")
+        return (
+            f"{icon} **{job['player']}** · `{job['line']} {job['stat']}`\n"
+            f"  OVER {over_p}% · Grade {grade_str} · Conf {conf}/100\n"
+            f"  _{match_str}_"
+        )
+
+    async def _update_scoreboard():
+        """Rebuild and edit the status message with all current results."""
+        done = len(completed)
+        pending = n - done
+        rows_text = "\n\n".join(
+            live_rows.get(i, f"⏳ **{jobs[i]['player']}** — queued…")
+            for i in range(n)
+        )
+        color = 0x7289DA if pending > 0 else 0x2ECC40
+        emb = discord.Embed(
+            title=f"⚙️ Grading slate — {done}/{n} done" + (" ✅" if pending == 0 else "…"),
+            description=rows_text or "Starting…",
+            color=color,
+        )
+        if pending == 0:
+            emb.set_footer(text="All done · Strong plays below · Not financial advice")
+        else:
+            emb.set_footer(text=f"{pending} prop{'s' if pending != 1 else ''} still grading…")
+        try:
+            await status_msg.edit(embed=emb)
+        except Exception:
+            pass
+
     # ── grade all props concurrently (semaphore = 3 to avoid HLTV bans) ────
     sem = asyncio.Semaphore(3)
-    results: list[dict | None] = [None] * n
-    done_count = 0
 
     async def _grade_one(idx: int, job: dict):
-        nonlocal done_count
         async with sem:
+            # Show "grading…" immediately when this slot starts
+            live_rows[idx] = _fmt_row(idx, job, None)
+            await _update_scoreboard()
             try:
-                res = await asyncio.to_thread(
-                    _analyze_player, job["player"], job["line"], job["stat"], None
+                elapsed = _t.monotonic() - _start
+                remaining = max(10, HARD_TIMEOUT - int(elapsed) - 5)
+                res = await asyncio.wait_for(
+                    asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], None),
+                    timeout=remaining,
                 )
                 results[idx] = res
+            except asyncio.TimeoutError:
+                logger.warning(f"[pp] Timed out grading {job['player']}")
+                results[idx] = {"error": "timed out"}
             except Exception as exc:
                 logger.warning(f"[pp] Grade failed for {job['player']}: {exc}")
                 results[idx] = {"error": str(exc)}
-            finally:
-                done_count += 1
+
+        completed.append(idx)
+        res = results[idx]
+        live_rows[idx] = _fmt_row(idx, job, res)
+
+        # Build and stash strong detail embed immediately
+        if res and "error" not in res:
+            decision  = res.get("decision", "PASS")
+            grade_str = res.get("grade", "?/10")
+            grade_num = 0
+            try:
+                grade_num = int(str(grade_str).split("/")[0])
+            except (ValueError, TypeError):
+                pass
+            if decision in ("OVER", "UNDER") and grade_num >= 6:
+                try:
+                    strong_embeds.append(
+                        build_result_embed(job["player"], job["line"], job["stat"], res)
+                    )
+                except Exception:
+                    pass
+
+        await _update_scoreboard()
 
     tasks = [asyncio.create_task(_grade_one(i, j)) for i, j in enumerate(jobs)]
 
-    # Update status every 8s while grading
-    async def _progress_updater():
-        while not all(t.done() for t in tasks):
-            await asyncio.sleep(8)
-            try:
-                await status_msg.edit(
-                    embed=discord.Embed(
-                        title=f"⚙️ Grading {n} CS2 Props…",
-                        description=(
-                            f"✅ {done_count}/{n} graded so far…\n"
-                            f"_(Still working — hang tight)_"
-                        ),
-                        color=0x7289DA,
-                    )
-                )
-            except Exception:
-                pass
+    # Hard-timeout watchdog
+    async def _watchdog():
+        await asyncio.sleep(HARD_TIMEOUT)
+        for t in tasks:
+            if not t.done():
+                t.cancel()
 
-    await asyncio.gather(_progress_updater(), *tasks)
-
-    # ── build summary embed ──────────────────────────────────────────────────
-    OVER_COLOR  = 0x2ECC40
-    UNDER_COLOR = 0xFF4136
-    PASS_COLOR  = 0xFFDC00
-    MIX_COLOR   = 0x00C2FF
-
-    over_rows:  list[str] = []
-    under_rows: list[str] = []
-    pass_rows:  list[str] = []
-    error_rows: list[str] = []
-    strong_embeds: list[discord.Embed] = []
-
-    for idx, job in enumerate(jobs):
-        res = results[idx]
-        item = job["item"]
-
-        if res is None or "error" in res:
-            error_rows.append(f"⚠️ **{job['player']}** — analysis failed")
-            continue
-
-        decision   = res.get("decision", "PASS")
-        over_p     = res.get("over_prob",  50)
-        grade_str  = res.get("grade", "?/10")
-        pkg        = res.get("grade_pkg") or {}
-        confidence = pkg.get("confidence", res.get("confidence_score", 50))
-
-        # Game context
-        home  = item.get("home_team_name") or item.get("home_team") or "?"
-        away  = item.get("away_team_name") or item.get("away_team") or "?"
-        gtime = _pp_game_time(item)
-        matchup = f"{away} @ {home}"
-
-        icon = _decision_icon(decision)
-        row = (
-            f"{icon} **{job['player']}** · `{job['line']} {job['stat']}`\n"
-            f"  OVER {over_p}% · Grade {grade_str} · Conf {confidence}/100\n"
-            f"  __{matchup}__" + (f"  ·  {gtime}" if gtime else "")
-        )
-
-        if decision == "OVER":
-            over_rows.append(row)
-        elif decision == "UNDER":
-            under_rows.append(row)
-        else:
-            pass_rows.append(row)
-
-        # Collect detailed embeds for strong directional plays
-        grade_num = 0
-        try:
-            grade_num = int(str(grade_str).split("/")[0])
-        except (ValueError, TypeError):
-            pass
-        if decision in ("OVER", "UNDER") and grade_num >= 6:
-            try:
-                detail_embed = build_result_embed(job["player"], job["line"], job["stat"], res)
-                strong_embeds.append(detail_embed)
-            except Exception:
-                pass
-
-    # Determine overall slate colour
-    if over_rows and not under_rows:
-        slate_color = OVER_COLOR
-    elif under_rows and not over_rows:
-        slate_color = UNDER_COLOR
-    elif not over_rows and not under_rows:
-        slate_color = PASS_COLOR
-    else:
-        slate_color = MIX_COLOR
-
-    summary = discord.Embed(
-        title=f"🎮 PrizePicks CS2 Slate — {n} Prop{'s' if n != 1 else ''} Graded",
-        color=slate_color,
-    )
-
-    if over_rows:
-        summary.add_field(
-            name=f"✅ OVER ({len(over_rows)})",
-            value="\n\n".join(over_rows),
-            inline=False,
-        )
-    if under_rows:
-        summary.add_field(
-            name=f"❌ UNDER ({len(under_rows)})",
-            value="\n\n".join(under_rows),
-            inline=False,
-        )
-    if pass_rows:
-        summary.add_field(
-            name=f"⏸️ PASS ({len(pass_rows)})",
-            value="\n\n".join(pass_rows),
-            inline=False,
-        )
-    if error_rows:
-        summary.add_field(
-            name="⚠️ Errors",
-            value="\n".join(error_rows),
-            inline=False,
-        )
-
-    summary.set_footer(
-        text=(
-            f"Elite CS2 Prop Grader · PrizePicks slate · "
-            f"{'Detailed embeds below for strong plays · ' if strong_embeds else ''}"
-            "Not financial advice"
-        )
-    )
-
+    watchdog = asyncio.create_task(_watchdog())
     try:
-        await status_msg.delete()
-    except Exception:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
         pass
+    finally:
+        watchdog.cancel()
 
-    await ctx.send(embed=summary)
+    # ── final scoreboard update ──────────────────────────────────────────────
+    await _update_scoreboard()
 
-    # Send detailed embeds for grade 6+ directional calls
+    # ── send detailed embeds for strong plays ────────────────────────────────
     for emb in strong_embeds[:6]:   # cap at 6 to avoid spam
         await ctx.send(embed=emb)
 
