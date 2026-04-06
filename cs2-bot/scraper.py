@@ -1790,7 +1790,37 @@ def get_player_info(player_name: str, stat_type: str = "Kills", team_hint: str |
     logger.info(f"[scraper] Looking up '{player_name}' for {stat_type} (team_hint={team_hint!r})")
 
     # Step 1: Find player (HLTV search + cache)
-    result = search_player_v2(player_name, team_hint=team_hint)
+    # When we know the player's team (from PrizePicks), resolve via the team's
+    # HLTV roster page first — it's unambiguous and avoids same-nickname collisions
+    # (e.g. two different players both nicknamed "lucky" on different teams).
+    result = None
+    if team_hint:
+        key = _normalise_player_key(player_name)
+        if key in _PLAYER_ID_CACHE:
+            # Already cached — let search_player_v2 verify it's the right team
+            result = search_player_v2(player_name, team_hint=team_hint)
+        else:
+            # Not cached — go straight to the team roster (most reliable)
+            result = resolve_player_from_roster(player_name, team_hint)
+            if result:
+                pid, slug, display = result
+                # Populate cache so subsequent calls are instant
+                cache_key = _normalise_player_key(player_name)
+                _PLAYER_ID_CACHE[cache_key] = result
+                slug_key = _normalise_player_key(slug)
+                if slug_key != cache_key:
+                    _PLAYER_ID_CACHE[slug_key] = result
+                logger.info(f"[scraper] Roster resolved and cached: {display} (id={pid})")
+            else:
+                # Roster lookup failed — fall back to name search with team hint
+                logger.warning(
+                    f"[scraper] Roster lookup failed for '{player_name}' on '{team_hint}' "
+                    f"— falling back to name search"
+                )
+                result = search_player_v2(player_name, team_hint=team_hint)
+    else:
+        result = search_player_v2(player_name)
+
     if not result:
         raise RuntimeError(f"Player '{player_name}' not found on HLTV")
     player_id, player_slug, display_name = result
@@ -2386,6 +2416,66 @@ def search_team(name: str) -> tuple | None:
     display = best_slug.replace('-', ' ').title()
     logger.info(f"[search_team] '{name}' (query='{query}') → team_id={best_tid} slug={best_slug} score={best_score}")
     return best_tid, best_slug, display
+
+
+def resolve_player_from_roster(player_name: str, team_name: str) -> tuple[str, str, str] | None:
+    """
+    Resolve a player's HLTV (player_id, player_slug, display_name) by fetching
+    the team's HLTV roster page and finding the player there.
+
+    This is the most reliable disambiguation method: instead of searching for the
+    player by name (which can match wrong players with the same nickname), we go
+    to the team page and read the roster directly.
+
+    Returns (player_id, player_slug, display_name) or None on failure.
+    """
+    # Step 1 — find the team on HLTV
+    team_result = search_team(team_name)
+    if not team_result:
+        logger.warning(f"[roster] Team '{team_name}' not found on HLTV")
+        return None
+    team_id, team_slug, _ = team_result
+
+    # Step 2 — fetch the team page
+    url = f"{HLTV_BASE}/team/{team_id}/{team_slug}"
+    html = _fetch(url)
+    if not html:
+        logger.warning(f"[roster] Could not fetch team page for {team_slug}")
+        return None
+
+    # Step 3 — extract all /player/{id}/{slug} links from the page
+    player_links = re.findall(r'/player/(\d+)/([\w-]+)', html)
+    seen: dict[str, str] = {}
+    for pid, slug in player_links:
+        if pid not in seen:
+            seen[pid] = slug
+
+    if not seen:
+        logger.warning(f"[roster] No player links found on team page for {team_slug}")
+        return None
+
+    # Step 4 — find the best-matching player from the roster
+    name_norm = re.sub(r'[^a-z0-9]', '', player_name.lower())
+    best_pid, best_slug, best_score = None, None, -1
+    for pid, slug in seen.items():
+        score = _score_player_match(player_name, pid, slug)
+        if score > best_score:
+            best_score = score
+            best_pid, best_slug = pid, slug
+
+    if not best_pid or best_score <= 0:
+        logger.warning(
+            f"[roster] No roster match for '{player_name}' on {team_slug} "
+            f"(best slug='{best_slug}', score={best_score})"
+        )
+        return None
+
+    display = best_slug.replace('-', ' ').title()
+    logger.info(
+        f"[roster] Resolved '{player_name}' on '{team_name}' → "
+        f"id={best_pid} slug={best_slug} score={best_score}"
+    )
+    return best_pid, best_slug, display
 
 
 def _get_match_kills_for_team(html: str, team_id: str) -> list[int]:
