@@ -768,22 +768,49 @@ def _score_player_match(name: str, pid: str, slug: str) -> int:
     return sum(1 for a, b in zip(name_lower, slug_lower) if a == b)
 
 
-def search_player_v2(name: str) -> tuple[str, str, str] | None:
+def search_player_v2(name: str, team_hint: str | None = None) -> tuple[str, str, str] | None:
     """
-    Improved player search with cache-first lookup.
+    Improved player search with cache-first lookup and optional team disambiguation.
 
     Order:
       1. Check _PLAYER_ID_CACHE (instant — no HTTP).
-      2. Fall through to HLTV /search?query={name} with retry.
+         If team_hint given, verify the cached player is actually on that team;
+         invalidate and re-search if not.
+      2. Fall through to HLTV /search?query={name}.
+         If team_hint given, iterate candidates by score and pick the first whose
+         current team matches the hint (via get_player_team).
       3. On success, populate cache so future lookups skip the search.
     """
     key = _normalise_player_key(name)
+    team_hint_norm = re.sub(r'[^a-z0-9]', '', team_hint.lower()) if team_hint else None
 
-    # 1. Cache hit — skip search entirely
+    # 1. Cache hit
     if key in _PLAYER_ID_CACHE:
         pid, slug, display = _PLAYER_ID_CACHE[key]
-        logger.info(f"[search] Cache hit: {display} (id={pid}, slug={slug})")
-        return pid, slug, display
+        if not team_hint_norm:
+            logger.info(f"[search] Cache hit: {display} (id={pid}, slug={slug})")
+            return pid, slug, display
+        # Verify the cached player is on the hinted team
+        team_result = get_player_team(pid, slug)
+        if team_result:
+            _, tslug = team_result
+            tslug_norm = re.sub(r'[^a-z0-9]', '', tslug.lower())
+            if team_hint_norm in tslug_norm or tslug_norm in team_hint_norm:
+                logger.info(
+                    f"[search] Cache hit (team verified): {display} "
+                    f"(id={pid}) → team={tslug}"
+                )
+                return pid, slug, display
+            else:
+                logger.warning(
+                    f"[search] Cache entry for {name!r} is on team '{tslug}' "
+                    f"but hint='{team_hint}' — invalidating and re-searching"
+                )
+                del _PLAYER_ID_CACHE[key]
+        else:
+            # Can't verify — trust the cache
+            logger.warning(f"[search] Team verification failed for cached {name!r} — trusting cache")
+            return pid, slug, display
 
     # 2. Live HLTV search
     url = f"{HLTV_BASE}/search?query={name}"
@@ -796,20 +823,53 @@ def search_player_v2(name: str) -> tuple[str, str, str] | None:
         logger.warning(f"[search] No player found for '{name}'")
         return None
 
-    seen = {}
+    seen: dict[str, str] = {}
     for pid, slug in matches:
         if pid not in seen:
             seen[pid] = slug
 
-    best_pid, best_slug, best_score = None, None, -1
-    for pid, slug in seen.items():
-        score = _score_player_match(name, pid, slug)
-        if score > best_score:
-            best_score = score
-            best_pid, best_slug = pid, slug
+    # Score all candidates by name similarity, best first
+    scored = sorted(
+        [(pid, slug, _score_player_match(name, pid, slug)) for pid, slug in seen.items()],
+        key=lambda x: x[2],
+        reverse=True,
+    )
 
-    if not best_pid:
+    if not scored:
         return None
+
+    best_pid, best_slug, best_score = None, None, -1
+
+    if team_hint_norm:
+        # Try each candidate in score order; take first whose team matches hint
+        for pid, slug, score in scored:
+            team_result = get_player_team(pid, slug)
+            if team_result:
+                _, tslug = team_result
+                tslug_norm = re.sub(r'[^a-z0-9]', '', tslug.lower())
+                if team_hint_norm in tslug_norm or tslug_norm in team_hint_norm:
+                    best_pid, best_slug, best_score = pid, slug, score
+                    logger.info(
+                        f"[search] Team-matched: slug={slug} team={tslug} "
+                        f"for hint='{team_hint}'"
+                    )
+                    break
+                else:
+                    logger.debug(
+                        f"[search] Team mismatch: slug={slug} team={tslug} "
+                        f"≠ hint='{team_hint}'"
+                    )
+            else:
+                logger.debug(f"[search] Could not verify team for pid={pid} slug={slug}")
+        if best_pid is None:
+            # No team match found — fall back to best name match
+            logger.warning(
+                f"[search] No team match for hint='{team_hint}' — "
+                f"falling back to best name match"
+            )
+            best_pid, best_slug, best_score = scored[0]
+    else:
+        best_pid, best_slug, best_score = scored[0]
 
     display = best_slug.replace("-", " ").title()
     logger.info(f"[search] Best match: {display} (id={best_pid}, slug={best_slug}, score={best_score})")
@@ -1710,7 +1770,7 @@ def _parse_hs_kills(html: str, player_slug: str) -> dict | None:
 # Main entry point — used by the bot
 # ---------------------------------------------------------------------------
 
-def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
+def get_player_info(player_name: str, stat_type: str = "Kills", team_hint: str | None = None) -> dict:
     """
     Main scraper entry. Returns:
       {
@@ -1723,11 +1783,14 @@ def get_player_info(player_name: str, stat_type: str = "Kills") -> dict:
         'source':        'HLTV Live',
       }
     Or raises RuntimeError if the player cannot be found.
+
+    team_hint: if provided (e.g. "3dmax"), used to disambiguate when multiple
+               HLTV players share the same nickname (e.g. two players called "lucky").
     """
-    logger.info(f"[scraper] Looking up '{player_name}' for {stat_type}")
+    logger.info(f"[scraper] Looking up '{player_name}' for {stat_type} (team_hint={team_hint!r})")
 
     # Step 1: Find player (HLTV search + cache)
-    result = search_player_v2(player_name)
+    result = search_player_v2(player_name, team_hint=team_hint)
     if not result:
         raise RuntimeError(f"Player '{player_name}' not found on HLTV")
     player_id, player_slug, display_name = result

@@ -418,6 +418,7 @@ def _analyze_player(
     line: float,
     stat_type: str,
     opponent: str | None = None,
+    player_team_hint: str | None = None,
 ) -> dict:
     """
     All blocking I/O and CPU work lives here.
@@ -439,7 +440,7 @@ def _analyze_player(
     info: dict = {}  # populated on success; used for player_id / match_ids in step 3
 
     try:
-        info = get_player_info(player_name, stat_type=internal_stat)
+        info = get_player_info(player_name, stat_type=internal_stat, team_hint=player_team_hint)
         map_stats = info["map_kills"]
         data_source = info["source"]
         logger.info(
@@ -2090,8 +2091,16 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             live_rows[idx] = _fmt_row(idx, job, None)
             await _update_scoreboard()
             try:
+                _team_hint = (job.get("item") or {}).get("player_team") or None
                 res = await asyncio.wait_for(
-                    asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], job.get("opponent")),
+                    asyncio.to_thread(
+                        _analyze_player,
+                        job["player"],
+                        job["line"],
+                        job["stat"],
+                        job.get("opponent"),
+                        _team_hint,
+                    ),
                     timeout=90,   # fixed 90s per player — independent of slate size
                 )
                 results[idx] = res
