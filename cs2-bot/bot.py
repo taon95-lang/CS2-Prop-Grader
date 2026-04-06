@@ -99,6 +99,12 @@ _AWPER_HS_CAP = 0.55
 # Cancellation flag for !ppstop — set True to abort an in-progress !pp run
 _pp_cancel: bool = False
 
+# Session-level rank_gap cache keyed by opponent name (lower).  Reset at the
+# start of every !pp run.  Ensures all players on the same team facing the same
+# opponent receive the SAME stomp/OT match context even if individual HLTV rank
+# fetches are flaky.
+_session_rank_gap: dict[str, int | None] = {}
+
 GRADE_EMOJIS = {
     range(1, 4): "🔴",
     range(4, 6): "🟡",
@@ -669,6 +675,24 @@ def _analyze_player(
         mp = deep.get("map_pool", {})
         likely_maps = mp.get("most_played", []) or []
         rank_gap = deep.get("rank_info", {}).get("rank_gap")
+
+    # ── Session rank_gap cache — keeps stomp/OT flags consistent for teammates ─
+    # Key on the opponent name so all players facing the same team get the same
+    # rank_gap even when individual HLTV rank fetches are flaky.
+    _opp_key = (opponent or "").strip().lower()
+    if _opp_key:
+        if rank_gap is not None:
+            # Successful lookup — store for later teammates
+            _session_rank_gap[_opp_key] = rank_gap
+            logger.debug(f"[rank_gap_cache] stored rank_gap={rank_gap} for '{_opp_key}'")
+        elif _opp_key in _session_rank_gap:
+            # Failed lookup — reuse earlier result from a teammate
+            rank_gap = _session_rank_gap[_opp_key]
+            logger.info(
+                f"[rank_gap_cache] rank_gap fetch failed for '{_opp_key}' — "
+                f"reusing cached {rank_gap} from earlier teammate grade"
+            )
+
     _period_kpr = (period_stats or {}).get("kpr")
     try:
         sim_result = run_simulation(
@@ -2043,8 +2067,9 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         except Exception:
             pass
 
-    # Reset cancel flag for this run
+    # Reset cancel flag and session rank_gap cache for this run
     _pp_cancel = False
+    _session_rank_gap.clear()
 
     # ── grade props one at a time to avoid HLTV rate limits ──────────────────
     sem = asyncio.Semaphore(1)

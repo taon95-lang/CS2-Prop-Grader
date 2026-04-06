@@ -207,8 +207,9 @@ def get_team_rank(team_id: str, team_slug: str) -> int | None:
         logger.info(f"[rank] Team page gave no rank for {team_slug} — trying ranking page")
         rank = _rank_from_ranking_page(team_id)
 
-    _RANK_CACHE[team_id] = (time.time(), rank)
     if rank is not None:
+        # Only cache successful lookups — None results should always be retried
+        _RANK_CACHE[team_id] = (time.time(), rank)
         logger.info(f"[rank] {team_slug} → #{rank}")
     else:
         logger.warning(f"[rank] could not determine rank for {team_slug} (team_id={team_id})")
