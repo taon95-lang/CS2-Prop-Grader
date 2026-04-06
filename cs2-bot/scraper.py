@@ -768,49 +768,85 @@ def _score_player_match(name: str, pid: str, slug: str) -> int:
     return sum(1 for a, b in zip(name_lower, slug_lower) if a == b)
 
 
-def search_player_v2(name: str, team_hint: str | None = None) -> tuple[str, str, str] | None:
+def _player_has_opponent_in_history(pid: str, opponent_norm: str) -> bool:
     """
-    Improved player search with cache-first lookup and optional team disambiguation.
+    Fetch /results?player={pid} and return True if any match slug contains
+    the normalised opponent name.  Used to validate we have the right player
+    when the team name isn't known but the opponent is.
+    """
+    html = _fetch(f"{HLTV_BASE}/results?player={pid}")
+    if not html:
+        return False
+    slugs = re.findall(r'/matches/\d+/([\w-]+)', html)
+    return any(opponent_norm in re.sub(r'[^a-z0-9]', '', s) for s in slugs)
+
+
+def search_player_v2(
+    name: str,
+    team_hint: str | None = None,
+    opponent_hint: str | None = None,
+) -> tuple[str, str, str] | None:
+    """
+    Improved player search with cache-first lookup and optional disambiguation.
+
+    Disambiguation priority (use whichever hint is available):
+      team_hint    — verify/pick the candidate whose current HLTV team matches.
+      opponent_hint — verify/pick the candidate whose recent match slugs contain
+                      the opponent name.  Useful for !grade where the player's
+                      own team is unknown but the opponent is.
 
     Order:
       1. Check _PLAYER_ID_CACHE (instant — no HTTP).
-         If team_hint given, verify the cached player is actually on that team;
-         invalidate and re-search if not.
+         If a hint given, validate; invalidate and re-search if wrong.
       2. Fall through to HLTV /search?query={name}.
-         If team_hint given, iterate candidates by score and pick the first whose
-         current team matches the hint (via get_player_team).
+         Iterate candidates by name score; pick first that passes hint validation.
       3. On success, populate cache so future lookups skip the search.
     """
     key = _normalise_player_key(name)
     team_hint_norm = re.sub(r'[^a-z0-9]', '', team_hint.lower()) if team_hint else None
+    opp_hint_norm  = re.sub(r'[^a-z0-9]', '', opponent_hint.lower()) if opponent_hint else None
 
     # 1. Cache hit
     if key in _PLAYER_ID_CACHE:
         pid, slug, display = _PLAYER_ID_CACHE[key]
-        if not team_hint_norm:
+        if not team_hint_norm and not opp_hint_norm:
             logger.info(f"[search] Cache hit: {display} (id={pid}, slug={slug})")
             return pid, slug, display
-        # Verify the cached player is on the hinted team
-        team_result = get_player_team(pid, slug)
-        if team_result:
-            _, tslug = team_result
-            tslug_norm = re.sub(r'[^a-z0-9]', '', tslug.lower())
-            if team_hint_norm in tslug_norm or tslug_norm in team_hint_norm:
+        # Validate cached player against whichever hint we have
+        if team_hint_norm:
+            team_result = get_player_team(pid, slug)
+            if team_result:
+                _, tslug = team_result
+                tslug_norm = re.sub(r'[^a-z0-9]', '', tslug.lower())
+                if team_hint_norm in tslug_norm or tslug_norm in team_hint_norm:
+                    logger.info(
+                        f"[search] Cache hit (team verified): {display} "
+                        f"(id={pid}) → team={tslug}"
+                    )
+                    return pid, slug, display
+                else:
+                    logger.warning(
+                        f"[search] Cache entry for {name!r} is on team '{tslug}' "
+                        f"but hint='{team_hint}' — invalidating and re-searching"
+                    )
+                    del _PLAYER_ID_CACHE[key]
+            else:
+                logger.warning(f"[search] Team verification failed for cached {name!r} — trusting cache")
+                return pid, slug, display
+        elif opp_hint_norm:
+            # Validate via match history: does this player have games vs the opponent?
+            if _player_has_opponent_in_history(pid, opp_hint_norm):
                 logger.info(
-                    f"[search] Cache hit (team verified): {display} "
-                    f"(id={pid}) → team={tslug}"
+                    f"[search] Cache hit (opponent verified): {display} "
+                    f"(id={pid}) has matches vs '{opponent_hint}'"
                 )
                 return pid, slug, display
             else:
                 logger.warning(
-                    f"[search] Cache entry for {name!r} is on team '{tslug}' "
-                    f"but hint='{team_hint}' — invalidating and re-searching"
+                    f"[search] Cache entry for {name!r} (id={pid}) has NO matches "
+                    f"vs '{opponent_hint}' — invalidating and re-searching"
                 )
                 del _PLAYER_ID_CACHE[key]
-        else:
-            # Can't verify — trust the cache
-            logger.warning(f"[search] Team verification failed for cached {name!r} — trusting cache")
-            return pid, slug, display
 
     # 2. Live HLTV search
     url = f"{HLTV_BASE}/search?query={name}"
@@ -862,12 +898,34 @@ def search_player_v2(name: str, team_hint: str | None = None) -> tuple[str, str,
             else:
                 logger.debug(f"[search] Could not verify team for pid={pid} slug={slug}")
         if best_pid is None:
-            # No team match found — fall back to best name match
             logger.warning(
                 f"[search] No team match for hint='{team_hint}' — "
                 f"falling back to best name match"
             )
             best_pid, best_slug, best_score = scored[0]
+
+    elif opp_hint_norm:
+        # Try each candidate; pick first whose match history includes the opponent
+        for pid, slug, score in scored:
+            if _player_has_opponent_in_history(pid, opp_hint_norm):
+                best_pid, best_slug, best_score = pid, slug, score
+                logger.info(
+                    f"[search] Opponent-matched: slug={slug} (id={pid}) "
+                    f"has matches vs '{opponent_hint}'"
+                )
+                break
+            else:
+                logger.debug(
+                    f"[search] Opponent miss: slug={slug} (id={pid}) "
+                    f"has NO matches vs '{opponent_hint}'"
+                )
+        if best_pid is None:
+            logger.warning(
+                f"[search] No candidate with matches vs '{opponent_hint}' — "
+                f"falling back to best name match"
+            )
+            best_pid, best_slug, best_score = scored[0]
+
     else:
         best_pid, best_slug, best_score = scored[0]
 
@@ -1770,7 +1828,12 @@ def _parse_hs_kills(html: str, player_slug: str) -> dict | None:
 # Main entry point — used by the bot
 # ---------------------------------------------------------------------------
 
-def get_player_info(player_name: str, stat_type: str = "Kills", team_hint: str | None = None) -> dict:
+def get_player_info(
+    player_name: str,
+    stat_type: str = "Kills",
+    team_hint: str | None = None,
+    opponent_hint: str | None = None,
+) -> dict:
     """
     Main scraper entry. Returns:
       {
@@ -1784,10 +1847,15 @@ def get_player_info(player_name: str, stat_type: str = "Kills", team_hint: str |
       }
     Or raises RuntimeError if the player cannot be found.
 
-    team_hint: if provided (e.g. "3dmax"), used to disambiguate when multiple
-               HLTV players share the same nickname (e.g. two players called "lucky").
+    team_hint:     if provided (e.g. "3dmax"), disambiguate via team roster lookup.
+    opponent_hint: if provided (e.g. "b8"), disambiguate by checking whether each
+                   candidate's recent match history includes games vs the opponent.
+                   Useful for !grade where only the opponent is known.
     """
-    logger.info(f"[scraper] Looking up '{player_name}' for {stat_type} (team_hint={team_hint!r})")
+    logger.info(
+        f"[scraper] Looking up '{player_name}' for {stat_type} "
+        f"(team_hint={team_hint!r}, opponent_hint={opponent_hint!r})"
+    )
 
     # Step 1: Find player (HLTV search + cache)
     # When we know the player's team (from PrizePicks), resolve via the team's
@@ -1819,7 +1887,8 @@ def get_player_info(player_name: str, stat_type: str = "Kills", team_hint: str |
                 )
                 result = search_player_v2(player_name, team_hint=team_hint)
     else:
-        result = search_player_v2(player_name)
+        # No team_hint — use opponent-based disambiguation if available
+        result = search_player_v2(player_name, opponent_hint=opponent_hint)
 
     if not result:
         raise RuntimeError(f"Player '{player_name}' not found on HLTV")

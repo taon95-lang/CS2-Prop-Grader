@@ -440,7 +440,12 @@ def _analyze_player(
     info: dict = {}  # populated on success; used for player_id / match_ids in step 3
 
     try:
-        info = get_player_info(player_name, stat_type=internal_stat, team_hint=player_team_hint)
+        info = get_player_info(
+            player_name,
+            stat_type=internal_stat,
+            team_hint=player_team_hint,
+            opponent_hint=opponent if not player_team_hint else None,
+        )
         map_stats = info["map_kills"]
         data_source = info["source"]
         logger.info(
