@@ -377,11 +377,16 @@ def _fetch_opponent_profile(team_id: str, n_matches: int = 10) -> dict:
 # 5. Head-to-head — player's kills in last N matches vs this opponent
 # ---------------------------------------------------------------------------
 
+_H2H_MIN_YEAR = 2026  # Only count H2H matches from this year or later
+_H2H_MIN_TS   = 1735689600  # Unix timestamp for 2026-01-01 00:00:00 UTC
+
+
 def get_h2h_stats(
     player_id: str,
     player_slug: str,
     player_match_ids: list[tuple[str, str]],
     opponent_team_id: str,
+    opponent_slug: str = "",
     n: int = 3,
     line: float = 0.0,
 ) -> list[dict]:
@@ -391,24 +396,62 @@ def get_h2h_stats(
       [{'match_id': ..., 'kills_by_map': [22, 18], 'total_kills': 40,
         'avg_kills': 20.0, 'cleared': True, 'maps_found': 2}, ...]
 
+    Opponent matching uses the match URL slug (e.g. 'b8-vs-3dmax-event') which
+    is far more reliable than scanning page HTML for a team ID that may appear
+    in sidebar/bracket links for teams NOT playing in the match.
+
+    Only 2026+ matches are counted (controlled by _H2H_MIN_YEAR).
     Only records with data from BOTH maps 1 and 2 are counted as valid for the
     cleared check.  Partial records (only 1 map parsed) are flagged but still
     included so callers can at least display them.
     """
     results: list[dict] = []
+    opp_slug_norm = re.sub(r'[^a-z0-9]', '', opponent_slug.lower()) if opponent_slug else ""
 
     for match_id, slug in player_match_ids:
         if len(results) >= n:
             break
+
+        # ── 1. Primary opponent filter — check match URL slug ─────────────────
+        # The slug looks like "b8-vs-3dmax-parken-challenger-championship-season-3".
+        # We normalise both sides and check for containment so minor slug
+        # variations (extra hyphens, numbers) don't cause false negatives.
+        slug_norm = re.sub(r'[^a-z0-9]', '', slug.lower())
+        if opp_slug_norm and opp_slug_norm not in slug_norm:
+            logger.debug(f"[h2h] skip {match_id} — opponent slug '{opp_slug_norm}' not in match slug")
+            continue
+
         time.sleep(0.35)
         _match_url = f"{HLTV_BASE}/matches/{match_id}/{slug}"
         page_html = _fetch(_match_url)
         if not page_html:
             continue
 
-        # Quick check — does this match involve the opponent?
-        if f'/team/{opponent_team_id}/' not in page_html:
+        # ── 2. Secondary opponent guard — team ID in scoreboard section only ──
+        # Find the team-header / match-header block (first ~8 KB) and check the
+        # team ID there to avoid false positives from sidebar tournament brackets.
+        _header_chunk = page_html[:8000]
+        if f'/team/{opponent_team_id}/' not in _header_chunk:
+            logger.debug(
+                f"[h2h] skip {match_id} — team id {opponent_team_id} not in page header "
+                f"(slug matched but team not in scoreboard)"
+            )
             continue
+
+        # ── 3. Year filter — only use 2026+ H2H data ─────────────────────────
+        _unix_m = re.search(r'data-unix=["\'](\d{10,13})["\']', page_html)
+        if _unix_m:
+            _ts = int(_unix_m.group(1))
+            if _ts > 9_999_999_999:   # milliseconds → seconds
+                _ts //= 1000
+            if _ts < _H2H_MIN_TS:
+                logger.info(
+                    f"[h2h] skip {match_id} — match is before {_H2H_MIN_YEAR} "
+                    f"(ts={_ts})"
+                )
+                continue
+        else:
+            logger.debug(f"[h2h] {match_id} — no timestamp found, assuming recent")
 
         parsed = _parse_match_kills(page_html, player_slug, _match_url)
         if not parsed or not parsed.get('maps'):
@@ -435,7 +478,7 @@ def get_h2h_stats(
         }
         results.append(rec)
         logger.info(
-            f"[h2h] match {match_id}: kills={kills_by_map} total={total_kills} "
+            f"[h2h] match {match_id} ({slug}): kills={kills_by_map} total={total_kills} "
             f"maps={maps_found} cleared={cleared} (line={line})"
         )
 
@@ -512,7 +555,10 @@ def run_deep_analysis(
     player_rank = get_team_rank(player_team_id, player_team_slug) if player_team_id and player_team_slug else None
 
     # ── H2H ─────────────────────────────────────────────────────────────────
-    h2h = get_h2h_stats(player_id, player_slug, player_match_ids, opp_id, n=3, line=line)
+    h2h = get_h2h_stats(
+        player_id, player_slug, player_match_ids, opp_id,
+        opponent_slug=opp_slug, n=3, line=line,
+    )
     out['h2h'] = h2h
 
     # ════════════════════════════════════════════════════════════════════════
