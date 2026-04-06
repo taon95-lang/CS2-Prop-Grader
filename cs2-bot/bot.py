@@ -1338,6 +1338,26 @@ def build_result_embed(
             partial_tag = f"  ⚠️ {partial} match(es) incomplete data" if partial else ""
             opp_val += f"\n_H2H vs line: {cleared}/{of_n} cleared{bonus_tag}{partial_tag}_"
 
+        # Per-match H2H kill totals
+        if h2h_records:
+            _line_val = result.get("line", 0)
+            _h2h_rows = []
+            for _i, _rec in enumerate(h2h_records, 1):
+                _total  = _rec.get("total_kills") or sum(_rec.get("kills_by_map", []))
+                _maps   = _rec.get("kills_by_map", [])
+                _map_str = " + ".join(str(k) for k in _maps)
+                if _rec.get("partial"):
+                    _icon = "⚠️"
+                    _note = " (partial)"
+                elif _rec.get("cleared"):
+                    _icon = "✅"
+                    _note = ""
+                else:
+                    _icon = "❌"
+                    _note = ""
+                _h2h_rows.append(f"{_icon} H2H {_i}: **{_total}** kills ({_map_str}){_note}")
+            opp_val += "\n" + "\n".join(_h2h_rows)
+
         if result.get("stomp_high_line_warning"):
             opp_val += "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
 
