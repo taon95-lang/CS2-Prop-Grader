@@ -17,6 +17,7 @@ from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
 from grades_db import save_grade, record_result, get_entries_for_date, get_pending_entries, get_recent_entries, date_label
+from scraper import get_actual_result as _scraper_get_actual_result
 from prizepicks import get_cs2_lines, get_player_line, get_all_cs2_props, invalidate_cache as pp_invalidate
 from grade_engine import (
     compute_grade_package,
@@ -338,7 +339,12 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         logger.info(f"[grade] ✅ Grade delivered — {player_name} {line_val} {stat_type} "
                     f"over={result.get('over_prob')}% grade={result.get('grade')}")
         try:
-            save_grade(player_name, line_val, stat_type, result, opponent=opponent)
+            _baseline_mid = None
+            _mk = result.get('map_kills') or []
+            if _mk:
+                _baseline_mid = str(_mk[0].get('match_id', ''))
+            save_grade(player_name, line_val, stat_type, result, opponent=opponent,
+                       baseline_match_id=_baseline_mid)
         except Exception as _ge:
             logger.warning(f"[grade] grades_db save failed: {_ge}")
     except Exception as e:
@@ -2488,6 +2494,100 @@ async def cmd_results(ctx, when: str = "today"):
         return
 
     await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# !fetchresults — auto-scrape HLTV to fill in pending outcomes
+# ---------------------------------------------------------------------------
+
+@bot.command(name="fetchresults")
+async def cmd_fetchresults(ctx, when: str = "today"):
+    """
+    Auto-fetch actual match results from HLTV for all pending graded props.
+    Usage: !fetchresults [today|yesterday]
+    """
+    from datetime import datetime, timezone, timedelta
+
+    today_str     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+    target_date   = yesterday_str if when.lower() in ("yesterday", "yday") else today_str
+
+    pending = [e for e in get_entries_for_date(target_date) if e.get("outcome") is None]
+
+    if not pending:
+        await ctx.send(embed=discord.Embed(
+            title="✅ Nothing Pending",
+            description=f"No unresolved grades for {target_date}.",
+            color=0x2ECC71,
+        ))
+        return
+
+    msg = await ctx.send(embed=discord.Embed(
+        title="🔍 Fetching Results…",
+        description=f"Checking HLTV for {len(pending)} pending grade(s). This may take a minute…",
+        color=0xF39C12,
+    ))
+
+    found = 0
+    skipped = 0
+    not_ready = 0
+    rows = []
+
+    for entry in pending:
+        player  = entry["player"]
+        display = entry.get("display") or player
+        opp     = entry.get("opponent") or ""
+        line    = entry["line"]
+        grade_ts = entry["ts"]
+        baseline = entry.get("baseline_match_id")
+
+        try:
+            res = await asyncio.to_thread(
+                _scraper_get_actual_result,
+                player, opp, grade_ts, line, baseline
+            )
+        except Exception as ex:
+            logger.warning(f"[fetchresults] Error for {player}: {ex}")
+            res = None
+
+        if res is None:
+            not_ready += 1
+            rows.append(f"⏳ **{display}** {line} — not played / not finished yet")
+            continue
+
+        actual  = res["actual"]
+        outcome = res["outcome"]
+        rec     = (entry.get("recommendation") or "?").upper()
+
+        updated = record_result(player, actual, entry_id=entry["id"])
+        if updated:
+            found += 1
+            if rec == "PASS":
+                icon = "—"
+            elif (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under"):
+                icon = "✅"
+            else:
+                icon = "❌"
+            rows.append(f"{icon} **{display}** {line} | Bot: **{rec}** | Actual: **{actual}** ({outcome.upper()})")
+        else:
+            skipped += 1
+            rows.append(f"⚠️ **{display}** — could not update record")
+
+    summary = f"Updated **{found}** result(s). {not_ready} not ready yet."
+    if skipped:
+        summary += f" {skipped} skipped."
+
+    embed = discord.Embed(
+        title=f"📊 Auto-Results — {target_date}",
+        description="\n".join(rows) if rows else "Nothing to show.",
+        color=0x2ECC71 if found else 0x95A5A6,
+    )
+    embed.set_footer(text=summary)
+
+    try:
+        await msg.edit(embed=embed)
+    except Exception:
+        await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------

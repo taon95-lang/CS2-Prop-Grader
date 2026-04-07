@@ -2704,3 +2704,144 @@ def get_matchup_adjustment(opponent_name: str) -> dict | None:
         'avg_allowed': def_stats['avg_kills_allowed'],
         'sample_maps': def_stats['sample_maps'],
     }
+
+
+# ---------------------------------------------------------------------------
+# Auto-result fetcher — find a player's actual kills after a match is played
+# ---------------------------------------------------------------------------
+
+def _get_fresh_match_ids_with_timestamps(
+    player_id: str,
+    max_matches: int = 15,
+) -> list:
+    """
+    Fetch /results?player={id} fresh (bypasses 3-hour cache) and return
+    [(match_id, slug, unix_sec_or_None), ...] ordered newest-first.
+    unix_sec is extracted from HLTV's data-unix attribute (ms -> sec).
+    """
+    url = f"{HLTV_BASE}/results?player={player_id}"
+    html = _fetch(url)
+    if not html:
+        return []
+
+    soup = BeautifulSoup(html, 'html.parser')
+    results = []
+    seen_ids = set()
+
+    for con in soup.find_all(class_=re.compile(r'result-con')):
+        link = con.find('a', href=re.compile(r'/matches/\d+/'))
+        if not link:
+            continue
+        m = re.search(r'/matches/(\d+)/([a-z0-9-]+)', link.get('href', ''))
+        if not m:
+            continue
+        mid, slug = m.group(1), m.group(2)
+        if mid in seen_ids or len(mid) < 6:
+            continue
+        seen_ids.add(mid)
+
+        ts_tag = con.find(attrs={'data-unix': True})
+        unix_sec = None
+        if ts_tag:
+            try:
+                unix_sec = int(ts_tag['data-unix']) / 1000
+            except (ValueError, TypeError):
+                pass
+
+        results.append((mid, slug, unix_sec))
+        if len(results) >= max_matches:
+            break
+
+    if not results:
+        for mid, slug in re.findall(r'/matches/(\d+)/([a-z0-9-]+)', html):
+            if mid not in seen_ids and len(mid) >= 6:
+                seen_ids.add(mid)
+                results.append((mid, slug, None))
+                if len(results) >= max_matches:
+                    break
+
+    _MATCH_IDS_CACHE.pop(player_id, None)
+    return results
+
+
+def get_actual_result(
+    player_name: str,
+    opponent: str,
+    grade_ts: float,
+    line: float,
+    baseline_match_id: str | None = None,
+) -> dict | None:
+    """
+    Auto-fetch the actual Maps 1+2 kill total for a pending graded prop.
+
+    Looks for a BO3 match played AFTER grade_ts by:
+      1. Using data-unix timestamps from HLTV results page (preferred), OR
+      2. Comparing match IDs against baseline_match_id (fallback).
+
+    Returns {'actual': float, 'outcome': 'over'|'under', 'match_id': str}
+    or None if no new match found / match not finished yet.
+    """
+    player_result = search_player_v2(player_name, opponent_hint=opponent or None)
+    if not player_result:
+        logger.warning(f"[auto_result] Player not found: {player_name}")
+        return None
+
+    player_id, player_slug, display = player_result
+    logger.info(
+        f"[auto_result] Checking {display} — after ts={grade_ts:.0f}, baseline={baseline_match_id}"
+    )
+
+    matches = _get_fresh_match_ids_with_timestamps(player_id, max_matches=10)
+    if not matches:
+        logger.warning(f"[auto_result] No match IDs for {display}")
+        return None
+
+    for mid, slug, unix_sec in matches:
+        is_new = False
+
+        if unix_sec is not None:
+            is_new = unix_sec > grade_ts
+        elif baseline_match_id:
+            try:
+                is_new = int(mid) > int(baseline_match_id)
+            except (ValueError, TypeError):
+                continue
+        else:
+            continue
+
+        if not is_new:
+            break
+
+        match_url = f"{HLTV_BASE}/matches/{mid}/{slug}"
+        try:
+            html = _fetch(match_url)
+        except Exception as e:
+            logger.warning(f"[auto_result] Fetch error {match_url}: {e}")
+            continue
+
+        if not html:
+            continue
+
+        result = _parse_match_kills(html, player_slug, match_url)
+        if not result:
+            continue
+
+        if result.get('bo_type') != 3:
+            logger.info(f"[auto_result] Match {mid} is BO{result.get('bo_type')} — skipping")
+            continue
+
+        maps = result.get('maps', [])[:2]
+        if len(maps) < 2:
+            logger.info(f"[auto_result] Match {mid} only {len(maps)} maps — may not be finished")
+            return None
+
+        actual = float(sum(m['kills'] for m in maps))
+        outcome = 'over' if actual > line else 'under'
+        logger.info(
+            f"[auto_result] SUCCESS {display}: match {mid} "
+            f"M1={maps[0]['kills']}+M2={maps[1]['kills']}={actual} vs {line} -> {outcome.upper()}"
+        )
+        return {'actual': actual, 'outcome': outcome, 'match_id': mid}
+
+    logger.info(f"[auto_result] No new BO3 match found for {display}")
+    return None

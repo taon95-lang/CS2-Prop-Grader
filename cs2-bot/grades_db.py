@@ -54,6 +54,7 @@ def save_grade(
     stat: str,
     sim_result: dict,
     opponent: str | None = None,
+    baseline_match_id: str | None = None,
 ) -> str:
     """
     Persist a completed grade.  Returns the entry id.
@@ -80,6 +81,7 @@ def save_grade(
         "hist_median":  sim_result.get("hist_median"),
         "actual":       None,
         "outcome":      None,   # "over" | "under" | "push" | null
+        "baseline_match_id": baseline_match_id,
     }
     db["entries"].append(entry)
     _save(db)
