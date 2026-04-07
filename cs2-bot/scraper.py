@@ -2796,21 +2796,34 @@ def get_actual_result(
         logger.warning(f"[auto_result] No match IDs for {display}")
         return None
 
+    checked_no_info = 0   # guard: don't try unlimited matches when flying blind
+
     for mid, slug, unix_sec in matches:
-        is_new = False
 
         if unix_sec is not None:
-            is_new = unix_sec > grade_ts
+            if unix_sec <= grade_ts:
+                break   # newest-first — nothing older will be new
         elif baseline_match_id:
             try:
-                is_new = int(mid) > int(baseline_match_id)
+                if int(mid) <= int(baseline_match_id):
+                    break
             except (ValueError, TypeError):
                 continue
         else:
-            continue
-
-        if not is_new:
-            break
+            # No timestamp AND no baseline — use opponent name in slug as proxy.
+            # HLTV slugs look like "nrg-vs-legacy-pgl-bucharest-2026", so checking
+            # that the opponent token appears confirms this is the graded match.
+            opp_clean = re.sub(r'[^a-z0-9]+', '-', (opponent or '').lower()).strip('-')
+            opp_parts = [p for p in opp_clean.split('-') if len(p) >= 3]
+            slug_match = bool(opp_parts) and any(p in slug for p in opp_parts)
+            if not slug_match:
+                logger.info(
+                    f"[auto_result] {mid} slug='{slug}' — opponent '{opponent}' not matched, skipping"
+                )
+                checked_no_info += 1
+                if checked_no_info >= 5:
+                    break   # don't scan entire history
+                continue
 
         match_url = f"{HLTV_BASE}/matches/{mid}/{slug}"
         try:
