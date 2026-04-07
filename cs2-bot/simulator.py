@@ -435,175 +435,104 @@ def calculate_grade(
     stomp_via_rank: bool = False,
 ) -> tuple:
     """
-    Apply grading scale and decision logic.
+    Evidence-stacking grade engine — v2.
+
+    Four independent signals each vote OVER (+) or UNDER (-) with weights.
+    The weighted consensus score drives the decision.  No single signal
+    can override everything else.  The opponent-quality multiplier is no
+    longer applied to the kill distribution — it is a display signal only.
+
+    Signals and weights
+    ───────────────────
+    S1  Historical hit rate    weight 3   Has the player actually cleared this line?
+    S2  Median vs line gap     weight 2   Is the median structurally above/below?
+    S3  Recent form / trend    weight 2   Is the player running hot or cold right now?
+    S4  Simulation probability weight 1   Does the raw kill distribution confirm?
+
+    Max raw score ≈ 19  (all four signals at maximum in one direction)
+    Typical strong edge: 11–14
+
+    Stomp modifier: if stomp risk detected → total × 0.70
+      Preserves dominant edges (≥ 10 pre-stomp → ≥ 7 post-stomp = action).
+      Kills borderline leans that only squeak past threshold.
+
+    Action threshold: |total| ≥ 7 → OVER / UNDER,  else PASS.
+
     Returns (grade_str, recommendation_str, decision_str).
     """
-    # --- Decision Logic ---
-    # stomp_trap fires either from favorite_prob OR from a rank-based stomp
-    # projection (stomp_via_rank). When it's active the primary OVER/UNDER
-    # paths based on historical data are suppressed — the round-count model
-    # may have artificially moved over_prob away from 50 without historical
-    # backing, so PASS is the safe call.
-    stomp_trap = (favorite_prob >= 0.72 or stomp_via_rank) and stat_type == "Kills"
-    avg_above = hist_avg > line
-    median_above = hist_median > line
-    hot_form  = trend_pct >= 12   # recent 4 maps running 12%+ above average
-    cold_form = trend_pct <= -12  # recent 4 maps running 12%+ below average
-    # Require at least 60% historical clearance for a primary OVER call.
-    # 55% was too loose — barely coin-flip territory was triggering OVERs.
-    strong_hit_rate = hit_rate >= 0.60
-    weak_hit_rate   = hit_rate < 0.35    # UNDER still needs strong evidence
 
-    if avg_above and median_above and strong_hit_rate and not stomp_trap:
+    # ── S1: Historical hit rate (weight 3) ───────────────────────────────────
+    # Most reliable signal — direct measurement: has this player cleared this
+    # exact line in past BO3 series?
+    hr_pct = hit_rate * 100
+    if   hr_pct >= 70:   s1 = 3
+    elif hr_pct >= 62:   s1 = 2
+    elif hr_pct >= 55:   s1 = 1
+    elif hr_pct >= 45:   s1 = 0
+    elif hr_pct >= 38:   s1 = -1
+    elif hr_pct >= 30:   s1 = -2
+    else:                s1 = -3
+
+    # ── S2: Median vs line gap (weight 2) ────────────────────────────────────
+    # Uses raw/unscaled hist_median — the number the player actually produced,
+    # not an opponent-adjusted projection.
+    gap_pct = (hist_median - line) / max(line, 1)
+    if   gap_pct >= 0.12:    s2 = 2
+    elif gap_pct >= 0.04:    s2 = 1
+    elif gap_pct >= -0.04:   s2 = 0
+    elif gap_pct >= -0.12:   s2 = -1
+    else:                    s2 = -2
+
+    # ── S3: Recent trend / form (weight 2) ───────────────────────────────────
+    # trend_pct = (recent 4-map avg – career avg) / career avg × 100
+    if   trend_pct >= 15:   s3 = 2
+    elif trend_pct >=  5:   s3 = 1
+    elif trend_pct >= -5:   s3 = 0
+    elif trend_pct >= -15:  s3 = -1
+    else:                   s3 = -2
+
+    # ── S4: Raw simulation probability (weight 1) ────────────────────────────
+    # Runs on un-inflated historical data — minor confirmation signal.
+    if   over_prob >= 0.68:  s4 = 2
+    elif over_prob >= 0.60:  s4 = 1
+    elif over_prob >= 0.40:  s4 = 0
+    elif over_prob >= 0.32:  s4 = -1
+    else:                    s4 = -2
+
+    # ── Weighted consensus ───────────────────────────────────────────────────
+    raw_total = (s1 * 3) + (s2 * 2) + (s3 * 2) + (s4 * 1)
+
+    # ── Stomp modifier ───────────────────────────────────────────────────────
+    # Stomps shorten maps ~10% (≈21→19 rounds).  A 30% score reduction keeps
+    # dominant historical edges alive while cancelling borderline leans.
+    stomp = (stomp_via_rank or favorite_prob >= 0.72) and stat_type == "Kills"
+    if stomp:
+        total = int(raw_total * 0.70)
+    else:
+        total = raw_total
+
+    # ── Decision ─────────────────────────────────────────────────────────────
+    if total >= 7:
         decision = "OVER"
-    elif not avg_above and not median_above and weak_hit_rate and not hot_form and not stomp_trap:
-        # Don't call UNDER if player is trending hot or if stomp projection
-        # may have artificially depressed over_prob
-        decision = "UNDER"
-    elif stomp_trap and avg_above:
-        # Stomp cuts ~10% of kill opportunities (21→19 rounds).
-        # If hist_median is >18% above the line that cushion still survives —
-        # call OVER. Only force PASS when the historical edge is thin enough
-        # that shorter rounds could realistically erase it.
-        median_edge_pct = (hist_median - line) / max(line, 1) if median_above else 0.0
-        avg_edge_pct    = (hist_avg - line)    / max(line, 1)
-        if median_above and median_edge_pct >= 0.18 and avg_edge_pct >= 0.12:
-            decision = "OVER"
-        else:
-            decision = "PASS"
-    elif stomp_trap and not avg_above and not median_above and weak_hit_rate and not hot_form:
-        # Historical data agrees with UNDER even accounting for stomp context
+    elif total <= -7:
         decision = "UNDER"
     else:
-        # Edge-based decision — lower threshold when trend confirms direction
-        over_threshold  = 0.05 if hot_form  else 0.08
-        under_threshold = 0.05 if cold_form else 0.08
-        if edge > over_threshold:
-            decision = "OVER"
-        elif edge < -under_threshold:
-            # Guard: if the stomp projection drove the edge negative but
-            # historical data (hit_rate, hist_avg) still leans OVER, call
-            # PASS rather than UNDER — the model and history contradict.
-            if stomp_via_rank and avg_above and median_above:
-                decision = "PASS"
-            else:
-                decision = "UNDER"
-        elif hot_form and edge >= 0:
-            # Player on a hot streak and edge is non-negative → lean OVER
-            decision = "OVER"
-        elif cold_form and edge <= 0:
-            # Player on a cold streak and edge is non-positive → lean UNDER
-            decision = "UNDER"
-        elif abs(line - hist_avg) / max(hist_avg, 1) > 0.12:
-            decision = "MISPRICED"
-        else:
-            decision = "PASS"
-
-    # --- Hit rate reality check ---
-    # If the player has historically cleared this line in fewer than 30% of
-    # series, the high simulation mean is being driven by outlier blowup games
-    # inflating the distribution. Never call OVER against that weight of evidence.
-    if decision == "OVER" and hit_rate < 0.30:
         decision = "PASS"
 
-    # --- Probability override: simulation must positively confirm the call ---
-    # Raised from 0.50 → 0.52 for OVER: the simulation must show at least a
-    # slight positive edge, not just "not disagree."  Prevents OVER calls on
-    # 50.x% sim results that are effectively coin-flips.
-    # Mirrored for UNDER: over_prob must be below 0.48 (not just below 0.50).
-    if decision == "OVER" and over_prob < 0.52:
-        decision = "PASS"
-    elif decision == "UNDER" and over_prob > 0.48:
-        decision = "PASS"
-
-    # --- Margin check: thin historical edge needs stronger simulation backing ---
-    # If hist_avg is only marginally above the line (<5% gap), the historical
-    # signal is weak.  Require the simulation to also confirm at >= 56% before
-    # committing to OVER — a thin avg edge + weak sim = PASS.
-    if decision == "OVER" and hist_avg > line:
-        margin_pct = (hist_avg - line) / max(line, 1)
-        if margin_pct < 0.05 and over_prob < 0.56:
-            decision = "PASS"
-
-    # --- Misprice check (from CS2PropGrader avg/median gap logic) ---
-    avg_gap    = hist_avg - line       # positive = avg above line
-    median_gap = hist_median - line    # positive = median above line
-    # "Prop Error" if avg is >6 above line; "Mispriced" if avg±median both >3 off
-    prop_error  = avg_gap > 6 and median_gap > 2
-    mispriced   = (abs(avg_gap) > 3 and abs(median_gap) > 2) or (abs(line - hist_avg) / max(hist_avg, 1) > 0.15)
-
-    # --- Grade Scale (1-10) with rich labels ---
-    edge_abs = abs(edge)
-
-    if edge_abs >= 0.22:
-        grade_num = 10
-        grade_label = "Elite edge"
-    elif edge_abs >= 0.18:
-        grade_num = 9
-        grade_label = "Very strong edge"
-    elif edge_abs >= 0.14:
-        grade_num = 8
-        grade_label = "Strong playable edge"
-    elif edge_abs >= 0.10:
-        grade_num = 7
-        grade_label = "Solid lean"
-    elif edge_abs >= 0.07:
-        grade_num = 6
-        grade_label = "Small edge"
-    elif edge_abs >= 0.05:
-        grade_num = 5
-        grade_label = "Borderline"
-    elif edge_abs >= 0.03:
-        grade_num = 4
-        grade_label = "Marginal"
-    elif edge_abs >= 0.02:
-        grade_num = 3
-        grade_label = "Very thin"
-    elif edge_abs >= 0.01:
-        grade_num = 2
-        grade_label = "Noise level"
+    # ── Grade scale (based on raw signal strength, not stomp-adjusted) ───────
+    abs_r = abs(raw_total)
+    if decision == "PASS":
+        grade_str = "N/A"
+        rec = "⏸️ PASS — Signals too mixed for a confident call"
     else:
-        grade_num = 1
-        grade_label = "No edge"
+        if   abs_r >= 15:   grade_num, edge_label = 10, "Elite edge"
+        elif abs_r >= 12:   grade_num, edge_label = 9,  "Elite edge"
+        elif abs_r >= 10:   grade_num, edge_label = 8,  "Strong edge"
+        elif abs_r >= 8:    grade_num, edge_label = 7,  "Solid lean"
+        else:               grade_num, edge_label = 6,  "Lean"
 
-    # Boost grade when line is clearly mispriced
-    if mispriced and grade_num >= 6:
-        grade_num = min(grade_num + 1, 10)
-    # Extra boost for prop error (wildly off line)
-    if prop_error and grade_num >= 7:
-        grade_num = min(grade_num + 1, 10)
-        grade_label = "Prop Error (Wildly off)"
-
-    # Stability penalty: High Volatility drops grade regardless of edge size.
-    # When a player swings wildly, even a strong simulation is unreliable.
-    if stability_std > 11:
-        grade_num = max(1, grade_num - 2)  # severe boom/bust
-    elif stability_std > 8:
-        grade_num = max(1, grade_num - 1)  # notable volatility
-
-    grade_str = f"{grade_num}/10 ({grade_label})"
-
-    # Recommendation
-    if grade_num >= 8:
-        if decision == "OVER":
-            rec = "STRONG BET — OVER"
-        elif decision == "UNDER":
-            rec = "STRONG BET — UNDER"
-        else:
-            rec = "PASS (conflicting signals)"
-    elif grade_num >= 6:
-        if decision in ("OVER", "UNDER"):
-            rec = f"LEAN {decision} (value play)"
-        else:
-            rec = "SKIP — low edge"
-    elif grade_num >= 4:
-        rec = "MARGINAL — proceed with caution"
-    else:
-        rec = "PASS — insufficient edge"
-
-    if prop_error:
-        rec = "PROP ERROR — line wildly off, investigate before betting"
-    elif mispriced and decision == "MISPRICED":
-        rec = "LINE APPEARS MISPRICED — investigate before betting"
+        grade_str = f"{grade_num}/10 ({edge_label})"
+        sign = "✅" if decision == "OVER" else "❌"
+        rec  = f"{sign} {decision} — {grade_str}"
 
     return grade_str, rec, decision
