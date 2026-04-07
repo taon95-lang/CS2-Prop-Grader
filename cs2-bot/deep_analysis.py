@@ -215,6 +215,64 @@ def get_team_rank(team_id: str, team_slug: str) -> int | None:
         logger.warning(f"[rank] could not determine rank for {team_slug} (team_id={team_id})")
     return rank
 
+
+# Slug-based rank lookup cache (no team_id required — uses ranking page only)
+_SLUG_RANK_CACHE: dict[str, tuple] = {}   # norm_slug → (timestamp, rank | None)
+
+
+def rank_by_team_slug(team_slug: str) -> int | None:
+    """
+    Look up a team's world ranking using only their URL slug (e.g. 'natus-vincere').
+    Uses the cached ranking page — zero extra HTTP requests when the page is warm.
+    Returns None for unranked / tier-2 teams (not on the top-30 page).
+    """
+    slug_norm = re.sub(r'[^a-z0-9]', '', team_slug.lower())
+    if not slug_norm:
+        return None
+
+    cached = _SLUG_RANK_CACHE.get(slug_norm)
+    if cached:
+        ts, rank = cached
+        if time.time() - ts < RANK_TTL:
+            return rank
+
+    html = _fetch_ranking_page()
+    if not html:
+        return None
+
+    rank = None
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        for block in soup.find_all(class_=re.compile(r'ranked-team', re.I)):
+            # Quick pre-filter: skip blocks that can't possibly match
+            block_str = str(block).lower()
+            if slug_norm not in re.sub(r'[^a-z0-9]', '', block_str):
+                continue
+            # Check all team links inside this block
+            for a in block.find_all('a', href=re.compile(r'/team/\d+/', re.I)):
+                href_slug = a.get('href', '').rstrip('/').split('/')[-1]
+                href_norm = re.sub(r'[^a-z0-9]', '', href_slug.lower())
+                # Match if slugs are equal or one contains the other (handles abbreviations)
+                if href_norm == slug_norm or slug_norm in href_norm or href_norm in slug_norm:
+                    pos_tag = block.find(class_=re.compile(r'position', re.I))
+                    if pos_tag:
+                        m = re.search(r'(\d+)', pos_tag.get_text())
+                        if m:
+                            rank = int(m.group(1))
+                            break
+            if rank is not None:
+                break
+    except Exception as e:
+        logger.warning(f"[rank] rank_by_team_slug({team_slug!r}) error: {e}")
+
+    _SLUG_RANK_CACHE[slug_norm] = (time.time(), rank)
+    if rank:
+        logger.info(f"[rank] slug '{team_slug}' → #{rank}")
+    else:
+        logger.debug(f"[rank] slug '{team_slug}' not in ranking page (unranked/tier-2)")
+    return rank
+
+
 # ---------------------------------------------------------------------------
 # 2. Map name extraction from a match page
 # ---------------------------------------------------------------------------

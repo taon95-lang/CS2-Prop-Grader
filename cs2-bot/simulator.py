@@ -19,6 +19,59 @@ def calculate_kpr(map_stats: list) -> float:
     return mean(m["kills"] / m["rounds"] for m in valid)
 
 
+def _opp_quality_weights(map_stats: list, today_opp_rank: int | None) -> list[float]:
+    """
+    Per-map weights based on how closely the historical opponent's rank
+    matches today's opponent's rank.
+
+    Tighter rank proximity → higher weight (those matches are more predictive).
+    Maps with no opp_rank data get a neutral weight of 1.0.
+
+    If today_opp_rank is None (rank unknown), all maps get weight 1.0 (no change).
+    """
+    if today_opp_rank is None:
+        return [1.0] * len(map_stats)
+
+    weights = []
+    any_ranked = False
+    for m in map_stats:
+        hist_rank = m.get('opp_rank')
+        if hist_rank is None:
+            weights.append(1.0)
+            continue
+        any_ranked = True
+        diff = abs(today_opp_rank - hist_rank)
+        if diff <= 10:
+            w = 4.0    # nearly identical quality tier
+        elif diff <= 25:
+            w = 2.5    # similar quality
+        elif diff <= 50:
+            w = 1.0    # baseline — roughly same competitive level
+        elif diff <= 80:
+            w = 0.4    # noticeably different tier
+        else:
+            w = 0.15   # wildly different — discount heavily
+        weights.append(w)
+
+    # If no maps had opp_rank data, weighting is meaningless — return flat
+    if not any_ranked:
+        return [1.0] * len(map_stats)
+    return weights
+
+
+def _weighted_mean_var(values: list, weights: list) -> tuple[float, float]:
+    """Compute reliability-weighted mean and variance for NB distribution fitting."""
+    total_w = sum(weights)
+    if total_w <= 0:
+        return mean(values), statistics.variance(values) if len(values) > 1 else mean(values) * 1.5
+    w_mean = sum(w * v for w, v in zip(weights, values)) / total_w
+    # Reliability-weighted variance (Bessel correction via effective sample size)
+    eff_n = total_w ** 2 / sum(w ** 2 for w in weights)
+    correction = eff_n / max(eff_n - 1, 1)
+    w_var = sum(w * (v - w_mean) ** 2 for w, v in zip(weights, values)) / total_w * correction
+    return w_mean, max(w_var, w_mean * 0.5)  # floor variance to avoid degenerate NB
+
+
 def fit_negative_binomial(values: list):
     """
     Fit a Negative Binomial distribution to a list of kill counts.
@@ -53,13 +106,31 @@ def run_simulation(
     likely_maps: list = None,
     rank_gap: int = None,
     period_kpr: float = None,
+    today_opp_rank: int | None = None,
 ) -> dict:
     """
     Run 100,000 Monte Carlo simulations using Negative Binomial distribution.
     Returns a dict with all computed statistics.
+
+    today_opp_rank: HLTV world rank of today's opponent.  When provided, maps
+    played against similarly-ranked opponents are weighted more heavily in the
+    distribution fit.  Maps vs much stronger/weaker teams are down-weighted so
+    they don't distort the projection for today's specific matchup.
     """
     stat_values = [m["stat_value"] for m in map_stats]
     rounds_per_map = [m["rounds"] for m in map_stats]
+
+    # --- Opponent Quality Weighting ---
+    # Compute per-map reliability weights based on rank proximity to today's opp.
+    _opp_weights = _opp_quality_weights(map_stats, today_opp_rank)
+    _any_weighted = today_opp_rank is not None and any(w != 1.0 for w in _opp_weights)
+    if _any_weighted:
+        _covered = sum(1 for m in map_stats if m.get('opp_rank') is not None)
+        logger.info(
+            f"[sim] Opp quality weighting active — today opp #{today_opp_rank}, "
+            f"{_covered}/{len(map_stats)} maps have historical opp_rank. "
+            f"Weight range: {min(_opp_weights):.2f}–{max(_opp_weights):.2f}"
+        )
 
     if not stat_values:
         return {"error": "No stat data available"}
@@ -138,19 +209,29 @@ def run_simulation(
 
     # --- Per-map KPR ---
     kpr_values: list = []
+    kpr_weights: list = []   # parallel weight list aligned to kpr_values
     map_kpr: dict = {}
-    for m in map_stats:
+    for m, _w in zip(map_stats, _opp_weights):
         r = m["rounds"]
         if r > 0:
             kpr = m["stat_value"] / r
             kpr_values.append(kpr)
+            kpr_weights.append(_w)
             mn = m.get("map_name", "unknown").lower()
             if mn and mn != "unknown":
                 map_kpr.setdefault(mn, []).append(kpr)
 
     # --- Map-Weighted Projection ---
     map_projection_note = "Overall average"
-    avg_kpr = mean(kpr_values) if kpr_values else (mean(stat_values) / 22)
+    if kpr_values:
+        if _any_weighted and any(w != 1.0 for w in kpr_weights):
+            # Opponent-quality weighted KPR average
+            _kpr_total_w = sum(kpr_weights)
+            avg_kpr = sum(k * w for k, w in zip(kpr_values, kpr_weights)) / _kpr_total_w
+        else:
+            avg_kpr = mean(kpr_values)
+    else:
+        avg_kpr = mean(stat_values) / 22
     overall_avg_kpr = avg_kpr  # preserve pre-map-weighted baseline for trend calc
 
     if likely_maps:
@@ -198,7 +279,24 @@ def run_simulation(
     expected_total = blended_kpr * total_projected_rounds
 
     # --- NB Fit + Simulation ---
-    r_param, p_param = fit_negative_binomial(per_map_values)
+    # If opponent quality weighting is active, use weighted mean/variance
+    # to fit the NB distribution so similar-quality historical maps dominate.
+    if _any_weighted:
+        _w_mean, _w_var = _weighted_mean_var(per_map_values, _opp_weights)
+        # Fit NB from weighted moments (method of moments: mu=r(1-p)/p, var=r(1-p)/p^2)
+        if _w_var > _w_mean > 0:
+            _r_w = (_w_mean ** 2) / (_w_var - _w_mean)
+            _p_w = _w_mean / _w_var
+            r_param = max(_r_w, 0.1)
+            p_param = max(min(_p_w, 0.9999), 0.0001)
+        else:
+            r_param, p_param = fit_negative_binomial(per_map_values)
+        logger.info(
+            f"[sim] Weighted NB fit — w_mean={_w_mean:.2f} w_var={_w_var:.2f} "
+            f"→ r={r_param:.2f} p={p_param:.4f}"
+        )
+    else:
+        r_param, p_param = fit_negative_binomial(per_map_values)
     r_total = r_param * 2
     mean_nb = r_total * (1 - p_param) / p_param
     target_mean = expected_total
@@ -317,6 +415,9 @@ def run_simulation(
         # --- Simulation percentile range (p10/p90 = floor/ceiling) ---
         "sim_p10":                round(sim_p10, 1),
         "sim_p90":                round(sim_p90, 1),
+        # --- Opponent quality weighting metadata ---
+        "opp_quality_weighted":   _any_weighted,
+        "today_opp_rank":         today_opp_rank,
     }
 
 

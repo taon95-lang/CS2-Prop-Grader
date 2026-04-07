@@ -1979,6 +1979,7 @@ def get_player_info(
                 'match_hs_pct':  match_hs,            # per-match scraped HS% (all-maps avg) or None
                 'rounds':        m.get('rounds', 24),  # actual rounds from score parsing; 24 = CS2 regulation max
                 'match_id':      match_id,
+                'match_slug':    slug,                 # full match slug (e.g. "faze-vs-natus-vincere") for opp rank lookup
                 'map_name':      m['map_name'].lower(),
                 'rating':        m.get('rating'),
                 'kast_pct':      m.get('kast_pct'),
@@ -1988,6 +1989,7 @@ def get_player_info(
                 'fd':            m.get('fd'),
                 'deaths':        m.get('deaths'),
                 'pistol_kills':  pistol_data.get(map_num),
+                'opp_rank':      None,                 # populated later by _enrich_with_opp_ranks in bot.py
             })
             # Build the audit line for this map
             _hs_display = str(_hs_val) if _hs_val is not None else "MISSING"

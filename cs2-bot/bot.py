@@ -415,6 +415,82 @@ async def help_cmd(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
+# Opponent quality enrichment — adds opp_rank to historical map entries
+# ---------------------------------------------------------------------------
+
+def _enrich_with_opp_ranks(
+    map_stats: list,
+    player_team_slug: str | None,
+) -> None:
+    """
+    In-place: look up the historical opponent's world rank for each map entry
+    and store it as map_entry['opp_rank'] (int or None).
+
+    Uses the HLTV ranking page (already cached by deep_analysis) — no new
+    HTTP requests when the ranking page is warm from a prior deep analysis call.
+
+    How it works:
+      • Each map entry has 'match_slug' like 'faze-vs-natus-vincere'.
+      • We split on '-vs-' to get two team slugs.
+      • We compare each slug against player_team_slug to identify the opponent.
+      • We call rank_by_team_slug() (ranking-page lookup, cached) for the opponent.
+    """
+    try:
+        from deep_analysis import rank_by_team_slug as _rank_by_slug
+    except ImportError:
+        return
+
+    import re as _re
+
+    def _norm(s: str) -> str:
+        return _re.sub(r'[^a-z0-9]', '', s.lower())
+
+    pt_norm = _norm(player_team_slug) if player_team_slug else None
+
+    # Cache per match_slug to avoid duplicate lookups across two maps in one series
+    _slug_cache: dict[str, int | None] = {}
+
+    for m in map_stats:
+        match_slug = m.get('match_slug', '')
+        if not match_slug or '-vs-' not in match_slug:
+            continue
+
+        if match_slug in _slug_cache:
+            m['opp_rank'] = _slug_cache[match_slug]
+            continue
+
+        parts = match_slug.split('-vs-', 1)
+        slug_a, slug_b = parts[0].strip(), parts[1].strip()
+
+        opp_slug = None
+        if pt_norm:
+            norm_a = _norm(slug_a)
+            norm_b = _norm(slug_b)
+            # Opponent is whichever side does NOT match the player's team
+            if pt_norm in norm_a or norm_a in pt_norm:
+                opp_slug = slug_b
+            elif pt_norm in norm_b or norm_b in pt_norm:
+                opp_slug = slug_a
+            else:
+                # Neither side clearly matches — skip (will get weight 1.0)
+                _slug_cache[match_slug] = None
+                continue
+        else:
+            # No team hint: can't determine opponent side — skip
+            _slug_cache[match_slug] = None
+            continue
+
+        try:
+            rank = _rank_by_slug(opp_slug)
+        except Exception as _e:
+            logger.debug(f"[opp_rank] rank_by_team_slug({opp_slug!r}) failed: {_e}")
+            rank = None
+
+        _slug_cache[match_slug] = rank
+        m['opp_rank'] = rank
+
+
+# ---------------------------------------------------------------------------
 # Core analysis (blocking — always run via executor)
 # ---------------------------------------------------------------------------
 
@@ -678,6 +754,26 @@ def _analyze_player(
         else:
             logger.warning("Cannot run deep analysis without player_id (fallback data in use)")
 
+    # --- Step 3.5: Opponent quality enrichment ---
+    # Add opp_rank to each historical map entry so the simulator can weight
+    # maps played against similar-quality opponents more heavily.
+    # Only runs when: real HLTV data (not fallback) + player team is known.
+    today_opp_rank: int | None = None
+    if not used_fallback and map_stats:
+        # Derive the player's team slug for -vs- matching in match slugs.
+        # Best source: player_team_hint (known from !pp PrizePicks data).
+        # Fallback: nothing (enrichment will silently skip matches it can't resolve).
+        _pt_slug = player_team_hint   # e.g. "3DMax" — normalised inside _enrich_*
+        try:
+            _enrich_with_opp_ranks(map_stats, _pt_slug)
+            _ranked_count = sum(1 for m in map_stats if m.get('opp_rank') is not None)
+            logger.info(
+                f"[opp_rank] Enriched {_ranked_count}/{len(map_stats)} maps "
+                f"with historical opp_rank (team_hint={_pt_slug!r})"
+            )
+        except Exception as _oe:
+            logger.warning(f"[opp_rank] Enrichment failed: {_oe}")
+
     # --- Step 4: Monte Carlo simulation ---
     favorite_prob = 0.55
     likely_maps: list = []
@@ -686,6 +782,7 @@ def _analyze_player(
         mp = deep.get("map_pool", {})
         likely_maps = mp.get("most_played", []) or []
         rank_gap = deep.get("rank_info", {}).get("rank_gap")
+        today_opp_rank = deep.get("rank_info", {}).get("opp_rank")
 
     # ── Session rank_gap cache — keeps stomp/OT flags consistent for teammates ─
     # Key on the opponent name so all players facing the same team get the same
@@ -714,6 +811,7 @@ def _analyze_player(
             likely_maps=likely_maps if likely_maps else None,
             rank_gap=rank_gap,
             period_kpr=_period_kpr,
+            today_opp_rank=today_opp_rank,
         )
     except Exception as e:
         err_name = type(e).__name__
