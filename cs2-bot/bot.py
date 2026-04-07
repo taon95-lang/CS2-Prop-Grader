@@ -2377,7 +2377,7 @@ async def cmd_result(ctx, player: str = None, actual: str = None):
 # ---------------------------------------------------------------------------
 
 @bot.command(name="results")
-async def cmd_results(ctx, when: str = "yesterday"):
+async def cmd_results(ctx, when: str = "today"):
     """
     Show grade history with outcomes.
     Usage: !results [today|yesterday|pending|week]
