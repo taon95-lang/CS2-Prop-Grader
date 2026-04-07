@@ -16,6 +16,7 @@ from scraper import (
 from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
+from grades_db import save_grade, record_result, get_entries_for_date, get_pending_entries, get_recent_entries, date_label
 from prizepicks import get_cs2_lines, get_player_line, get_all_cs2_props, invalidate_cache as pp_invalidate
 from grade_engine import (
     compute_grade_package,
@@ -336,6 +337,10 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         await ctx.reply(embed=embed, mention_author=False)
         logger.info(f"[grade] ✅ Grade delivered — {player_name} {line_val} {stat_type} "
                     f"over={result.get('over_prob')}% grade={result.get('grade')}")
+        try:
+            save_grade(player_name, line_val, stat_type, result, opponent=opponent)
+        except Exception as _ge:
+            logger.warning(f"[grade] grades_db save failed: {_ge}")
     except Exception as e:
         logger.error(f"[grade] Embed failed ({type(e).__name__}): {e}", exc_info=True)
         await ctx.send(
@@ -2124,6 +2129,10 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         if res and "error" not in res and not res.get("used_fallback"):
             try:
                 await ctx.send(embed=build_result_embed(job["player"], job["line"], job["stat"], res))
+                try:
+                    save_grade(job["player"], job["line"], job["stat"], res, opponent=job.get("opponent"))
+                except Exception as _ge:
+                    logger.warning(f"[pp] grades_db save failed for {job['player']}: {_ge}")
             except Exception as _e:
                 logger.warning(f"[pp] Failed to send detail embed for {job['player']}: {_e}")
 
@@ -2221,6 +2230,198 @@ async def cmd_ppstop(ctx):
             color=0xFF4136,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# !result  — log an actual stat total against a graded prop
+# ---------------------------------------------------------------------------
+
+@bot.command(name="result")
+async def cmd_result(ctx, player: str = None, actual: str = None):
+    """
+    Record the actual outcome for a graded prop.
+    Usage: !result <player> <actual>
+    Example: !result lucky 32
+    """
+    if not player or actual is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="Usage",
+                description="`!result <player> <actual_kills>`\nExample: `!result lucky 32`",
+                color=0x95A5A6,
+            )
+        )
+        return
+
+    try:
+        actual_val = float(actual)
+    except ValueError:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Invalid value",
+                description=f"`{actual}` is not a valid number.",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    entry = record_result(player, actual_val)
+    if not entry:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Not found",
+                description=f"No pending grade found for **{player}**. Run `!grade` or `!pp` first.",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    outcome = entry["outcome"]
+    line    = entry["line"]
+    rec     = (entry.get("recommendation") or "?").upper()
+    stat    = entry.get("stat", "Kills")
+    opp     = entry.get("opponent") or "?"
+
+    outcome_icon = {"over": "📈", "under": "📉", "push": "➡️"}.get(outcome, "❓")
+    outcome_label = outcome.upper() if outcome else "?"
+
+    # Did the bot's recommendation match the outcome?
+    bot_correct = (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under")
+    correct_icon = "✅" if bot_correct else ("❌" if rec != "PASS" else "—")
+
+    color = 0x2ECC71 if bot_correct else (0xFF4136 if rec != "PASS" else 0x95A5A6)
+
+    embed = discord.Embed(
+        title=f"{outcome_icon} Result Logged — {entry['display']}",
+        color=color,
+    )
+    embed.add_field(name="Line",     value=f"{line} {stat}",  inline=True)
+    embed.add_field(name="Actual",   value=str(actual_val),   inline=True)
+    embed.add_field(name="Outcome",  value=outcome_label,     inline=True)
+    embed.add_field(name="Bot Pick", value=rec,               inline=True)
+    embed.add_field(name="Opponent", value=opp,               inline=True)
+    embed.add_field(name="Result",   value=f"{correct_icon} {'HIT' if bot_correct else ('MISS' if rec != 'PASS' else 'N/A')}",
+                    inline=True)
+
+    await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# !results — show grade history with outcomes
+# ---------------------------------------------------------------------------
+
+@bot.command(name="results")
+async def cmd_results(ctx, when: str = "yesterday"):
+    """
+    Show grade history with outcomes.
+    Usage: !results [today|yesterday|pending|week]
+    """
+    from datetime import datetime, timezone, timedelta
+
+    when_lower = when.lower()
+    today_str     = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    yesterday_str = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if when_lower in ("today",):
+        target_date = today_str
+        entries = get_entries_for_date(target_date)
+        title = f"📊 Results — {date_label(target_date)}"
+    elif when_lower in ("yesterday", "yday", "ytd"):
+        target_date = yesterday_str
+        entries = get_entries_for_date(target_date)
+        title = f"📊 Results — {date_label(target_date)}"
+    elif when_lower in ("pending", "open"):
+        entries = get_pending_entries()
+        title = "⏳ Pending Grades (no result entered yet)"
+    elif when_lower in ("week", "7d"):
+        entries = get_recent_entries(days=7)
+        title = "📊 Results — Last 7 Days"
+    else:
+        # Try parsing as a date like "Apr5" or "04-05"
+        target_date = yesterday_str
+        entries = get_entries_for_date(target_date)
+        title = f"📊 Results — {date_label(target_date)}"
+
+    if not entries:
+        await ctx.send(
+            embed=discord.Embed(
+                title=title,
+                description="No grades found for that period.",
+                color=0x95A5A6,
+            )
+        )
+        return
+
+    # Build rows
+    lines_out = []
+    correct = wrong = pending = 0
+
+    for e in sorted(entries, key=lambda x: x["ts"]):
+        rec     = (e.get("recommendation") or "?").upper()
+        outcome = e.get("outcome")
+        actual  = e.get("actual")
+        line    = e["line"]
+        stat    = e.get("stat", "Kills")
+        player  = e.get("display") or e["player"]
+        opp     = e.get("opponent") or "?"
+
+        if outcome is None:
+            status = "⏳"
+            actual_str = "—"
+            pending += 1
+        elif (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under"):
+            status = "✅"
+            actual_str = str(actual)
+            correct += 1
+        elif rec == "PASS":
+            status = "—"
+            actual_str = str(actual)
+        else:
+            status = "❌"
+            actual_str = str(actual)
+            wrong += 1
+
+        over_pct  = e.get("over_pct")
+        grade_str = f" ({e['grade']})" if e.get("grade") and e["grade"] != "N/A" else ""
+
+        lines_out.append(
+            f"{status} **{player}** {line} {stat} vs {opp}\n"
+            f"   Bot: **{rec}** {f'({over_pct}% over)' if over_pct else ''}{grade_str} | "
+            f"Actual: **{actual_str}** {('**' + outcome.upper() + '**') if outcome else ''}"
+        )
+
+    total_decided = correct + wrong
+    record_str = f"{correct}W-{wrong}L" if total_decided else "No results yet"
+    if pending:
+        record_str += f" ({pending} pending)"
+
+    embed = discord.Embed(title=title, color=0x3498DB)
+    embed.description = "\n\n".join(lines_out)
+    embed.set_footer(text=f"Record: {record_str}  |  Use !result <player> <actual> to log outcomes")
+
+    # Discord embeds have a 4096-char description limit — split if needed
+    if len(embed.description) > 4096:
+        chunks = []
+        chunk = []
+        for row in lines_out:
+            if sum(len(r) + 2 for r in chunk) + len(row) > 4000:
+                chunks.append(chunk)
+                chunk = []
+            chunk.append(row)
+        if chunk:
+            chunks.append(chunk)
+        for i, ch in enumerate(chunks):
+            e2 = discord.Embed(
+                title=title if i == 0 else f"{title} (cont.)",
+                description="\n\n".join(ch),
+                color=0x3498DB,
+            )
+            if i == len(chunks) - 1:
+                e2.set_footer(text=f"Record: {record_str}  |  !result <player> <actual> to log outcomes")
+            await ctx.send(embed=e2)
+        return
+
+    await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------
