@@ -857,27 +857,69 @@ def _analyze_player(
         sim_result["grade"] = "N/A"
         logger.info(f"[grade] Fallback data → forced PASS for {player_name}")
 
+    # --- Raw-History Reality Check ---
+    # The deep-analysis multiplier can adjust kill distributions significantly.
+    # But if the player's RAW (unscaled) historical median is materially below
+    # the line, calling OVER is speculative — we're betting the opponent
+    # adjustment is real AND the player will outperform all of their history.
+    # Similarly, calling UNDER when history consistently clears the line is wrong.
+    #
+    # Floor: OVER requires hist_median >= line - 1.5  (within 1.5 kills below line)
+    # Ceiling: UNDER requires hist_median <= line + 2.5
+    _raw_hist_median = sim_result.get("hist_median", 0) or 0
+    _raw_hist_avg    = sim_result.get("hist_avg",    0) or 0
+    if not used_fallback:
+        if sim_result.get("decision") == "OVER" and _raw_hist_median < (line - 1.5):
+            _gap = round(line - _raw_hist_median, 1)
+            sim_result["decision"] = "PASS"
+            sim_result["recommendation"] = (
+                f"⚠️ PASS — Raw history ({_raw_hist_median} median) "
+                f"is {_gap} below the {line} line"
+            )
+            logger.info(
+                f"[reality_check] {player_name}: OVER suppressed — "
+                f"hist_median {_raw_hist_median} is {_gap} below line {line}"
+            )
+        elif sim_result.get("decision") == "UNDER" and _raw_hist_median > (line + 2.5):
+            _gap = round(_raw_hist_median - line, 1)
+            sim_result["decision"] = "PASS"
+            sim_result["recommendation"] = (
+                f"⚠️ PASS — Raw history ({_raw_hist_median} median) "
+                f"is {_gap} above the {line} line"
+            )
+            logger.info(
+                f"[reality_check] {player_name}: UNDER suppressed — "
+                f"hist_median {_raw_hist_median} is {_gap} above line {line}"
+            )
+
     # --- Map Intelligence Override ---
     # When the player's historical per-map average on the specific maps expected
     # in this match projects a series total materially BELOW the line, the OVER
     # call is contradicted by map-specific data regardless of the overall average.
     # This prevents the global mean from overriding map-pool reality.
+    # Requirements to fire:
+    #  - Needs 6+ per-map data points (3 series minimum, not just 2)
+    #  - Projection must be >18% below the line (was 10% — too sensitive)
+    #  - Does NOT fire if the global hist_median is already well above the line
+    #    (i.e. the map-specific sample is too small to outweigh overall history)
+    _global_median_strong = _raw_hist_median > (line + 3.0)
     if (
         sim_result.get("decision") == "OVER"
         and likely_maps
         and map_stats_hist
+        and not _global_median_strong  # skip override when overall history strongly favors OVER
     ):
         _likely_set = {m.lower() for m in likely_maps}
         _map_intel_vals = [
             m["stat_value"] for m in map_stats_hist
             if m.get("map_name", "").lower() in _likely_set
         ]
-        if len(_map_intel_vals) >= 4:  # need at least 4 data points (2 series × 2 maps)
+        if len(_map_intel_vals) >= 6:  # need 6+ data points (3 series × 2 maps)
             _map_intel_per_map = sum(_map_intel_vals) / len(_map_intel_vals)
             # Multiply by 2 (Maps 1+2) to get projected series total
             _map_intel_series_proj = _map_intel_per_map * 2
             _map_intel_gap_pct = (_map_intel_series_proj - line) / max(line, 1)
-            if _map_intel_gap_pct < -0.10:  # projected total >10% below the line
+            if _map_intel_gap_pct < -0.18:  # projected total >18% below the line (was 10%)
                 _proj_str = round(_map_intel_series_proj, 1)
                 _pct_str  = round(_map_intel_gap_pct * 100, 1)
                 sim_result["decision"] = "PASS"

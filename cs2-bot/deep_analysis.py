@@ -949,7 +949,12 @@ def run_deep_analysis(
     }
 
     # ── Final clamp ───────────────────────────────────────────────────────────
-    combined = max(0.70, min(1.40, combined))
+    # Tight cap: the props line is set by oddsmakers who already factor in
+    # opponent quality. A ±20% adjustment is the maximum realistic edge from
+    # this analysis before it starts double-counting what the line-setter priced.
+    # The old ±40% range was causing 40–50% inflation which consistently
+    # produced OVER calls on players whose raw history was below the line.
+    combined = max(0.82, min(1.18, combined))
     out['combined_multiplier'] = round(combined, 4)
     out['components'] = components
     out['summary_bullets'] = bullets

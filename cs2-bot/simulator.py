@@ -461,7 +461,16 @@ def calculate_grade(
         # may have artificially depressed over_prob
         decision = "UNDER"
     elif stomp_trap and avg_above:
-        decision = "PASS"
+        # Stomp cuts ~10% of kill opportunities (21→19 rounds).
+        # If hist_median is >18% above the line that cushion still survives —
+        # call OVER. Only force PASS when the historical edge is thin enough
+        # that shorter rounds could realistically erase it.
+        median_edge_pct = (hist_median - line) / max(line, 1) if median_above else 0.0
+        avg_edge_pct    = (hist_avg - line)    / max(line, 1)
+        if median_above and median_edge_pct >= 0.18 and avg_edge_pct >= 0.12:
+            decision = "OVER"
+        else:
+            decision = "PASS"
     elif stomp_trap and not avg_above and not median_above and weak_hit_rate and not hot_form:
         # Historical data agrees with UNDER even accounting for stomp context
         decision = "UNDER"
