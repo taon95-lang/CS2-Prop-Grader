@@ -555,6 +555,7 @@ def run_deep_analysis(
     stat_type: str,
     baseline_avg: float,
     line: float = 0.0,
+    player_team: tuple[str, str] | None = None,
 ) -> dict:
     """
     Orchestrate all analysis dimensions.
@@ -590,7 +591,11 @@ def run_deep_analysis(
     out['opponent_display'] = opp_display
 
     # ── Player's current team (for ranking lookup) ──────────────────────────
-    player_team = get_player_team(player_id, player_slug)
+    # Use pre-fetched team info from get_player_stats() if available —
+    # avoids a redundant HLTV profile fetch and ensures consistency across
+    # teammates graded in the same session.
+    if player_team is None:
+        player_team = get_player_team(player_id, player_slug)
     player_team_id   = player_team[0] if player_team else None
     player_team_slug = player_team[1] if player_team else None
 

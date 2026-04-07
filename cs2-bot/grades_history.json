@@ -16,8 +16,8 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null
+      "actual": 27.0,
+      "outcome": "under"
     },
     {
       "id": "03750cf5-662e-4e5a-be0b-19fa2f83dc36",
@@ -35,8 +35,8 @@
       "recommendation": "OVER",
       "sim_median": 35.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 28.0,
+      "outcome": "over"
     },
     {
       "id": "36385eb2-eb1a-44af-82e1-e5d851d044e1",
@@ -54,8 +54,8 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 26.0,
-      "actual": null,
-      "outcome": null
+      "actual": 25.0,
+      "outcome": "under"
     },
     {
       "id": "f3a55f38-436d-4d61-8a13-987652235d20",
@@ -73,8 +73,8 @@
       "recommendation": "OVER",
       "sim_median": 39.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null
+      "actual": 26.0,
+      "outcome": "under"
     },
     {
       "id": "7f635da0-8fe9-4271-89d7-3c33df574cdc",
@@ -92,8 +92,8 @@
       "recommendation": "UNDER",
       "sim_median": 31.0,
       "hist_median": 23.5,
-      "actual": null,
-      "outcome": null
+      "actual": 18.0,
+      "outcome": "under"
     },
     {
       "id": "74a14650-421e-465a-a3e3-734804b838e7",
@@ -111,8 +111,8 @@
       "recommendation": "OVER",
       "sim_median": 34.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null
+      "actual": 21.0,
+      "outcome": "under"
     },
     {
       "id": "7a7c62a8-ecf1-417c-8f7d-6395da1ebdd2",
@@ -130,8 +130,8 @@
       "recommendation": "UNDER",
       "sim_median": 32.0,
       "hist_median": 32.0,
-      "actual": null,
-      "outcome": null
+      "actual": 41.0,
+      "outcome": "over"
     },
     {
       "id": "20e74dec-dcf1-4dfc-be3b-3599986cb548",
@@ -168,8 +168,8 @@
       "recommendation": "OVER",
       "sim_median": 36.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 38.0,
+      "outcome": "over"
     },
     {
       "id": "f652a7be-b83a-4ac8-a009-3166a1058e34",
@@ -187,8 +187,8 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null
+      "actual": 25.0,
+      "outcome": "under"
     },
     {
       "id": "de8d5af2-832c-4353-9989-f6236cf836ac",
@@ -206,8 +206,8 @@
       "recommendation": "OVER",
       "sim_median": 35.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 28.0,
+      "outcome": "over"
     },
     {
       "id": "56f57dd1-0261-4113-84bf-35ee56949a37",
@@ -225,8 +225,8 @@
       "recommendation": "PASS",
       "sim_median": 31.0,
       "hist_median": 23.5,
-      "actual": null,
-      "outcome": null
+      "actual": 18.0,
+      "outcome": "under"
     },
     {
       "id": "15547e39-444e-464f-8b85-97c9c6d54f0b",
@@ -244,8 +244,8 @@
       "recommendation": "OVER",
       "sim_median": 34.0,
       "hist_median": 26.0,
-      "actual": null,
-      "outcome": null
+      "actual": 25.0,
+      "outcome": "under"
     },
     {
       "id": "8ec62021-764d-4289-810e-f4449aeeafcb",
@@ -263,8 +263,8 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null
+      "actual": 27.0,
+      "outcome": "under"
     },
     {
       "id": "7665b1f0-8e18-4257-a89f-4a94e27d6eb7",
@@ -282,8 +282,8 @@
       "recommendation": "OVER",
       "sim_median": 36.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 38.0,
+      "outcome": "over"
     },
     {
       "id": "e22f7923-bc50-4162-be96-779c134e1696",
@@ -301,8 +301,8 @@
       "recommendation": "OVER",
       "sim_median": 36.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 38.0,
+      "outcome": "over"
     },
     {
       "id": "3742fcef-6fc3-4960-b8c8-4112d3134f7b",
@@ -320,8 +320,8 @@
       "recommendation": "UNDER",
       "sim_median": 15.0,
       "hist_median": 13.05,
-      "actual": null,
-      "outcome": null
+      "actual": 21.0,
+      "outcome": "over"
     },
     {
       "id": "23681bed-b4ca-4582-8583-6059f2d3eb20",
@@ -339,8 +339,8 @@
       "recommendation": "PASS",
       "sim_median": 15.0,
       "hist_median": 11.03,
-      "actual": null,
-      "outcome": null
+      "actual": 28.0,
+      "outcome": "over"
     },
     {
       "id": "99758023-76c5-4e1e-9a7c-eb46120fadde",
@@ -358,8 +358,8 @@
       "recommendation": "PASS",
       "sim_median": 16.0,
       "hist_median": 13.47,
-      "actual": null,
-      "outcome": null
+      "actual": 25.0,
+      "outcome": "over"
     },
     {
       "id": "33438d92-153a-4ff4-b3a3-4bdf3765b90e",
@@ -377,8 +377,8 @@
       "recommendation": "UNDER",
       "sim_median": 15.0,
       "hist_median": 12.45,
-      "actual": null,
-      "outcome": null
+      "actual": 18.0,
+      "outcome": "over"
     },
     {
       "id": "6aede47d-2039-428d-bfa1-22b26581052c",
@@ -396,8 +396,8 @@
       "recommendation": "PASS",
       "sim_median": 33.0,
       "hist_median": 22.0,
-      "actual": null,
-      "outcome": null
+      "actual": 19.0,
+      "outcome": "under"
     },
     {
       "id": "678f4491-e2a2-4d90-80b8-0ac2693da0b9",
@@ -415,8 +415,8 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null
+      "actual": 22.0,
+      "outcome": "under"
     },
     {
       "id": "4da72fc1-01d0-4947-8194-7acfe3c69b59",
@@ -434,8 +434,8 @@
       "recommendation": "UNDER",
       "sim_median": 26.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null
+      "actual": 21.0,
+      "outcome": "under"
     },
     {
       "id": "fe281edc-33f6-444c-b1f2-eb8201566521",
@@ -453,8 +453,8 @@
       "recommendation": "PASS",
       "sim_median": 39.0,
       "hist_median": 36.5,
-      "actual": null,
-      "outcome": null
+      "actual": 17.0,
+      "outcome": "under"
     },
     {
       "id": "4c5169db-ca5d-4626-b570-f16a1c0da478",
@@ -472,8 +472,8 @@
       "recommendation": "OVER",
       "sim_median": 32.0,
       "hist_median": 23.0,
-      "actual": null,
-      "outcome": null
+      "actual": 15.0,
+      "outcome": "under"
     },
     {
       "id": "abef9130-868d-427c-88a2-b5ef2f4e8779",
@@ -491,8 +491,8 @@
       "recommendation": "UNDER",
       "sim_median": 26.0,
       "hist_median": 33.5,
-      "actual": null,
-      "outcome": null
+      "actual": 27.0,
+      "outcome": "under"
     },
     {
       "id": "4068bd7a-1efb-4e20-b8f9-44e7f900b88d",
@@ -529,8 +529,8 @@
       "recommendation": "UNDER",
       "sim_median": 30.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 27.0,
+      "outcome": "under"
     },
     {
       "id": "885cf06e-486b-45cb-8abd-c61861667d08",
@@ -548,8 +548,8 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 22.0,
-      "actual": null,
-      "outcome": null
+      "actual": 19.0,
+      "outcome": "under"
     },
     {
       "id": "150247a0-ebc7-46cd-9f01-4d243132476e",
@@ -567,8 +567,8 @@
       "recommendation": "UNDER",
       "sim_median": 26.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null
+      "actual": 21.0,
+      "outcome": "under"
     },
     {
       "id": "bcb23c30-cd3a-4e02-91d0-b8fc4f38a05b",
@@ -586,8 +586,8 @@
       "recommendation": "PASS",
       "sim_median": 39.0,
       "hist_median": 36.5,
-      "actual": null,
-      "outcome": null
+      "actual": 17.0,
+      "outcome": "under"
     },
     {
       "id": "405434c4-2eed-4c92-a4a9-d0191d59994f",
@@ -605,8 +605,8 @@
       "recommendation": "UNDER",
       "sim_median": 25.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null
+      "actual": 28.0,
+      "outcome": "under"
     },
     {
       "id": "0bced592-7130-4014-922e-ee0f47a78b46",
@@ -624,8 +624,8 @@
       "recommendation": "OVER",
       "sim_median": 25.0,
       "hist_median": 31.5,
-      "actual": null,
-      "outcome": null
+      "actual": 34.0,
+      "outcome": "over"
     },
     {
       "id": "28b223d3-cd2e-4f70-99a1-ed35dfc47dcf",
@@ -643,8 +643,8 @@
       "recommendation": "PASS",
       "sim_median": 28.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null
+      "actual": 18.0,
+      "outcome": "under"
     },
     {
       "id": "86a7769b-683c-4c58-b60a-8ab49b9bab97",
@@ -662,8 +662,8 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 31.5,
-      "actual": null,
-      "outcome": null
+      "actual": 26.0,
+      "outcome": "under"
     },
     {
       "id": "39c1eaff-09c6-4248-bb90-1f520a039cdd",
@@ -681,8 +681,8 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 27.0,
+      "outcome": "under"
     },
     {
       "id": "1b0212e0-5227-4814-9557-e5d0820ccd71",
@@ -700,8 +700,8 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null
+      "actual": 35.0,
+      "outcome": "over"
     },
     {
       "id": "6bf2579f-c3d1-4e44-a58d-f0d0f82d9d64",
@@ -719,8 +719,8 @@
       "recommendation": "OVER",
       "sim_median": 34.0,
       "hist_median": 30.5,
-      "actual": null,
-      "outcome": null
+      "actual": 31.0,
+      "outcome": "over"
     },
     {
       "id": "f34fb1c3-3722-4920-8cf7-5b469a519698",
@@ -757,8 +757,8 @@
       "recommendation": "UNDER",
       "sim_median": 20.0,
       "hist_median": 23.5,
-      "actual": null,
-      "outcome": null
+      "actual": 15.0,
+      "outcome": "under"
     },
     {
       "id": "23624057-ef7e-48b2-8e09-921cbbba5bbe",
@@ -776,8 +776,8 @@
       "recommendation": "PASS",
       "sim_median": 23.0,
       "hist_median": 27.5,
-      "actual": null,
-      "outcome": null
+      "actual": 21.0,
+      "outcome": "under"
     },
     {
       "id": "9057ae95-2d9d-43c8-b4d6-466fba317704",
@@ -795,8 +795,8 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 32.0,
+      "outcome": "over"
     },
     {
       "id": "42109d84-9c50-4b3d-a318-3cf88e847c0c",
@@ -814,8 +814,8 @@
       "recommendation": "OVER",
       "sim_median": 35.0,
       "hist_median": 33.0,
-      "actual": null,
-      "outcome": null
+      "actual": 39.0,
+      "outcome": "over"
     },
     {
       "id": "1097a508-c822-4371-b01e-9dca52fe5292",
@@ -854,6 +854,166 @@
       "hist_median": 29.5,
       "actual": null,
       "outcome": null
+    },
+    {
+      "id": "bf3bba86-7c65-4f1a-acc4-e7183e250631",
+      "ts": 1775592534.879731,
+      "date": "2026-04-07",
+      "player": "ltz",
+      "display": "ltz",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "fake",
+      "over_pct": 86.0,
+      "under_pct": 14.0,
+      "grade": "10/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 37.0,
+      "hist_median": 34.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "9c283b02-1a51-4bb7-a632-d51c3fd9d52c",
+      "ts": 1775592587.135832,
+      "date": "2026-04-07",
+      "player": "remix",
+      "display": "remix",
+      "line": 26.5,
+      "stat": "Kills",
+      "opponent": "fake",
+      "over_pct": 82.8,
+      "under_pct": 17.2,
+      "grade": "9/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 33.0,
+      "hist_median": 33.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "71b979c8-221f-40c3-bdc0-265a78f241e0",
+      "ts": 1775592711.220989,
+      "date": "2026-04-07",
+      "player": "bruninho",
+      "display": "bruninho",
+      "line": 24.5,
+      "stat": "Kills",
+      "opponent": "Shinden",
+      "over_pct": 68.0,
+      "under_pct": 32.0,
+      "grade": "8/10 (Strong edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 27.0,
+      "hist_median": 30.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "b0cbd551-c421-4c07-909d-7242ae945a93",
+      "ts": 1775592819.831595,
+      "date": "2026-04-07",
+      "player": "tom1jed",
+      "display": "tom1jed",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "pain",
+      "over_pct": 76.6,
+      "under_pct": 23.4,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 36.0,
+      "hist_median": 28.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "ab547392-ddfb-48ed-a349-3a9ae42f88da",
+      "ts": 1775592852.390066,
+      "date": "2026-04-07",
+      "player": "ivz",
+      "display": "ivz",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "pain",
+      "over_pct": 61.8,
+      "under_pct": 38.2,
+      "grade": "6/10 (Lean)",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "sim_median": 30.0,
+      "hist_median": 28.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "ead34945-f497-46b1-8ded-18de347a3bc7",
+      "ts": 1775592906.589164,
+      "date": "2026-04-07",
+      "player": "naz",
+      "display": "naz",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "pain",
+      "over_pct": 83.2,
+      "under_pct": 16.8,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 35.0,
+      "hist_median": 28.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "b27d93ec-9986-4735-a800-db7393857451",
+      "ts": 1775592944.330857,
+      "date": "2026-04-07",
+      "player": "abizz",
+      "display": "Abizz",
+      "line": 26.5,
+      "stat": "Kills",
+      "opponent": "pain",
+      "over_pct": 84.3,
+      "under_pct": 15.7,
+      "grade": "6/10 (Lean)",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "sim_median": 33.0,
+      "hist_median": 24.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "95b2e3b1-642a-45db-84a2-3ef4df8f1a95",
+      "ts": 1775592980.887393,
+      "date": "2026-04-07",
+      "player": "guty",
+      "display": "guty",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "pain",
+      "over_pct": 92.3,
+      "under_pct": 7.7,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 37.0,
+      "hist_median": 28.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

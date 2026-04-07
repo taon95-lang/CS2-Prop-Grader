@@ -2079,11 +2079,19 @@ def get_player_info(
     if _bo3gg_ctx:
         _country = _bo3gg_ctx.get('country')
 
+    # Fetch player's current team now so deep analysis can skip the redundant
+    # profile fetch.  Result is cached in _PLAYER_TEAM_CACHE for 2 hours.
+    _player_team = get_player_team(player_id, player_slug)
+    _player_team_id   = _player_team[0] if _player_team else None
+    _player_team_slug = _player_team[1] if _player_team else None
+
     return {
         'player':            display_name,
         'player_id':         player_id,
         'player_slug':       player_slug,
-        'match_ids':         match_ids,        # full list — used for H2H filtering
+        'player_team_id':    _player_team_id,    # team_id for rank lookup — pre-fetched
+        'player_team_slug':  _player_team_slug,  # team slug — pre-fetched
+        'match_ids':         match_ids,           # full list — used for H2H filtering
         'map_kills':         map_kills,
         'mean':              round(mean, 2),
         'std':               round(std, 2),
@@ -2101,11 +2109,29 @@ def get_player_info(
 # Player team lookup (from player profile page)
 # ---------------------------------------------------------------------------
 
+_PLAYER_TEAM_CACHE: dict[str, tuple[str, str] | None] = {}   # player_id → (team_id, slug)
+_PLAYER_TEAM_CACHE_TTL = 7200   # 2 hours
+
+
 def get_player_team(player_id: str, player_slug: str) -> tuple[str, str] | None:
     """
     Fetch the player's profile page and extract their current team ID + slug.
     Returns (team_id, team_slug) or None.
+    Caches successful lookups for 2 hours so teammates don't re-fetch.
     """
+    import time as _time
+    _cached = _PLAYER_TEAM_CACHE.get(player_id)
+    if _cached is not None and _cached is not False:
+        # (result, fetched_at) tuple
+        if isinstance(_cached, tuple) and len(_cached) == 2 and isinstance(_cached[0], str):
+            # Check if this is a (team_id, slug) tuple (both strings)
+            # vs a cache metadata tuple
+            return _cached
+
+    # Sentinel: if we recently tried and got None, don't spam HLTV
+    if _cached is False:
+        return None
+
     url = f"{HLTV_BASE}/player/{player_id}/{player_slug}"
     html = _fetch(url)
     if not html:
@@ -2117,6 +2143,7 @@ def get_player_team(player_id: str, player_slug: str) -> tuple[str, str] | None:
 
     tid, tslug = matches[0]
     logger.info(f"[player_team] player={player_slug} → team_id={tid} slug={tslug}")
+    _PLAYER_TEAM_CACHE[player_id] = (tid, tslug)
     return tid, tslug
 
 

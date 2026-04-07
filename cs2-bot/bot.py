@@ -731,6 +731,11 @@ def _analyze_player(
 
         if player_id and player_slug:
             try:
+                # Pass pre-fetched team info so deep analysis skips the redundant
+                # HLTV profile fetch — ensures all teammates get consistent rank_gap.
+                _pt_id   = info.get("player_team_id")
+                _pt_slug = info.get("player_team_slug")
+                _player_team_arg = (_pt_id, _pt_slug) if _pt_id and _pt_slug else None
                 deep = run_deep_analysis(
                     player_id=player_id,
                     player_slug=player_slug,
@@ -739,6 +744,7 @@ def _analyze_player(
                     stat_type=stat_type,
                     baseline_avg=baseline_avg,
                     line=line,
+                    player_team=_player_team_arg,
                 )
                 if deep and not deep.get("error"):
                     adj = deep["combined_multiplier"]
