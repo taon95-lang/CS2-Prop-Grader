@@ -864,10 +864,14 @@ def search_player_v2(
         if pid not in seen:
             seen[pid] = slug
 
-    # Score all candidates by name similarity, best first
+    # Score all candidates by name similarity, best first.
+    # Tiebreaker: higher player_id wins — HLTV assigns IDs sequentially so a
+    # higher ID indicates a more recently registered (likely still-active) player.
+    # This resolves ambiguous cases like two players sharing the same slug
+    # where one is retired (low ID) and one is currently playing (high ID).
     scored = sorted(
         [(pid, slug, _score_player_match(name, pid, slug)) for pid, slug in seen.items()],
-        key=lambda x: x[2],
+        key=lambda x: (x[2], int(x[0]) if x[0].isdigit() else 0),
         reverse=True,
     )
 
