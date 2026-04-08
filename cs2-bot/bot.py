@@ -1142,6 +1142,38 @@ def _analyze_player(
     sim_result["avg_adr"]          = avg_adr
     sim_result["kill_eff"]         = kill_eff
 
+    # --- Step 8b: Decision Coherence Check ---
+    # All probability adjustments (matchup bonus, economy delta, rating impact)
+    # happen AFTER run_simulation locks in the decision.  If those adjustments
+    # flip over_prob below 50% when decision is OVER — or above 50% when it
+    # is UNDER — the displayed verdict contradicts the displayed probability.
+    # Guard against this by downgrading contradicted decisions to PASS so the
+    # embed never shows "✅ OVER" alongside a sub-50% over probability.
+    if not sim_result.get("used_fallback"):
+        _adj_over  = sim_result.get("over_prob",  50)
+        _adj_under = sim_result.get("under_prob", 50)
+        _cur_dec   = sim_result.get("decision", "PASS")
+        if _cur_dec == "OVER" and _adj_over < _adj_under:
+            sim_result["decision"] = "PASS"
+            sim_result["recommendation"] = (
+                "⏸️ PASS — Post-adjustment signals mixed "
+                f"(over {_adj_over}% < under {_adj_under}%)"
+            )
+            logger.info(
+                f"[coherence] OVER→PASS after adjustments: "
+                f"over_prob={_adj_over}% under_prob={_adj_under}%"
+            )
+        elif _cur_dec == "UNDER" and _adj_under < _adj_over:
+            sim_result["decision"] = "PASS"
+            sim_result["recommendation"] = (
+                "⏸️ PASS — Post-adjustment signals mixed "
+                f"(under {_adj_under}% < over {_adj_over}%)"
+            )
+            logger.info(
+                f"[coherence] UNDER→PASS after adjustments: "
+                f"over_prob={_adj_over}% under_prob={_adj_under}%"
+            )
+
     # --- Step 9: Confidence Score (A–F) + Unit Sizing ---
     conf_score = 50  # baseline
 
