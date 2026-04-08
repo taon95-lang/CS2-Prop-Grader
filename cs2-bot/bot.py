@@ -1385,6 +1385,7 @@ def build_result_embed(
     color     = DECISION_COLORS.get(decision, 0x7289DA)
     stat_unit = result.get("stat_type", stat_type)
     used_fb   = result.get("used_fallback", False)
+    is_lock   = result.get("is_lock", False)
 
     deep        = result.get("deep") or {}
     opp_display = deep.get("opponent_display") if deep and not deep.get("error") else None
@@ -1397,53 +1398,229 @@ def build_result_embed(
     flags     = pkg.get("flags",     [])
     confidence = pkg.get("confidence", result.get("confidence_score", 50))
     edge_pct   = pkg.get("edge_pct",   result.get("edge", 0))
-    reason     = pkg.get("reason",     result.get("recommendation", ""))
 
-    # ── Title ────────────────────────────────────────────────────────────────
-    is_lock = result.get("is_lock", False)
-    d_icons = {"OVER": "✅", "UNDER": "❌", "PASS": "⏸️", "MISPRICED": "⚠️"}
-    lock_prefix = "🔒 " if is_lock else ""
-    title = f"{lock_prefix}🎯  {player_name}  ·  {line} {stat_unit}"
-
-    # Lock upgrades the embed border color to gold so it's unmissable
+    # Lock → gold embed border
     if is_lock:
-        color = 0xFFD700  # Gold
+        color = 0xFFD700
 
-    # ── Description — verdict banner ─────────────────────────────────────────
-    conf_bar  = ge_prob_bar(confidence / 100, width=8)
-    edge_sign = "+" if edge_pct >= 0 else ""
-    lock_banner = "🔒 **LOCK**  ·  " if is_lock else ""
-    verdict_line = (
-        f"{lock_banner}**{d_icons.get(decision, '📊')} {decision}**  ·  "
-        f"Confidence: **{confidence}/100** `{conf_bar}`  ·  "
-        f"Edge: **{edge_sign}{edge_pct}%**"
-    )
+    # ── Player / team / opponent labels ──────────────────────────────────────
+    liq_role   = result.get("liquipedia_role")
+    country    = result.get("country")
+    is_awper   = result.get("is_awper", False)
+    awper_warn = result.get("awper_warn", False)
 
-    ctx_parts = []
-    if opp_display:
-        ctx_parts.append(f"vs **{opp_display}**")
+    role_icons = {"awper": "🎯 AWPer", "igl": "🧠 IGL", "rifler": "⚡ Rifler"}
+    role_str   = role_icons.get(liq_role, "⚡ Rifler") if liq_role else ("🎯 AWPer" if is_awper else "⚡ Rifler")
+
+    # Team: try deep analysis's player-team display first, fall back to opponent team info
+    player_team_str = ""
+    pt_id   = result.get("player_team_id")
+    pt_slug = result.get("player_team_slug")
+    if pt_slug:
+        player_team_str = f" ({pt_slug})"
+
+    opp_str = f" vs. **{opp_display}**" if opp_display else (f" vs. **{opp_name}**" if opp_name else "")
+
+    # ── Projection labels ─────────────────────────────────────────────────────
+    if decision == "OVER":
+        proj_word  = "MORE"
+        proj_icon  = "✅"
+    elif decision == "UNDER":
+        proj_word  = "LESS"
+        proj_icon  = "❌"
+    else:
+        proj_word  = "NO BET"
+        proj_icon  = "⏸️"
+
+    conf_level_map = {
+        "A": "High Confidence",
+        "B": "Moderate Confidence",
+        "C": "Fair Confidence",
+        "D": "Low Confidence",
+        "F": "Unreliable",
+    }
+    conf_grade_chr = result.get("confidence_grade", "C")
+    # Recalculate from numeric score for accuracy
+    if   confidence >= 80: conf_grade_chr = "A"
+    elif confidence >= 65: conf_grade_chr = "B"
+    elif confidence >= 50: conf_grade_chr = "C"
+    elif confidence >= 35: conf_grade_chr = "D"
+    else:                  conf_grade_chr = "F"
+    conf_level_str = conf_level_map[conf_grade_chr]
+
+    # ── Metric table data ─────────────────────────────────────────────────────
+    n_series   = result.get("n_series",    0) or 0
+    hist_avg   = result.get("hist_avg",    "N/A")
+    hist_med   = result.get("hist_median", "N/A")
+    hit_rate   = result.get("hit_rate",    0) or 0   # stored as percentage (e.g. 70.0)
+
+    # Hit rate as "X/N" fraction
+    if n_series > 0 and isinstance(hit_rate, (int, float)):
+        _hits_n = round(hit_rate / 100 * n_series)
+        hit_str = f"{_hits_n}/{n_series}"
+    else:
+        hit_str = f"{hit_rate}%"
+
+    # Indicators for avg/median vs line
+    def _line_indicator(val, lne):
+        try:
+            v = float(val)
+            gap = (v - lne) / max(lne, 1)
+            if gap >= 0.10:    return "✅ Above Line"
+            elif gap >= 0.02:  return "⚠️ Near Line"
+            elif gap >= -0.02: return "➖ At Line"
+            elif gap >= -0.10: return "⚠️ Near Line"
+            else:              return "❌ Below Line"
+        except (TypeError, ValueError):
+            return "—"
+
+    avg_ind = _line_indicator(hist_avg, line)
+    med_ind = _line_indicator(hist_med, line)
+
+    # Hit rate indicator
+    if isinstance(hit_rate, (int, float)):
+        if hit_rate >= 70:   hr_ind = "✅ Strong"
+        elif hit_rate >= 50: hr_ind = "⚠️ Moderate"
+        else:                hr_ind = "❌ Weak"
+    else:
+        hr_ind = "—"
+
+    # Projected rounds indicator
+    total_rounds = result.get("total_projected_rounds")
+    if total_rounds:
+        if total_rounds >= 50:   rounds_pace = "✅ Normal+"
+        elif total_rounds >= 44: rounds_pace = "⚠️ Competitive"
+        else:                    rounds_pace = "❌ Stomp Risk"
+        rounds_str = str(total_rounds)
+    else:
+        rounds_str  = "N/A"
+        rounds_pace = "—"
+
+    # Role / Map Pool indicator (from deep analysis map_pool component)
+    mp_comp = (deep.get("components") or {}).get("map_pool", 1.0) or 1.0
+    if   mp_comp > 1.05:  map_ind = "✅ Favorable"
+    elif mp_comp > 0.95:  map_ind = "➖ Neutral"
+    else:                 map_ind = "❌ Unfavorable"
+
+    # ── GURU COMMENTARY — synthesized narrative ───────────────────────────────
+    commentary_parts = []
+
+    # Opponent defensive context
+    if deep and not deep.get("error"):
+        comb_mult = deep.get("combined_multiplier", 1.0) or 1.0
+        comb_pct  = round((comb_mult - 1) * 100, 1)
+        def_lbl   = (deep.get("defensive_profile") or {}).get("label", "")
+        rank_lbl  = (deep.get("rank_info") or {}).get("label", "")
+        h2h_recs  = deep.get("h2h", [])
+        h2h_cmpl  = [s for s in h2h_recs if not s.get("partial")]
+        h2h_n     = len(h2h_cmpl)
+        h2h_clrs  = sum(1 for s in h2h_cmpl if s.get("cleared"))
+        sign_str  = "+" if comb_pct >= 0 else ""
+        h2h_note  = f", H2H {h2h_clrs}/{h2h_n} cleared" if h2h_n else ""
+        commentary_parts.append(
+            f"vs **{opp_display}** ({sign_str}{comb_pct}% combined{h2h_note}). "
+            f"{def_lbl}. {rank_lbl}."
+        )
+
+    # Stomp / rounds context
+    stomp = result.get("stomp_via_rank", False)
     match_ctx = result.get("match_context", "")
-    if match_ctx:
-        ctx_parts.append(f"_{match_ctx}_")
-    if used_fb:
-        ctx_parts.append("⚠️ _Estimated data only_")
+    if stomp:
+        commentary_parts.append(f"⚠️ **Stomp risk** — projected {rounds_str} rounds ({match_ctx}).")
+    elif total_rounds and total_rounds >= 50:
+        commentary_parts.append(f"Competitive pace projected ({rounds_str} rounds).")
+
+    # Role context
+    if awper_warn:
+        commentary_parts.append(f"⚠️ AWPer — HS props use estimated HS rate.")
+    elif liq_role or is_awper:
+        role_label = role_icons.get(liq_role, "AWPer" if is_awper else "Rifler")
+        map_pool_note = "favorable map pool" if mp_comp > 1.05 else ("neutral map pool" if mp_comp > 0.95 else "unfavorable map pool")
+        commentary_parts.append(f"{role_label} with {map_pool_note}.")
+
+    # Form context
+    trend_pct = result.get("trend_pct", 0) or 0
+    if trend_pct >= 12:
+        commentary_parts.append("🔥 Currently running **hot** (recent form above career avg).")
+    elif trend_pct <= -12:
+        commentary_parts.append("🧊 Currently running **cold** (recent form below career avg).")
+
+    # Variance context
+    var_std = variance.get("std", "")
+    var_lbl = variance.get("label", "")
+    if var_lbl:
+        commentary_parts.append(f"{var_lbl} · σ={var_std}.")
+
+    # Matchup veto notice
+    rec_text = result.get("recommendation", "")
+    if "vetoed by specific matchup" in (rec_text or ""):
+        commentary_parts.append(f"⚠️ Historical edge overridden — {rec_text.split('—',1)[-1].strip()}")
+
+    guru_commentary = " ".join(commentary_parts) if commentary_parts else "_No additional matchup context available._"
+
+    # ── Final Bet Recommendation text ─────────────────────────────────────────
+    unit_rec  = result.get("unit_recommendation", "🚫 0u — Pass")
+    grade_str = result.get("grade", "N/A")
+    hs_src    = result.get("hs_rate_src")
+    edge_sign = "+" if edge_pct >= 0 else ""
+    fair_ln   = result.get("fair_line", result.get("sim_median", "N/A"))
+
+    if is_lock:
+        final_rec_name  = "🔒 LOCK"
+        final_rec_value = f"🔒 **LOCK — BET {proj_word}** `{line}`\n{unit_rec}  ·  Grade: `{grade_str}`  ·  Fair Line: `{fair_ln}`"
+    elif decision == "OVER":
+        final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
+        final_rec_value = f"**✅ BET MORE** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`"
+    elif decision == "UNDER":
+        final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
+        final_rec_value = f"**❌ BET LESS** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`"
+    else:
+        final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
+        final_rec_value = f"**⏸️ NO BET** — Signals too mixed for a confident call\n{unit_rec}"
+
+    if hs_src and awper_warn:
+        final_rec_value += f"\n⚠️ AWPer detected — {hs_src}"
+    elif hs_src:
+        final_rec_value += f"\n_HS rate: {hs_src}_"
+
+    # ── Title + Description (GURU header block) ───────────────────────────────
+    lock_pfx = "🔒 " if is_lock else ""
+    title = f"{lock_pfx}🏆 [GURU] GRADES & PROJECTIONS"
 
     SEP = "━" * 30
+    fb_warn = "\n⚠️ _Estimated data only — no directional call_" if used_fb else ""
+
+    # Metric table (Discord renders markdown tables in embed descriptions)
+    metric_table = (
+        "| Metric | Value | Status |\n"
+        "| :--- | :--- | :--- |\n"
+        f"| **Recent Avg (Last {n_series})** | {hist_avg} | {avg_ind} |\n"
+        f"| **Recent Median** | {hist_med} | {med_ind} |\n"
+        f"| **Hit Rate** | {hit_str} | {hr_ind} |\n"
+        f"| **Projected Rounds** | {rounds_str} | {rounds_pace} |\n"
+        f"| **Role / Map Pool** | {role_str} | {map_ind} |"
+    )
+
     description = (
-        ("  ·  ".join(ctx_parts) + "\n" if ctx_parts else "")
-        + f"{SEP}\n{verdict_line}\n{SEP}"
+        f"**PLAYER:** {player_name}{player_team_str}{opp_str}\n"
+        f"**MATCH:** Maps 1–2 {stat_unit} | **PROP LINE:** `{line}`"
+        f"{fb_warn}\n"
+        f"{SEP}\n"
+        f"**GRADE:** `{conf_grade_chr}`\n"
+        f"**PROJECTION:** {proj_icon} **{proj_word}** ({conf_level_str})\n"
+        f"{SEP}\n"
+        f"{metric_table}"
     )
 
     embed = discord.Embed(title=title, description=description, color=color)
 
-    # ── HLTV unavailable warning ─────────────────────────────────────────────
+    # ── Warnings ──────────────────────────────────────────────────────────────
     if used_fb:
         embed.add_field(
             name="🚫 HLTV Data Unavailable",
             value="Live data could not be fetched. Stats are **estimated** — no directional call is made.",
             inline=False,
         )
-
     if deep and deep.get("error") and opp_name:
         embed.add_field(
             name="⚠️ Opponent Not Found",
@@ -1454,80 +1631,55 @@ def build_result_embed(
             inline=False,
         )
 
-    # ── 1. Historical Stats ───────────────────────────────────────────────────
-    n_series  = result.get("n_series",    "?")
-    hist_avg  = result.get("hist_avg",    "N/A")
-    hist_med  = result.get("hist_median", "N/A")
-    hit_rate  = result.get("hit_rate",    "N/A")
-    var_label = variance.get("label", "")
-    var_std   = variance.get("std",   "")
-    var_floor = variance.get("floor", "")
-    var_ceil  = variance.get("ceil",  "")
-    form_lbl  = form.get("label", "")
-    last4_h   = form.get("last4_hits", "?")
-    last4_n   = form.get("last4_n",    "?")
-    hist_val  = (
-        f"**Avg:** `{hist_avg}` · **Median:** `{hist_med}` · **Hit Rate:** `{hit_rate}%`\n"
-        f"**Variance:** {var_label} · σ={var_std} · Range: {var_floor}–{var_ceil}\n"
-        f"{form_lbl}  ·  Last {last4_n}: {last4_h}/{last4_n} hit"
-    )
-    embed.add_field(name=f"📊 Historical — {n_series} BO3 Series", value=hist_val, inline=False)
-
-    # ── 2. Simulation ─────────────────────────────────────────────────────────
+    # ── Simulation field ──────────────────────────────────────────────────────
     over_p   = result.get("over_prob",  "N/A")
     under_p  = result.get("under_prob", "N/A")
     push_p   = result.get("push_prob",  0)
     sim_mean = result.get("sim_mean",   "N/A")
     sim_std  = result.get("sim_std",    "N/A")
-    fair_ln  = result.get("fair_line",  result.get("sim_median", "N/A"))
     n_sims   = result.get("n_simulations", 10000)
     eco_tag  = " _(eco-adj)_" if result.get("economy_adjusted") else ""
+    sim_p10  = result.get("sim_p10")
+    sim_p90  = result.get("sim_p90")
     over_bar = ge_prob_bar((over_p or 0) / 100) if isinstance(over_p, (int, float)) else ""
-    # EV display (positive EV = value, shown as +X.XXu)
-    decision_for_ev = result.get("decision", "PASS")
-    if decision_for_ev == "OVER":
+    if decision == "OVER":
         ev_raw = result.get("ev_over", None)
-    elif decision_for_ev == "UNDER":
+    elif decision == "UNDER":
         ev_raw = result.get("ev_under", None)
     else:
         ev_raw = None
-    ev_str = f" · EV: **{'+' if ev_raw and ev_raw>=0 else ''}{ev_raw:.3f}u**" if ev_raw is not None else ""
-    # p10/p90 floor/ceiling from simulation
-    sim_p10 = result.get("sim_p10")
-    sim_p90 = result.get("sim_p90")
-    range_str = f"\nRange (p10–p90): **{sim_p10:.0f}–{sim_p90:.0f}**" if sim_p10 is not None and sim_p90 is not None else ""
-    sim_val  = (
-        f"OVER `{line}`: **{over_p}%** {eco_tag} `{over_bar}`\n"
-        f"UNDER: **{under_p}%** · Push: **{push_p}%**\n"
-        f"Mean: **{sim_mean}** · ±**{sim_std}** · Fair: **{fair_ln}**{ev_str}"
-        f"{range_str}"
-    )
-    embed.add_field(name=f"🎲 Simulation ({n_sims:,} runs)", value=sim_val, inline=True)
+    ev_str    = f"\n• **EV vs -110:** `{'+' if ev_raw and ev_raw>=0 else ''}{ev_raw:.3f}u`" if ev_raw is not None else ""
+    range_str = f"\n• **Range (p10–p90):** `{sim_p10:.0f}–{sim_p90:.0f}`" if sim_p10 is not None and sim_p90 is not None else ""
 
-    # ── 3. HLTV 90-Day Stats ──────────────────────────────────────────────────
+    sim_val = (
+        f"• **Simulated Mean:** `{sim_mean}`  ·  **σ:** `{sim_std}`\n"
+        f"• **Over Probability:** `{over_p}%` {eco_tag} `{over_bar}`\n"
+        f"• **Under Probability:** `{under_p}%`  ·  Push: `{push_p}%`\n"
+        f"• **Edge vs. Line:** `{edge_sign}{edge_pct}%`  ·  **Fair Line:** `{fair_ln}`"
+        f"{ev_str}{range_str}"
+    )
+    embed.add_field(name=f"📊 SIMULATION ({n_sims:,} RUNS)", value=sim_val, inline=False)
+
+    # ── HLTV 90-Day Stats (compact inline) ────────────────────────────────────
     ps = result.get("period_stats") or {}
     if ps and any(ps.get(k) is not None for k in ("kpr", "rating", "kast", "adr")):
-        ps_lines = []
-        if ps.get("kpr")    is not None: ps_lines.append(f"KPR: **{ps['kpr']:.2f}**")
-        if ps.get("rating") is not None: ps_lines.append(f"Rating: **{ps['rating']:.2f}**")
-        if ps.get("kast")   is not None: ps_lines.append(f"KAST: **{ps['kast']:.0f}%**")
-        if ps.get("adr")    is not None: ps_lines.append(f"ADR: **{ps['adr']:.0f}**")
-        if ps.get("kd")     is not None: ps_lines.append(f"K/D: **{ps['kd']:.2f}**")
-        if ps.get("hs_pct") is not None: ps_lines.append(f"HS%: **{ps['hs_pct']:.0f}%**")
-        ps_val   = "\n".join(ps_lines)
+        ps_parts = []
+        if ps.get("kpr")    is not None: ps_parts.append(f"KPR `{ps['kpr']:.2f}`")
+        if ps.get("rating") is not None: ps_parts.append(f"Rtg `{ps['rating']:.2f}`")
+        if ps.get("kast")   is not None: ps_parts.append(f"KAST `{ps['kast']:.0f}%`")
+        if ps.get("adr")    is not None: ps_parts.append(f"ADR `{ps['adr']:.0f}`")
+        if ps.get("kd")     is not None: ps_parts.append(f"K/D `{ps['kd']:.2f}`")
+        if ps.get("hs_pct") is not None: ps_parts.append(f"HS% `{ps['hs_pct']:.0f}%`")
+        ps_val   = "  ·  ".join(ps_parts)
         ps_label = f"📋 HLTV {ps.get('days', 90)}d Stats"
-    else:
-        ps_val   = "_HLTV stats page unavailable_"
-        ps_label = "📋 HLTV Stats"
-    embed.add_field(name=ps_label, value=ps_val, inline=True)
+        embed.add_field(name=ps_label, value=ps_val, inline=False)
 
-    # ── 4. Map Intelligence (if data available) ────────────────────────────────
+    # ── Map Intelligence ──────────────────────────────────────────────────────
     mi_parts = []
     if map_intel.get("projected_labels"):
         mi_parts.append("**Expected:** " + " · ".join(map_intel["projected_labels"][:3]))
     if map_intel.get("projected_series") is not None:
         pvs = map_intel.get("projected_vs_line", "")
-        # Show projected series total (per-map avg × 2) not the raw per-map avg
         mi_parts.append(f"**Series proj on these maps:** `{map_intel['projected_series']}` {pvs}")
     if map_intel.get("best_map") and map_intel.get("worst_map"):
         bm = map_intel["best_map"]
@@ -1536,13 +1688,12 @@ def build_result_embed(
     if mi_parts:
         embed.add_field(name="🗺️ Map Intelligence", value="\n".join(mi_parts), inline=False)
 
-    # ── 5. Opponent Deep Analysis ─────────────────────────────────────────────
+    # ── Opponent Deep Analysis ────────────────────────────────────────────────
     if deep and not deep.get("error") and opp_display:
         combined   = deep.get("combined_multiplier", 1.0) or 1.0
         total_pct  = round((combined - 1) * 100, 1)
         tot_sign   = "+" if total_pct >= 0 else ""
         components = deep.get("components", {})
-
         comp_str = "  ".join(filter(None, [
             _fmt_comp(components, "defensive", "Def"),
             _fmt_comp(components, "t_side",    "T-Side"),
@@ -1550,32 +1701,22 @@ def build_result_embed(
             _fmt_comp(components, "map_pool",  "Maps"),
             _fmt_comp(components, "h2h",       "H2H"),
         ]))
-
         h2h_records = deep.get("h2h", [])
-        if h2h_records:
-            # Only count complete-data records (both maps scraped) in the cleared tally
-            _h2h_complete = [s for s in h2h_records if not s.get("partial")]
-            h2h_clears    = sum(1 for s in _h2h_complete if s.get("cleared"))
-            _h2h_n        = len(_h2h_complete)
-            _partial_n    = len(h2h_records) - _h2h_n
-            _partial_tag  = f" (+{_partial_n} partial)" if _partial_n else ""
-            h2h_str = (
-                f"H2H **{h2h_clears}/{_h2h_n}** "
-                f"{'✅' if _h2h_n > 0 and h2h_clears == _h2h_n else '⚠️'}"
-                f"{_partial_tag}"
-            )
+        _h2h_cmpl   = [s for s in h2h_records if not s.get("partial")]
+        _h2h_n      = len(_h2h_cmpl)
+        _partial_n  = len(h2h_records) - _h2h_n
+        _partial_tag = f" (+{_partial_n} partial)" if _partial_n else ""
+        if _h2h_n:
+            _h2h_clrs = sum(1 for s in _h2h_cmpl if s.get("cleared"))
+            h2h_str = f"H2H **{_h2h_clrs}/{_h2h_n}** {'✅' if _h2h_clrs == _h2h_n else '⚠️'}{_partial_tag}"
         else:
             h2h_str = "H2H: no data"
-
         def_lbl  = (deep.get("defensive_profile") or {}).get("label", "")
         rank_lbl = (deep.get("rank_info") or {}).get("label", "")
-
-        opp_val = (
+        opp_val  = (
             f"**Combined:** `{tot_sign}{total_pct}%`  ·  {def_lbl}  ·  {h2h_str}\n"
-            f"{comp_str}\n"
-            f"_{rank_lbl}_"
+            f"{comp_str}\n_{rank_lbl}_"
         )
-
         otp = deep.get("team_period_stats") or {}
         if otp and any(otp.get(k) is not None for k in ("kpr", "rating", "adr")):
             otp_parts = []
@@ -1583,8 +1724,6 @@ def build_result_embed(
             if otp.get("rating") is not None: otp_parts.append(f"Rtg {otp['rating']:.2f}")
             if otp.get("adr")    is not None: otp_parts.append(f"ADR {otp['adr']:.0f}")
             opp_val += f"\n_Opp 90d: {' · '.join(otp_parts)}_"
-
-        # H2H vs line
         scouting = deep.get("scouting", {})
         h2h_sc   = scouting.get("h2h_line", {})
         cleared  = h2h_sc.get("matches_cleared", 0)
@@ -1594,33 +1733,28 @@ def build_result_embed(
             bonus_tag   = "  ✅ +5% Over bonus" if h2h_sc.get("matchup_favorite") else ""
             partial_tag = f"  ⚠️ {partial} match(es) incomplete data" if partial else ""
             opp_val += f"\n_H2H vs line: {cleared}/{of_n} cleared{bonus_tag}{partial_tag}_"
-
-        # Per-match H2H kill totals
         if h2h_records:
-            _line_val = result.get("line", 0)
             _h2h_rows = []
             for _i, _rec in enumerate(h2h_records, 1):
-                _total  = _rec.get("total_kills") or sum(_rec.get("kills_by_map", []))
-                _maps   = _rec.get("kills_by_map", [])
+                _total   = _rec.get("total_kills") or sum(_rec.get("kills_by_map", []))
+                _maps    = _rec.get("kills_by_map", [])
                 _map_str = " + ".join(str(k) for k in _maps)
                 if _rec.get("partial"):
-                    _icon = "⚠️"
-                    _note = " (partial)"
+                    _icon = "⚠️"; _note = " (partial)"
                 elif _rec.get("cleared"):
-                    _icon = "✅"
-                    _note = ""
+                    _icon = "✅"; _note = ""
                 else:
-                    _icon = "❌"
-                    _note = ""
+                    _icon = "❌"; _note = ""
                 _h2h_rows.append(f"{_icon} H2H {_i}: **{_total}** kills ({_map_str}){_note}")
             opp_val += "\n" + "\n".join(_h2h_rows)
-
         if result.get("stomp_high_line_warning"):
             opp_val += "\n⛔ **STOMP RISK + HIGH LINE — Lean UNDER**"
-
         embed.add_field(name=f"🔬 vs {opp_display}", value=opp_val, inline=False)
 
-    # ── 6. Risk Flags (only if active) ────────────────────────────────────────
+    # ── GURU Commentary ───────────────────────────────────────────────────────
+    embed.add_field(name="💬 GURU COMMENTARY", value=guru_commentary, inline=False)
+
+    # ── Risk Flags ────────────────────────────────────────────────────────────
     active_flags = [f for f in flags if not f.startswith("✅")]
     if active_flags:
         embed.add_field(
@@ -1629,12 +1763,11 @@ def build_result_embed(
             inline=False,
         )
 
-    # ── 7. Per-Series Breakdown ────────────────────────────────────────────────
+    # ── Per-Series Breakdown ──────────────────────────────────────────────────
     _breakdown  = result.get("series_breakdown", [])
     _is_hs_prop = stat_unit == "HS"
     _hs_src     = result.get("hs_rate_src", "")
     if used_fb:
-        # Fallback data is generated/estimated — never show it as real historical series
         embed.add_field(
             name="📋 Series Breakdown",
             value="_No real match history found — breakdown unavailable.\nUsing estimated stats only._",
@@ -1656,46 +1789,15 @@ def build_result_embed(
                 rows.append("_AWPer/default HS rate estimate applied_")
         embed.add_field(name="📋 Series Breakdown", value="\n".join(rows), inline=False)
 
-    # ── 8. Verdict ────────────────────────────────────────────────────────────
-    unit_rec = result.get("unit_recommendation", "🚫 0u — Pass")
-    hs_src   = result.get("hs_rate_src")
-    is_awper = result.get("is_awper", False)
-    awper_warn = result.get("awper_warn", False)
-
-    if decision in ("OVER", "UNDER"):
-        verdict_text = f"**PLAY {decision} {line}**"
-    else:
-        verdict_text = f"**{decision}**"
-
-    hs_note = ""
-    if hs_src and awper_warn:
-        hs_note = f"\n⚠️ AWPer detected — {hs_src}"
-    elif hs_src and is_awper:
-        hs_note = f"\n🎯 AWPer — {hs_src}"
-    elif hs_src:
-        hs_note = f"\n_HS rate: {hs_src}_"
-
-    grade_str = result.get("grade", "N/A")
-    embed.add_field(
-        name="✅ Verdict",
-        value=(
-            f"{verdict_text}\n"
-            f"_{reason}_\n"
-            f"{unit_rec}  ·  Grade: `{grade_str}`" + hs_note
-        ),
-        inline=False,
-    )
+    # ── Final Bet Recommendation ──────────────────────────────────────────────
+    embed.add_field(name=final_rec_name, value=final_rec_value, inline=False)
 
     # ── Footer ────────────────────────────────────────────────────────────────
     data_note = "Estimated (HLTV unavailable)" if used_fb else "HLTV Live — Last 10 BO3, Maps 1&2 only"
-    # Enrich footer with country (from bo3.gg) and role (from Liquipedia) when available
-    country = result.get("country")
-    liq_role = result.get("liquipedia_role")
     enrichment_parts = []
     if country:
         enrichment_parts.append(f"🌍 {country}")
     if liq_role:
-        role_icons = {"awper": "🎯 AWPer", "igl": "🧠 IGL", "rifler": "⚡ Rifler"}
         enrichment_parts.append(role_icons.get(liq_role, liq_role))
     enrichment_str = "  ·  " + "  ·  ".join(enrichment_parts) if enrichment_parts else ""
     embed.set_footer(
