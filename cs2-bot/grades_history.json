@@ -1131,9 +1131,10 @@
       "recommendation": "OVER",
       "sim_median": 32.0,
       "hist_median": 34.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": "UNDER",
+      "outcome": "LOSS",
+      "baseline_match_id": null,
+      "resolved_date": "2026-04-08"
     },
     {
       "id": "52a9255c-7784-4d25-8d21-c0e4cc856df5",
