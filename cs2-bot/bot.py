@@ -1243,34 +1243,67 @@ def _analyze_player(
     # --- Step 8b: Decision Coherence Check ---
     # All probability adjustments (matchup bonus, economy delta, rating impact)
     # happen AFTER run_simulation locks in the decision.  If those adjustments
-    # flip over_prob below 50% when decision is OVER — or above 50% when it
-    # is UNDER — the displayed verdict contradicts the displayed probability.
-    # Guard against this by downgrading contradicted decisions to PASS so the
-    # embed never shows "✅ OVER" alongside a sub-50% over probability.
+    # move over_prob below 50% when decision is OVER — the embed would show
+    # "✅ OVER" alongside a sub-50% probability, which is contradictory.
+    #
+    # Thresholds (post-adjustment):
+    #   • If OVER but over_prob < 44% (clearly UNDER territory) → flip to UNDER
+    #   • If OVER but over_prob ∈ [44%, 50%) (mildly contradicted) → PASS
+    #   • Symmetric for UNDER → OVER / PASS
+    #
+    # The 44% cutoff preserves PASSes for genuinely mixed signals while letting
+    # clear-directional calls survive as OVER/UNDER rather than all defaulting PASS.
     if not sim_result.get("used_fallback"):
         _adj_over  = sim_result.get("over_prob",  50)
         _adj_under = sim_result.get("under_prob", 50)
         _cur_dec   = sim_result.get("decision", "PASS")
+
         if _cur_dec == "OVER" and _adj_over < _adj_under:
-            sim_result["decision"] = "PASS"
-            sim_result["recommendation"] = (
-                "⏸️ PASS — Post-adjustment signals mixed "
-                f"(over {_adj_over}% < under {_adj_under}%)"
-            )
-            logger.info(
-                f"[coherence] OVER→PASS after adjustments: "
-                f"over_prob={_adj_over}% under_prob={_adj_under}%"
-            )
+            if _adj_over < 44:
+                # Probability strongly favours UNDER — flip the decision
+                sim_result["decision"] = "UNDER"
+                sim_result["recommendation"] = (
+                    f"❌ UNDER — Evidence stack said OVER but sim strongly disagrees "
+                    f"(under {_adj_under}% vs over {_adj_over}%). Sim takes precedence."
+                )
+                logger.info(
+                    f"[coherence] OVER→UNDER (sim dominant): "
+                    f"over_prob={_adj_over}% under_prob={_adj_under}%"
+                )
+            else:
+                # Mildly contradicted — signals genuinely mixed
+                sim_result["decision"] = "PASS"
+                sim_result["recommendation"] = (
+                    "⏸️ PASS — Evidence stack and simulation disagree "
+                    f"(over {_adj_over}% vs under {_adj_under}%)"
+                )
+                logger.info(
+                    f"[coherence] OVER→PASS (borderline): "
+                    f"over_prob={_adj_over}% under_prob={_adj_under}%"
+                )
+
         elif _cur_dec == "UNDER" and _adj_under < _adj_over:
-            sim_result["decision"] = "PASS"
-            sim_result["recommendation"] = (
-                "⏸️ PASS — Post-adjustment signals mixed "
-                f"(under {_adj_under}% < over {_adj_over}%)"
-            )
-            logger.info(
-                f"[coherence] UNDER→PASS after adjustments: "
-                f"over_prob={_adj_over}% under_prob={_adj_under}%"
-            )
+            if _adj_under < 44:
+                # Probability strongly favours OVER — flip the decision
+                sim_result["decision"] = "OVER"
+                sim_result["recommendation"] = (
+                    f"✅ OVER — Evidence stack said UNDER but sim strongly disagrees "
+                    f"(over {_adj_over}% vs under {_adj_under}%). Sim takes precedence."
+                )
+                logger.info(
+                    f"[coherence] UNDER→OVER (sim dominant): "
+                    f"over_prob={_adj_over}% under_prob={_adj_under}%"
+                )
+            else:
+                sim_result["decision"] = "PASS"
+                sim_result["recommendation"] = (
+                    "⏸️ PASS — Evidence stack and simulation disagree "
+                    f"(under {_adj_under}% vs over {_adj_over}%)"
+                )
+                logger.info(
+                    f"[coherence] UNDER→PASS (borderline): "
+                    f"over_prob={_adj_over}% under_prob={_adj_under}%"
+                )
 
     # --- Step 9: Confidence Score (A–F) + Unit Sizing ---
     conf_score = 50  # baseline
@@ -1412,6 +1445,14 @@ def _analyze_player(
     sim_result["book_implied"]  = book_implied
     sim_result["book_odds_raw"] = book_odds_raw  # e.g. "-115", "+105", None
 
+    # --- Player / team identity fields (from info dict) ---
+    # These are needed by the embed builder but were never forwarded from info.
+    if not used_fallback and info:
+        sim_result.setdefault("player_team_id",   info.get("player_team_id"))
+        sim_result.setdefault("player_team_slug",  info.get("player_team_slug"))
+        sim_result.setdefault("team_mismatch",     info.get("team_mismatch", False))
+        sim_result.setdefault("player_slug",       info.get("player_slug"))
+
     return sim_result
 
 
@@ -1469,6 +1510,16 @@ def build_result_embed(
     pt_slug = result.get("player_team_slug")
     if pt_slug:
         player_team_str = f" ({pt_slug})"
+
+    # Team mismatch warning — resolved player is on a different team than hinted
+    _team_mismatch_warn = ""
+    if result.get("team_mismatch"):
+        _resolved_slug = result.get("player_slug", player_name)
+        _team_mismatch_warn = (
+            f"\n⚠️ **PLAYER MISMATCH** — Could not find **{player_name}** on "
+            f"the hinted team. Stats shown are for **{_resolved_slug}** ({pt_slug}). "
+            f"Try `!grade <exact_hltv_tag> ...` for correct results."
+        )
 
     opp_str = f" vs. **{opp_display}**" if opp_display else (f" vs. **{opp_name}**" if opp_name else "")
 
@@ -1655,7 +1706,7 @@ def build_result_embed(
     description = (
         f"**PLAYER:** {player_name}{player_team_str}{opp_str}\n"
         f"**MATCH:** Maps 1–2 {stat_unit} | **PROP LINE:** `{line}`"
-        f"{fb_warn}\n"
+        f"{fb_warn}{_team_mismatch_warn}\n"
         f"{SEP}\n"
         f"**GRADE:** `{conf_grade_chr}`\n"
         f"**PROJECTION:** {proj_icon} **{proj_word}** ({conf_level_str})\n"

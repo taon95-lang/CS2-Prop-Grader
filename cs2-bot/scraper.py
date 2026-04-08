@@ -925,9 +925,9 @@ def search_player_v2(
         if best_pid is None:
             logger.warning(
                 f"[search] No team match for hint='{team_hint}' — "
-                f"falling back to best name match"
+                f"returning None to force roster lookup instead of guessing wrong player"
             )
-            best_pid, best_slug, best_score = scored[0]
+            return None   # Caller will try roster lookup or raise RuntimeError
 
     elif opp_hint_norm:
         # Try each candidate; pick first whose match history includes the opponent
@@ -2028,9 +2028,38 @@ def get_player_info(
         if len(maps) < 2:
             continue  # Not enough map data — skip
 
-        # CS2-only filter: skip series containing maps that don't exist in CS2.
-        # Train, Cache, Cobblestone etc. are CS:GO-only — their presence means
-        # this is a historical CS:GO match and should not be used for CS2 props.
+        # ── CS2 era + map filter ──────────────────────────────────────────────
+        # Gate 1: Match ID / slug era check.
+        # CS2 launched Sept 27 2023.  HLTV match IDs are monotonically increasing;
+        # IDs below ~2,366,000 correspond to pre-launch dates.  The slug also
+        # reliably contains the event year (-2021-, -2022-, early -2023-).
+        # We skip anything confidently pre-CS2 to avoid CS:GO data contaminating
+        # props analysis.  Maps like Dust2/Mirage exist in both games, so a
+        # map-name check alone cannot distinguish CS:GO from CS2 matches.
+        _PRE_CS2_ID_THRESHOLD = 2_366_000  # approximately CS2 launch
+        _skip_era = False
+        try:
+            _mid_int = int(match_id)
+            if _mid_int < _PRE_CS2_ID_THRESHOLD:
+                _skip_era = True
+        except ValueError:
+            pass
+        # Belt-and-suspenders: year tokens in slug are definitive
+        _slug_lower = slug.lower()
+        if any(yr in _slug_lower for yr in ('-2020-', '-2021-', '-2022-')):
+            _skip_era = True
+        # Early 2023 (pre-CS2 launch) — IDs typically < 2,373,000 with a 2023 slug
+        if '-2023-' in _slug_lower and int(match_id) < 2_373_000:
+            _skip_era = True
+        if _skip_era:
+            logger.info(
+                f"[era_filter] Skipping match {match_id} ({slug}) — "
+                f"pre-CS2 era (ID {match_id} / slug year)"
+            )
+            continue
+
+        # Gate 2: Map name check — reject maps that never existed in CS2.
+        # Train, Cache, Cobblestone, etc. are CS:GO-only.
         _CS2_MAPS = {
             'dust2', 'mirage', 'inferno', 'nuke', 'anubis',
             'ancient', 'overpass', 'vertigo',
@@ -2171,6 +2200,21 @@ def get_player_info(
     _player_team_id   = _player_team[0] if _player_team else None
     _player_team_slug = _player_team[1] if _player_team else None
 
+    # ── Post-resolution team verification ────────────────────────────────────
+    # If a team_hint was given but the resolved player's current team doesn't
+    # match, set a flag so the embed can warn the user.  This catches edge cases
+    # where roster lookup or name search still returned the wrong player.
+    _team_mismatch = False
+    if team_hint and _player_team_slug:
+        _th_norm  = re.sub(r'[^a-z0-9]', '', team_hint.lower())
+        _pts_norm = re.sub(r'[^a-z0-9]', '', _player_team_slug.lower())
+        if _th_norm not in _pts_norm and _pts_norm not in _th_norm:
+            logger.warning(
+                f"[team_mismatch] Resolved {player_slug!r} (team={_player_team_slug!r}) "
+                f"does NOT match team_hint={team_hint!r} — data may be for wrong player"
+            )
+            _team_mismatch = True
+
     return {
         'player':            display_name,
         'player_id':         player_id,
@@ -2188,6 +2232,7 @@ def get_player_info(
         'bo3gg_context':     _bo3gg_ctx,       # {nickname, team_id, country, bo3gg_id} or None
         'liquipedia_role':   _liq_role,        # 'awper' | 'igl' | 'rifler' | None
         'country':           _country,         # country from bo3.gg or None
+        'team_mismatch':     _team_mismatch,   # True if resolved player's team ≠ team_hint
     }
 
 
