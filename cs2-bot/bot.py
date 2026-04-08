@@ -161,18 +161,19 @@ async def on_ready():
 # ---------------------------------------------------------------------------
 
 @bot.command(name="grade")
-async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: str = "Kills", opponent: str = None):
+async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
     if not player_name:
         await ctx.send(
             embed=discord.Embed(
                 title="❌ Usage Error",
                 description=(
                     "**Correct usage:**\n"
-                    "`!grade [Player Name] [Line] [Kills/HS] [Opponent?]`\n\n"
+                    "`!grade [Player] [Line] [Kills/HS] [Team?] [vs Opponent?]`\n\n"
                     "**Examples:**\n"
                     "`!grade ZywOo 38.5 Kills`\n"
-                    "`!grade ZywOo 38.5 Kills NaVi`\n"
-                    "`!grade s1mple 14.5 HS FaZe`\n"
+                    "`!grade sandman 28.5 Kills LAG` ← specify player's own team\n"
+                    "`!grade ZywOo 38.5 Kills vs NaVi` ← specify opponent\n"
+                    "`!grade sandman 28.5 Kills LAG vs Surge` ← both\n"
                     "`!grade ZywOo` ← auto-fetches live line from PrizePicks"
                 ),
                 color=0xFF4136,
@@ -180,11 +181,33 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
         )
         return
 
-    stat_type = stat_type.capitalize()
-    if stat_type not in ("Kills", "Hs"):
-        stat_type = "Kills"
-    if stat_type == "Hs":
-        stat_type = "HS"
+    # ── Parse remaining args: [stat?] [team?] [vs opponent?] ─────────────────
+    # "vs" is the explicit separator between the player's own team and the
+    # opponent.  Without "vs", the trailing token is a team hint (the player's
+    # own team) — NOT the opponent — which fixes the bug where
+    # "!grade sandman 28.5 kills lag" was treating LAG as the opposing team.
+    remaining = list(args)
+    stat_type = "Kills"
+    team_hint: str | None = None
+    opponent: str | None = None
+
+    # Pull stat type from the front if it's one of the recognised tokens
+    if remaining and remaining[0].lower() in ("kills", "hs", "headshots"):
+        stat_raw = remaining.pop(0).lower()
+        stat_type = "HS" if stat_raw in ("hs", "headshots") else "Kills"
+
+    # Split on "vs" (case-insensitive)
+    vs_indices = [i for i, a in enumerate(remaining) if a.lower() == "vs"]
+    if vs_indices:
+        vs_idx = vs_indices[0]
+        team_parts = remaining[:vs_idx]
+        opp_parts  = remaining[vs_idx + 1:]
+        team_hint  = " ".join(team_parts).strip() or None
+        opponent   = " ".join(opp_parts).strip() or None
+    else:
+        # No "vs" — everything left is the player's own team (disambiguation)
+        team_hint = " ".join(remaining).strip() or None
+        opponent  = None
 
     # If no line provided, try to pull it from PrizePicks live board
     pp_line_fetched = False
@@ -267,7 +290,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, stat_type: 
     fut = asyncio.ensure_future(
         loop.run_in_executor(
             None,
-            lambda: _analyze_player(player_name, line_val, stat_type, opponent),
+            lambda: _analyze_player(player_name, line_val, stat_type, opponent, team_hint),
         )
     )
 
