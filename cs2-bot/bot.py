@@ -531,7 +531,8 @@ def _analyze_player(
             player_name,
             stat_type=internal_stat,
             team_hint=player_team_hint,
-            opponent_hint=opponent if not player_team_hint else None,
+            opponent_hint=opponent,   # always pass — opponent is the strongest
+                                      # disambiguator when two players share a name
         )
         map_stats = info["map_kills"]
         data_source = info["source"]
