@@ -881,6 +881,57 @@ def _analyze_player(
     sim_result["line"]          = line
     sim_result["deep"]          = deep
     sim_result["opponent"]      = opponent     # raw user input — None if not supplied
+
+    # --- Step 3b: Specific-Matchup Veto ---
+    # S1-S4 in the evidence stack use the player's FULL historical record.
+    # When a specific opponent is analysed, two additional matchup-specific
+    # signals are available: the deep combined multiplier and the H2H rate.
+    # If BOTH of these simultaneously disagree with the current decision at
+    # meaningful thresholds, the call is downgraded to PASS.  One signal
+    # alone is never enough to override a strong multi-season edge.
+    #
+    # Example that triggered this fix: Sandman vs Boss — 70% overall hit rate
+    # says OVER, but Boss allows -23.6% kills AND H2H is 1/3 (33%) vs this
+    # specific opponent.  Both signals agree → downgrade to PASS.
+    if deep and not deep.get("error") and not used_fallback:
+        _comb_mult  = deep.get("combined_multiplier", 1.0) or 1.0
+        _comb_pct   = (_comb_mult - 1.0) * 100          # negative = fewer kills vs this opp
+        _h2h        = deep.get("h2h", [])
+        _h2h_n      = len(_h2h)
+        _h2h_clears = sum(1 for s in _h2h if s.get("cleared"))
+        _h2h_rate   = _h2h_clears / _h2h_n if _h2h_n >= 2 else None  # need ≥2 samples
+
+        _cur_dec    = sim_result.get("decision", "PASS")
+
+        if _cur_dec == "OVER":
+            # Veto OVER if defense is very tough AND H2H rate is low
+            _deep_bearish = _comb_pct <= -12          # -12% or worse defensive suppression
+            _h2h_bearish  = _h2h_rate is not None and _h2h_rate <= 0.40
+            if _deep_bearish and _h2h_bearish:
+                sim_result["decision"] = "PASS"
+                sim_result["recommendation"] = (
+                    f"⏸️ PASS — Historical edge vetoed by specific matchup: "
+                    f"defense {round(_comb_pct)}% · H2H {_h2h_clears}/{_h2h_n} cleared"
+                )
+                logger.info(
+                    f"[matchup_veto] OVER→PASS: deep={round(_comb_pct)}% "
+                    f"h2h={_h2h_clears}/{_h2h_n} ({round((_h2h_rate or 0)*100)}%)"
+                )
+
+        elif _cur_dec == "UNDER":
+            # Veto UNDER if defense is weak (allows many kills) AND H2H rate is high
+            _deep_bullish = _comb_pct >= 12           # +12% or more kills expected
+            _h2h_bullish  = _h2h_rate is not None and _h2h_rate >= 0.60
+            if _deep_bullish and _h2h_bullish:
+                sim_result["decision"] = "PASS"
+                sim_result["recommendation"] = (
+                    f"⏸️ PASS — Historical edge vetoed by specific matchup: "
+                    f"defense {round(_comb_pct)}% · H2H {_h2h_clears}/{_h2h_n} cleared"
+                )
+                logger.info(
+                    f"[matchup_veto] UNDER→PASS: deep={round(_comb_pct)}% "
+                    f"h2h={_h2h_clears}/{_h2h_n} ({round((_h2h_rate or 0)*100)}%)"
+                )
     sim_result["hs_rate_src"]   = hs_rate_src  # None for kills props, str for HS props
     sim_result["period_stats"]  = period_stats  # HLTV 90-day aggregate stats
     sim_result["is_awper"]          = is_awper
