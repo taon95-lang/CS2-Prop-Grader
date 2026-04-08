@@ -781,6 +781,27 @@ def _player_has_opponent_in_history(pid: str, opponent_norm: str) -> bool:
     return any(opponent_norm in re.sub(r'[^a-z0-9]', '', s) for s in slugs)
 
 
+def _player_has_upcoming_match(pid: str) -> bool:
+    """
+    Fetch /matches?player={pid} and return True if the player has any upcoming
+    scheduled matches.  Active players always have upcoming matches listed;
+    retired/inactive players have none.  Used to disambiguate when multiple
+    candidates share the same name/slug — the one with an upcoming match is
+    clearly the player that should be graded.
+    """
+    html = _fetch(f"{HLTV_BASE}/matches?player={pid}")
+    if not html:
+        return False
+    # HLTV lists upcoming matches as /matches/{id}/{slug} links in the schedule
+    upcoming = re.findall(r'/matches/(\d{7,})/[\w-]+', html)
+    has_match = len(upcoming) > 0
+    logger.debug(
+        f"[upcoming] player {pid} — "
+        f"{'HAS' if has_match else 'NO'} upcoming matches ({len(upcoming)} found)"
+    )
+    return has_match
+
+
 def search_player_v2(
     name: str,
     team_hint: str | None = None,
@@ -931,7 +952,34 @@ def search_player_v2(
             best_pid, best_slug, best_score = scored[0]
 
     else:
-        best_pid, best_slug, best_score = scored[0]
+        # No hints at all.  When multiple candidates share the same top name
+        # score (e.g. two players both nicknamed "sandman"), use the upcoming
+        # match check as the primary tiebreaker: an active player always has
+        # at least one scheduled match on HLTV; a retired player has none.
+        top_score = scored[0][2]
+        tied = [(pid, slug, sc) for pid, slug, sc in scored if sc == top_score]
+
+        if len(tied) > 1:
+            logger.info(
+                f"[search] {len(tied)} candidates tied at score={top_score} "
+                f"— checking upcoming matches to find active player"
+            )
+            for pid, slug, sc in tied:
+                if _player_has_upcoming_match(pid):
+                    best_pid, best_slug, best_score = pid, slug, sc
+                    logger.info(
+                        f"[search] Upcoming-match winner: slug={slug} (id={pid})"
+                    )
+                    break
+            if best_pid is None:
+                # All tied or none have upcoming match — fall back to highest player ID
+                logger.warning(
+                    f"[search] No upcoming matches found for tied candidates — "
+                    f"using highest player ID as tiebreaker"
+                )
+                best_pid, best_slug, best_score = scored[0]  # already sorted by ID desc
+        else:
+            best_pid, best_slug, best_score = scored[0]
 
     display = best_slug.replace("-", " ").title()
     logger.info(f"[search] Best match: {display} (id={best_pid}, slug={best_slug}, score={best_score})")
