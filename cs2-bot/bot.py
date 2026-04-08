@@ -1331,6 +1331,36 @@ def _analyze_player(
 
     sim_result["unit_recommendation"] = unit_rec
 
+    # --- Step 11: Lock Classification ---
+    # A "Lock" is reserved for calls where every available signal aligns
+    # decisively in one direction.  All five gates must pass:
+    #   1. Directional call (not PASS)
+    #   2. Grade ≥ 9/10 — evidence stack score ≥ 12
+    #   3. Confidence ≥ 80 — data quality + stability gate
+    #   4. Sim prob ≥ 68% for the directional side
+    #   5. Real HLTV data (not estimated fallback)
+    # The matchup veto (Step 3b) and coherence check (Step 8b) guard the
+    # upstream decision so if we reach OVER/UNDER here it has already
+    # survived those filters.
+    _dir_prob = (
+        sim_result.get("over_prob",  0) if decision_val == "OVER"
+        else sim_result.get("under_prob", 0) if decision_val == "UNDER"
+        else 0
+    )
+    is_lock = (
+        decision_val in ("OVER", "UNDER")
+        and grade_num_val >= 9
+        and pkg_conf >= 80
+        and _dir_prob >= 68
+        and not used_fallback
+    )
+    sim_result["is_lock"] = is_lock
+    if is_lock:
+        logger.info(
+            f"[lock] 🔒 LOCK — {decision_val} | grade={grade_num_val}/10 "
+            f"conf={pkg_conf} prob={_dir_prob}%"
+        )
+
     return sim_result
 
 
@@ -1370,14 +1400,21 @@ def build_result_embed(
     reason     = pkg.get("reason",     result.get("recommendation", ""))
 
     # ── Title ────────────────────────────────────────────────────────────────
+    is_lock = result.get("is_lock", False)
     d_icons = {"OVER": "✅", "UNDER": "❌", "PASS": "⏸️", "MISPRICED": "⚠️"}
-    title = f"🎯  {player_name}  ·  {line} {stat_unit}"
+    lock_prefix = "🔒 " if is_lock else ""
+    title = f"{lock_prefix}🎯  {player_name}  ·  {line} {stat_unit}"
+
+    # Lock upgrades the embed border color to gold so it's unmissable
+    if is_lock:
+        color = 0xFFD700  # Gold
 
     # ── Description — verdict banner ─────────────────────────────────────────
     conf_bar  = ge_prob_bar(confidence / 100, width=8)
     edge_sign = "+" if edge_pct >= 0 else ""
+    lock_banner = "🔒 **LOCK**  ·  " if is_lock else ""
     verdict_line = (
-        f"**{d_icons.get(decision, '📊')} {decision}**  ·  "
+        f"{lock_banner}**{d_icons.get(decision, '📊')} {decision}**  ·  "
         f"Confidence: **{confidence}/100** `{conf_bar}`  ·  "
         f"Edge: **{edge_sign}{edge_pct}%**"
     )
