@@ -980,9 +980,22 @@ def _analyze_player(
     # on invented stats. The grade stays for context but direction is unreliable.
     if used_fallback:
         sim_result["decision"] = "PASS"
-        sim_result["recommendation"] = "⚠️ PASS — Using estimated stats (HLTV unavailable)"
+        # Explain the specific cause so the user knows why they're seeing PASS
+        _n_real = len(map_stats)  # how many real maps were found before fallback kicked in
+        if _n_real == 0:
+            _fb_reason = (
+                f"⚠️ PASS — No BO3 match data found for **{player_name}** on HLTV "
+                f"(0 valid maps). The player may be inactive, or today's match "
+                f"stats haven't been posted yet. Try again after the event has results."
+            )
+        else:
+            _fb_reason = (
+                f"⚠️ PASS — Only {_n_real} map sample(s) found (need 4+). "
+                f"HLTV may be rate-limiting stats pages — try again in 5–10 min."
+            )
+        sim_result["recommendation"] = _fb_reason
         sim_result["grade"] = "N/A"
-        logger.info(f"[grade] Fallback data → forced PASS for {player_name}")
+        logger.info(f"[grade] Fallback data → forced PASS for {player_name} ({_n_real} real maps found)")
 
     # Apply +5% Over bonus for confirmed matchup favorites
     if deep and deep.get("matchup_favorite_bonus"):

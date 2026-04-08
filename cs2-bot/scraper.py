@@ -1040,15 +1040,49 @@ def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[st
             return stale
         return []
 
-    # Find all match links on the page — only large IDs work (small IDs return 500)
-    all_matches = re.findall(r'/matches/(\d+)/([a-z0-9-]+)', html)
+    # ── Parse ONLY result-row links (not nav/sidebar/footer links) ────────────
+    # HLTV's results page embeds many /matches/ links in sidebars, navbar, and
+    # event footers that are NOT this player's matches.  A bare regex over the
+    # entire page picks those up and contaminates the list with unrelated matches
+    # whose stats pages trip the 403 circuit-breaker before the player's real
+    # matches are even touched.
+    #
+    # We restrict to <a> elements inside .result-con or .results-all containers.
+    _soup_res = BeautifulSoup(html, 'html.parser')
+
+    # Primary: look for result-con anchor tags (current HLTV results page format)
+    result_anchors = []
+    for _rc in _soup_res.find_all('div', class_='result-con'):
+        for _a in _rc.find_all('a', href=True):
+            result_anchors.append(_a['href'])
+
+    # Secondary fallback: any <a> inside a .results-all container
+    if not result_anchors:
+        for _ra in _soup_res.find_all(class_='results-all'):
+            for _a in _ra.find_all('a', href=True):
+                result_anchors.append(_a['href'])
+
+    # Last resort: regex on the full page (original behaviour) — deduplicated
+    if not result_anchors:
+        logger.warning("[results] No result-con divs found — falling back to full-page regex")
+        result_anchors = [
+            f"/matches/{mid}/{slug}"
+            for mid, slug in re.findall(r'/matches/(\d+)/([a-z0-9-]+)', html)
+        ]
+
     seen = {}
-    for mid, slug in all_matches:
-        if mid not in seen and len(mid) >= 6:
-            seen[mid] = slug
+    for href in result_anchors:
+        m = re.match(r'/matches/(\d+)/([a-z0-9-]+)', href)
+        if m:
+            mid, slug = m.group(1), m.group(2)
+            if mid not in seen and len(mid) >= 6:
+                seen[mid] = slug
 
     results = list(seen.items())[:max_matches]
-    logger.info(f"[results] Found {len(results)} match IDs for player {player_id}")
+    logger.info(
+        f"[results] Found {len(results)} match IDs for player {player_id} "
+        f"(from {len(result_anchors)} result anchors)"
+    )
 
     # Store in cache
     _MATCH_IDS_CACHE[player_id] = (now, results)
@@ -1959,7 +1993,7 @@ def get_player_info(
     )
 
     # Step 2: Get recent match IDs
-    match_ids = get_player_match_ids(player_id, max_matches=30)
+    match_ids = get_player_match_ids(player_id, max_matches=40)
     if not match_ids:
         raise RuntimeError(f"No recent matches found for '{display_name}'")
 
