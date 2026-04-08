@@ -174,6 +174,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
                     "`!grade sandman 28.5 Kills LAG` ← specify player's own team\n"
                     "`!grade ZywOo 38.5 Kills vs NaVi` ← specify opponent\n"
                     "`!grade sandman 28.5 Kills LAG vs Surge` ← both\n"
+                    "`!grade ZywOo 38.5 Kills -115` ← real book odds (any position)\n"
                     "`!grade ZywOo` ← auto-fetches live line from PrizePicks"
                 ),
                 color=0xFF4136,
@@ -181,20 +182,47 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
         )
         return
 
-    # ── Parse remaining args: [stat?] [team?] [vs opponent?] ─────────────────
+    # ── Parse remaining args: [stat?] [odds?] [team?] [vs opponent?] ──────────
     # "vs" is the explicit separator between the player's own team and the
     # opponent.  Without "vs", the trailing token is a team hint (the player's
     # own team) — NOT the opponent — which fixes the bug where
     # "!grade sandman 28.5 kills lag" was treating LAG as the opposing team.
+    #
+    # Odds tokens: -110, -115, +105, +110, etc. — detected by leading +/- and digits.
+    # Example: !grade ZywOo 38.5 kills -115 vs NaVi
     remaining = list(args)
     stat_type = "Kills"
     team_hint: str | None = None
     opponent: str | None = None
+    book_odds_raw: str | None = None
+    book_implied: float = 0.5238  # default -110 both sides
+
+    def _parse_odds_implied(token: str) -> float | None:
+        """Convert American odds string to implied probability. Returns None if not odds."""
+        import re
+        if not re.match(r'^[+-]\d{2,4}$', token):
+            return None
+        try:
+            v = int(token)
+            if v > 0:
+                return 100 / (v + 100)
+            else:
+                return abs(v) / (abs(v) + 100)
+        except ValueError:
+            return None
 
     # Pull stat type from the front if it's one of the recognised tokens
     if remaining and remaining[0].lower() in ("kills", "hs", "headshots"):
         stat_raw = remaining.pop(0).lower()
         stat_type = "HS" if stat_raw in ("hs", "headshots") else "Kills"
+
+    # Pull odds token if present (can be anywhere before vs separator)
+    _odds_indices = [i for i, a in enumerate(remaining) if _parse_odds_implied(a) is not None]
+    if _odds_indices:
+        _oi = _odds_indices[0]
+        book_odds_raw = remaining.pop(_oi)
+        book_implied  = _parse_odds_implied(book_odds_raw)
+        logger.info(f"[grade] Book odds parsed: {book_odds_raw} → implied {book_implied:.4f}")
 
     # Split on "vs" (case-insensitive)
     vs_indices = [i for i, a in enumerate(remaining) if a.lower() == "vs"]
@@ -290,7 +318,10 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
     fut = asyncio.ensure_future(
         loop.run_in_executor(
             None,
-            lambda: _analyze_player(player_name, line_val, stat_type, opponent, team_hint),
+            lambda: _analyze_player(
+                player_name, line_val, stat_type, opponent, team_hint,
+                book_implied=book_implied, book_odds_raw=book_odds_raw,
+            ),
         )
     )
 
@@ -529,6 +560,8 @@ def _analyze_player(
     stat_type: str,
     opponent: str | None = None,
     player_team_hint: str | None = None,
+    book_implied: float = 0.5238,
+    book_odds_raw: str | None = None,
 ) -> dict:
     """
     All blocking I/O and CPU work lives here.
@@ -854,6 +887,7 @@ def _analyze_player(
             rank_gap=rank_gap,
             period_kpr=_period_kpr,
             today_opp_rank=today_opp_rank,
+            book_implied_prob=book_implied,
         )
     except Exception as e:
         err_name = type(e).__name__
@@ -1361,6 +1395,10 @@ def _analyze_player(
             f"conf={pkg_conf} prob={_dir_prob}%"
         )
 
+    # --- Book odds (user-supplied or defaulted to -110) ---
+    sim_result["book_implied"]  = book_implied
+    sim_result["book_odds_raw"] = book_odds_raw  # e.g. "-115", "+105", None
+
     return sim_result
 
 
@@ -1640,7 +1678,14 @@ def build_result_embed(
     n_sims   = result.get("n_simulations", 10000)
     eco_tag  = " _(eco-adj)_" if result.get("economy_adjusted") else ""
     sim_p10  = result.get("sim_p10")
+    sim_p25  = result.get("sim_p25")
+    sim_p75  = result.get("sim_p75")
     sim_p90  = result.get("sim_p90")
+    dpr_val  = result.get("dpr")
+    misprice_type_val = result.get("misprice_type", "")
+    outlier_note_val  = result.get("outlier_note", "")
+    book_odds_raw_val = result.get("book_odds_raw")
+    book_implied_val  = result.get("book_implied", 0.5238)
     over_bar = ge_prob_bar((over_p or 0) / 100) if isinstance(over_p, (int, float)) else ""
     if decision == "OVER":
         ev_raw = result.get("ev_over", None)
@@ -1648,15 +1693,40 @@ def build_result_embed(
         ev_raw = result.get("ev_under", None)
     else:
         ev_raw = None
-    ev_str    = f"\n• **EV vs -110:** `{'+' if ev_raw and ev_raw>=0 else ''}{ev_raw:.3f}u`" if ev_raw is not None else ""
-    range_str = f"\n• **Range (p10–p90):** `{sim_p10:.0f}–{sim_p90:.0f}`" if sim_p10 is not None and sim_p90 is not None else ""
+
+    # Build EV string — label with actual book odds if user supplied them
+    if ev_raw is not None:
+        _odds_label = f"vs {book_odds_raw_val}" if book_odds_raw_val else "vs -110"
+        ev_str = f"\n• **EV ({_odds_label}):** `{'+' if ev_raw >= 0 else ''}{ev_raw:.3f}u`"
+    else:
+        ev_str = ""
+
+    # Percentile range: p10–p90 headline + p25–p75 IQR below it
+    if sim_p10 is not None and sim_p90 is not None:
+        range_str = f"\n• **Range (p10–p90):** `{sim_p10:.0f}–{sim_p90:.0f}`"
+        if sim_p25 is not None and sim_p75 is not None:
+            range_str += f"  ·  **IQR (p25–p75):** `{sim_p25:.0f}–{sim_p75:.0f}`"
+    else:
+        range_str = ""
+
+    # DPR line
+    dpr_str = f"\n• **Deaths/Round (DPR):** `{dpr_val:.3f}`" if dpr_val is not None else ""
+
+    # Misprice type badge (show only when not Fair Line to avoid clutter)
+    if misprice_type_val and misprice_type_val != "Fair Line":
+        misprice_badge = f"\n• **Misprice Type:** `{misprice_type_val}`"
+    else:
+        misprice_badge = ""
+
+    # Outlier note
+    outlier_str = f"\n• {outlier_note_val}" if outlier_note_val else ""
 
     sim_val = (
         f"• **Simulated Mean:** `{sim_mean}`  ·  **σ:** `{sim_std}`\n"
         f"• **Over Probability:** `{over_p}%` {eco_tag} `{over_bar}`\n"
         f"• **Under Probability:** `{under_p}%`  ·  Push: `{push_p}%`\n"
         f"• **Edge vs. Line:** `{edge_sign}{edge_pct}%`  ·  **Fair Line:** `{fair_ln}`"
-        f"{ev_str}{range_str}"
+        f"{ev_str}{range_str}{dpr_str}{misprice_badge}{outlier_str}"
     )
     embed.add_field(name=f"📊 SIMULATION ({n_sims:,} RUNS)", value=sim_val, inline=False)
 

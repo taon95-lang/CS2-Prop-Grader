@@ -8,7 +8,10 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-N_SIMULATIONS = 10_000
+N_SIMULATIONS = 100_000
+
+# Standard sportsbook vig (-110 both sides = 52.38% implied probability)
+BOOK_IMPLIED_PROB = 0.5238
 
 
 def calculate_kpr(map_stats: list) -> float:
@@ -107,6 +110,7 @@ def run_simulation(
     rank_gap: int = None,
     period_kpr: float = None,
     today_opp_rank: int | None = None,
+    book_implied_prob: float = BOOK_IMPLIED_PROB,
 ) -> dict:
     """
     Run 100,000 Monte Carlo simulations using Negative Binomial distribution.
@@ -147,6 +151,37 @@ def run_simulation(
     stability_std = statistics.stdev(series_totals) if len(series_totals) > 1 else 0.0
     ceiling_val   = max(series_totals) if series_totals else 0
     floor_val     = min(series_totals) if series_totals else 0
+
+    # --- DPR (Deaths Per Round) ---
+    _dpr_valid = [m for m in map_stats if m.get("rounds", 0) > 0 and m.get("deaths") is not None]
+    if _dpr_valid:
+        dpr = round(sum(m["deaths"] / m["rounds"] for m in _dpr_valid) / len(_dpr_valid), 3)
+    else:
+        dpr = None
+
+    # --- Outlier Detection ---
+    # Flag when one monster or disaster series is distorting the average.
+    # Standard: any series total more than 2 std devs from mean is an outlier.
+    outlier_detected  = False
+    outlier_note      = ""
+    outlier_series    = None
+    avg_without       = None
+    med_without       = None
+    if len(series_totals) >= 4 and stability_std > 0:
+        series_mean = mean(series_totals)
+        for _sv in series_totals:
+            if abs(_sv - series_mean) > 2.0 * stability_std:
+                outlier_detected = True
+                outlier_series   = _sv
+                _without = [v for v in series_totals if v != _sv]
+                if _without:
+                    avg_without = round(mean(_without), 2)
+                    med_without = round(median(_without), 2)
+                    outlier_note = (
+                        f"⚠️ Outlier detected: {_sv} kills series. "
+                        f"Avg without: {avg_without} · Median without: {med_without}"
+                    )
+                break  # flag first outlier only
     if stability_std > 8:
         stability_label = "⚡ High Volatility"
     elif stability_std > 5:
@@ -319,16 +354,38 @@ def run_simulation(
     # < 50 → model says lean OVER (line is below median projection)
     line_percentile = round(float(np.mean(samples <= line)) * 100, 1)
 
-    # --- Fair Line & Misprice ---
+    # --- Fair Line & Misprice Classification ---
+    # Documents define:
+    #   Prop Error  — line off by 5+ kills/headshots from fair line
+    #   Mispriced   — line off by 2–4 from fair line
+    #   Trap        — avg/median above line but stomp risk or declining form
+    #   Fair Line   — within 2 of fair line, no strong signals
     fair_line  = round(sim_median, 1)
     line_gap   = fair_line - line
     abs_gap    = abs(line_gap)
     direction  = "+" if line_gap > 0 else ""
-    if abs_gap > 4:
-        misprice_label = f"🚨 MASSIVE MISPRICE ({direction}{line_gap:.1f})"
-    elif abs_gap > 2:
-        misprice_label = f"⚠️ Mispriced ({direction}{line_gap:.1f})"
+
+    # Determine misprice type
+    hist_avg_raw    = mean(series_totals) if series_totals else 0
+    hist_median_raw = median(series_totals) if series_totals else 0
+    _avg_above_line = hist_avg_raw > line and hist_median_raw > line
+    _stomp_or_cold  = stomp_via_rank or trend_pct <= -10
+
+    if abs_gap >= 5.0:
+        misprice_type  = "Prop Error"
+        misprice_label = f"🚨 PROP ERROR ({direction}{line_gap:.1f}) — book used wrong data"
+    elif abs_gap >= 2.0:
+        if _avg_above_line and _stomp_or_cold:
+            misprice_type  = "Trap"
+            misprice_label = f"⚠️ TRAP ({direction}{line_gap:.1f}) — looks beatable but context kills it"
+        else:
+            misprice_type  = "Mispriced"
+            misprice_label = f"⚠️ Mispriced ({direction}{line_gap:.1f}) — book underweighted context"
+    elif _avg_above_line and _stomp_or_cold:
+        misprice_type  = "Trap"
+        misprice_label = "🪤 TRAP — Average above line but stomp/cold-form risk"
     else:
+        misprice_type  = "Fair Line"
         misprice_label = "✅ Fair Line"
 
     # --- Expected Value (EV) vs standard -110 odds ---
@@ -337,8 +394,10 @@ def run_simulation(
     ev_over  = round(over_prob * (100 / 110) - under_prob, 4)
     ev_under = round(under_prob * (100 / 110) - over_prob, 4)
 
-    # --- Percentile ceiling / floor from simulation (p90/p10) ---
+    # --- Percentile ceiling / floor from simulation ---
     sim_p10 = float(np.percentile(samples, 10))
+    sim_p25 = float(np.percentile(samples, 25))
+    sim_p75 = float(np.percentile(samples, 75))
     sim_p90 = float(np.percentile(samples, 90))
 
     # --- Historical stats ---
@@ -364,6 +423,7 @@ def run_simulation(
         stability_std=stability_std,
         trend_pct=trend_pct,
         stomp_via_rank=stomp_via_rank,
+        book_implied_prob=book_implied_prob,
     )
 
     return {
@@ -418,6 +478,16 @@ def run_simulation(
         # --- Opponent quality weighting metadata ---
         "opp_quality_weighted":   _any_weighted,
         "today_opp_rank":         today_opp_rank,
+        # --- New fields (document integration) ---
+        "sim_p25":                round(sim_p25, 1),
+        "sim_p75":                round(sim_p75, 1),
+        "dpr":                    dpr,
+        "misprice_type":          misprice_type,
+        "outlier_detected":       outlier_detected,
+        "outlier_note":           outlier_note,
+        "outlier_series":         outlier_series,
+        "avg_without_outlier":    avg_without,
+        "med_without_outlier":    med_without,
     }
 
 
@@ -433,6 +503,7 @@ def calculate_grade(
     stability_std: float = 0.0,
     trend_pct: float = 0.0,
     stomp_via_rank: bool = False,
+    book_implied_prob: float = BOOK_IMPLIED_PROB,
 ) -> tuple:
     """
     Evidence-stacking grade engine — v2.
@@ -519,17 +590,34 @@ def calculate_grade(
     else:
         decision = "PASS"
 
-    # ── Grade scale (based on raw signal strength, not stomp-adjusted) ───────
-    abs_r = abs(raw_total)
+    # ── Grade scale — edge % vs -110 (52.38% implied) ────────────────────────
+    # Documents define grade by edge vs book, NOT by raw evidence stack score.
+    # Evidence stack drives DECISION only; grade number reflects betting value.
+    #
+    #   10/10  edge ≥ 15%   Prop error / extreme misprice
+    #   9/10   edge ≥ 12%   Very strong, book made a clear mistake
+    #   8/10   edge ≥  8%   Strong, playable with supporting context
+    #   7/10   edge ≥  5%   Solid value, worth a bet if context confirms
+    #   6/10   edge ≥  3%   Marginal, playable only with strong conviction
+    #   5/10   edge ≥  0%   Borderline — line is roughly fair
+    #   4/10   negative     Wrong side or no edge — do not bet
     if decision == "PASS":
         grade_str = "N/A"
         rec = "⏸️ PASS — Signals too mixed for a confident call"
     else:
-        if   abs_r >= 15:   grade_num, edge_label = 10, "Elite edge"
-        elif abs_r >= 12:   grade_num, edge_label = 9,  "Elite edge"
-        elif abs_r >= 10:   grade_num, edge_label = 8,  "Strong edge"
-        elif abs_r >= 8:    grade_num, edge_label = 7,  "Solid lean"
-        else:               grade_num, edge_label = 6,  "Lean"
+        # Directional edge vs book implied probability (default -110 = 52.38%)
+        if decision == "OVER":
+            dir_edge_pct = (over_prob - book_implied_prob) * 100
+        else:  # UNDER
+            dir_edge_pct = ((1.0 - over_prob) - book_implied_prob) * 100
+
+        if   dir_edge_pct >= 15: grade_num, edge_label = 10, "Elite edge"
+        elif dir_edge_pct >= 12: grade_num, edge_label = 9,  "Elite edge"
+        elif dir_edge_pct >= 8:  grade_num, edge_label = 8,  "Strong edge"
+        elif dir_edge_pct >= 5:  grade_num, edge_label = 7,  "Solid lean"
+        elif dir_edge_pct >= 3:  grade_num, edge_label = 6,  "Marginal edge"
+        elif dir_edge_pct >= 0:  grade_num, edge_label = 5,  "Fair line"
+        else:                    grade_num, edge_label = 4,  "Negative edge"
 
         grade_str = f"{grade_num}/10 ({edge_label})"
         sign = "✅" if decision == "OVER" else "❌"

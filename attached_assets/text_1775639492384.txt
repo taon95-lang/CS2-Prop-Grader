@@ -1,0 +1,538 @@
+
+ULTIMATE CS2 PROP GRADING GUIDE
+MAIN GOAL
+	•	Grade CS2 player props for Maps 1–2 combined in a BO3 using the most recent, relevant data possible.
+	•	Focus on finding:
+	•	mispriced lines
+	•	clear edges
+	•	matchup/context advantages
+	•	prop errors
+	•	strong overs
+	•	strong unders
+	•	The goal is not just to say over or under.
+	•	The goal is to determine whether the line is beatable and whether the sportsbook made a mistake.
+
+⸻
+
+DATA SOURCES
+	•	Use verified sources only:
+	•	HLTV
+	•	Liquipedia
+	•	ESL match records
+	•	HLTV is the main source.
+	•	Liquipedia is used for:
+	•	match format confirmation
+	•	roster confirmation
+	•	event info
+	•	recent schedules/results
+	•	ESL records can help confirm event structure or map/match context when needed.
+
+⸻
+
+DATA WINDOW
+	•	Default data window:
+	•	last 10 BO3 series
+	•	Maps 1–2 only
+	•	current month / last 30 days only
+	•	Do not use old data by default.
+	•	Do not use stats from 3 months ago unless sample is unusable and you clearly say so.
+	•	If sample is too small:
+	•	minimum acceptable expansion is to the most recent 8 maps of Maps 1–2
+	•	only expand slightly, not all the way back to old irrelevant data
+	•	Head-to-head:
+	•	include recent H2H if available
+	•	H2H does not need to be inside the last 10 series
+	•	H2H must still be somewhat recent
+	•	do not use H2H from last year unless there is absolutely nothing else and it is clearly labeled as weak context
+
+⸻
+
+EXACT HLTV EXTRACTION METHOD
+	•	Go to the player’s profile.
+	•	Open the Matches tab.
+	•	Identify the last 10 BO3 series.
+	•	Use only Maps 1–2 from each BO3.
+	•	For each relevant match:
+	•	open the match page
+	•	click the player’s stats / more details / detailed stats area for total amout of headshots for maps 1-2
+	•	record kills, deaths, ADR, rating, impact, rounds played, and headshots
+	•	For headshots:
+	•	HLTV does show them
+	•	on detailed stats, headshots appear in parentheses next to kills per map
+	
+	•	For every map, record:
+	•	map name
+	•	kills
+	•	deaths
+	•	headshots
+	•	rounds played
+	•	ADR
+	•	rating
+	•	impact
+	•	side splits if available
+
+⸻
+
+WHAT TO TRACK FOR EVERY PLAYER
+	•	Kills per round (KPR)
+	•	Deaths per round (DPR)
+	•	Headshots per map
+	•	Headshot rate
+	•	ADR
+	•	HLTV Rating 3.0
+	•	Impact rating
+	•	Opening duel attempts
+	•	Opening duel success rate
+	•	Multi-kill frequency
+	•	Role
+	•	Map-by-map consistency
+	•	Recent average kills on Maps 1–2 combined
+	•	Median kills on Maps 1–2 combined
+	•	Ceiling games
+	•	Floor games
+
+⸻
+
+ROLE CLASSIFICATION MATTERS
+	•	Entry fragger
+	•	higher volatility
+	•	more first-fight exposure
+	•	can smash overs in close/high-round games
+	•	can die early and miss in stomps
+	•	AWPer
+	•	highest kill ceiling in many matchups
+	•	often strongest over candidate if matchup is close
+	•	more sensitive to opponent pace and map pool
+	•	Lurker
+	•	usually steadier than entry
+	•	good for stable kill projections
+	•	less explosive than top entry/AWPer profiles
+	•	Support
+	•	lower frag share
+	•	usually worse over candidates
+	•	better under candidates when line is inflated
+	•	Star rifler
+	•	often strongest prop profile overall
+	•	solid floor + ceiling
+	•	usually best when team is favored but match is still competitive
+
+⸻
+
+PLAYER FORM RULES
+	•	Recent form matters more than long-term name value.
+	•	Prioritize:
+	•	current month form
+	•	last 10 BO3 series
+	•	Maps 1–2 only
+	•	If a player is underperforming recently, do not blindly trust season averages.
+	•	If a player is on a heater, do not ignore it.
+	•	Check:
+	•	has kill volume risen recently?
+	•	is ADR climbing?
+	•	is impact climbing?
+	•	are headshots stable or spiking?
+	•	is the player facing weaker opposition than usual?
+	•	Averages alone are not enough.
+	•	Always check the distribution:
+	•	how often does he actually clear the line?
+	•	how often does he land near the line?
+	•	how often does he fail badly?
+
+⸻
+
+TEAM CONTEXT YOU MUST INCLUDE
+	•	Team ranking difference
+	•	Team strength difference
+	•	Match odds
+	•	Moneyline / series odds
+	•	Recent team form
+	•	Team map pool
+	•	Team pace
+	•	T-side round win %
+	•	CT-side round win %
+	•	Opening kill success %
+	•	Economy conversion rate
+	•	Whether the team tends to:
+	•	stomp weaker teams
+	•	play close maps
+	•	drag games long
+	•	lose quickly when behind
+
+⸻
+
+MATCH ODDS MATTER
+	•	Match odds help estimate expected round volume.
+	•	Close match = more rounds = better for overs.
+	•	Heavy favorite = stomp risk = worse for overs unless line is still too low.
+	•	Use this logic:
+	•	coinflip / close odds = boost kill expectation
+	•	moderate favorite = neutral to slight over lean for star players
+	•	huge favorite = danger for overs because the match may end too fast
+	•	A player can still go over in a stomp if:
+	•	line is too low
+	•	player is a high-usage star
+	•	opponent is weak enough to feed kills early
+
+⸻
+
+MAP POOL IS ONE OF THE BIGGEST FACTORS
+	•	Do not grade props without checking likely maps.
+	•	Estimate likely Maps 1–2 using:
+	•	team pick tendencies
+	•	recent bans
+	•	comfort maps
+	•	head-to-head veto patterns
+	•	Weight map probability using:
+	•	pick frequency
+	•	recent play frequency
+	•	team strength on map
+	•	opponent ban habits
+	•	Normalize total probability to 100%.
+	•	Then apply player performance by map.
+
+⸻
+
+MAP-SPECIFIC ADJUSTMENTS
+	•	Fast / loose / high-frag maps can inflate kill totals.
+	•	Slower / tighter / utility-heavy maps can suppress kill totals.
+	•	General map logic:
+	•	Mirage: often good for fraggers
+	•	Inferno: can produce strong frag volume in close games
+	•	Ancient: role/map dependent
+	•	Vertigo: volatility matters
+	•	Nuke: can suppress some roles, especially if one side dominates
+	•	Anubis: pace/context dependent
+	•	Do not use generic map takes only.
+	•	Always check what that specific player does on that specific map recently.
+
+⸻
+
+H2H RULES
+	•	Include recent H2H when available.
+	•	H2H is a secondary input, not the main one.
+	•	Use it to answer:
+	•	does this team/player matchup create repeated success?
+	•	does the player consistently farm this opponent?
+	•	does the opponent’s system limit this role?
+	•	Avoid stale H2H.
+	•	Avoid using last year’s H2H unless clearly labeled weak.
+	•	Best H2H use:
+	•	recent matchups
+	•	similar roster versions
+	•	same role matchup still in place
+
+⸻
+
+WHAT MAKES A PROP MISPRICED
+	•	A prop is mispriced when the line does not match realistic expected output.
+	•	Examples:
+	•	player averaging 35 kills on Maps 1–2 and line is 27.5
+	•	player clears the line in 7 or 8 of last 10 relevant samples
+	•	matchup projects long and close but book line assumes short match
+	•	book ignores favorable map pool
+	•	book ignores role advantage
+	•	book uses stale reputation instead of recent form
+	•	A mispriced over usually has:
+	•	strong recent average
+	•	strong median
+	•	good map pool
+	•	close match odds or still-low line
+	•	stable role
+	•	A mispriced under usually has:
+	•	inflated line
+	•	weak recent form
+	•	bad map pool
+	•	blowout risk
+	•	support/low-volume role
+	•	opponent suppresses kills well
+
+⸻
+
+HOW TO CATCH A CLEAR PROP ERROR
+	•	A clear error is when the line is obviously out of range.
+	•	Examples:
+	•	line 27.5, player averaging 35
+	•	line 15.5 headshots, player averaging 18–20 with stable HS volume
+	•	line inflated for a support because of one outlier match
+	•	line too high for a player in a likely 2-0 stomp
+	•	Red flags that suggest an error:
+	•	line far below recent average and median
+	•	line ignores player’s role
+	•	line ignores matchup odds
+	•	line ignores likely maps
+	•	line inflated off brand name, not current form
+	•	Do not call something a clear error off average alone.
+	•	Confirm with:
+	•	median
+	•	hit rate
+	•	round projection
+	•	matchup context
+	•	map pool
+
+⸻
+
+ROUND PROJECTION IS ESSENTIAL
+	•	Kills come from rounds.
+	•	No round projection = weak grading.
+	•	Default expectation:
+	•	typical map length around 20–22 rounds per map
+	•	Adjust higher if:
+	•	match is close
+	•	both teams play tight maps
+	•	OT risk exists
+	•	Adjust lower if:
+	•	one team is likely to dominate
+	•	opponent is weak
+	•	stomp risk is high
+	•	The best overs usually happen when:
+	•	player has high KPR
+	•	match projects enough rounds
+	•	The best unders usually happen when:
+	•	line is high
+	•	match may finish too fast
+	•	player has weak recent KPR
+
+⸻
+
+BEST CORE FORMULA
+	•	Start with:
+	•	expected kills = projected rounds × player KPR
+	•	Then adjust for:
+	•	likely maps
+	•	player role
+	•	opponent strength
+	•	match odds
+	•	map pace
+	•	recent form
+	•	H2H context
+	•	For headshots:
+	•	expected headshots = expected kills × recent HS rate
+	•	Always use recent HS rate from recent relevant sample, not stale season-wide data.
+
+⸻
+
+SIMULATION MODEL
+	•	Best practice:
+	•	run Monte Carlo simulation
+	•	minimum 100,000 runs
+	•	Model steps:
+	•	choose Maps 1–2 based on map probabilities
+	•	estimate rounds per map
+	•	simulate round outcomes
+	•	simulate kills using player-specific scoring distribution
+	•	aggregate kills across Maps 1–2
+	•	Preferred kill model:
+	•	Negative Binomial for kill totals
+	•	Why:
+	•	kill outcomes are volatile
+	•	simple averages miss ceiling/floor behavior
+	•	Use fixed seed for consistency.
+
+⸻
+
+OUTPUTS YOU SHOULD ALWAYS PRODUCE
+	•	Simulated mean
+	•	Standard deviation
+	•	Median
+	•	25th percentile
+	•	75th percentile
+	•	Over probability
+	•	Under probability
+	•	Expected kills
+	•	Edge vs sportsbook line
+	•	Fair line / true line if possible
+	•	Final grade
+	•	Final bet recommendation
+
+⸻
+
+HOW TO CALCULATE EDGE
+	•	Compare your projected probability to implied sportsbook probability.
+	•	If your model says over hits 61% and the line implies 50%, that is edge.
+	•	Bigger gap = stronger play.
+	•	Edge should drive the grade, not feelings.
+
+⸻
+
+GRADING SCALE
+	•	10/10 = elite edge, strong misprice, clear bet
+	•	9/10 = very strong edge
+	•	8/10 = strong playable edge
+	•	7/10 = solid lean / good value
+	•	6/10 = small edge, playable only if needed
+	•	5/10 = thin edge / borderline
+	•	below 5/10 = no bet
+
+⸻
+
+BEST RULES FOR OVERS
+	•	Favor overs when:
+	•	player is a star rifler, entry, or AWPer
+	•	line is below recent average and median
+	•	player has strong KPR
+	•	match odds suggest close maps
+	•	likely map pool is favorable
+	•	player has been clearing the line consistently
+	•	opponent gives up kills to that role
+	•	Best over profile:
+	•	high-usage player
+	•	strong recent form
+	•	stable role
+	•	good map pool
+	•	enough rounds projected
+
+⸻
+
+BEST RULES FOR UNDERS
+	•	Favor unders when:
+	•	line is inflated
+	•	player is support/low-frag role
+	•	team is huge favorite and stomp risk is high
+	•	match may end too quickly
+	•	recent average is below line
+	•	median is below line
+	•	player only clears via outlier games
+	•	map pool hurts the player
+	•	Best under profile:
+	•	unstable or weak form
+	•	bad map fit
+	•	high line
+	•	low projected rounds
+
+⸻
+
+THINGS THAT FOOL BAD PROP GRADERS
+	•	Using full-season stats instead of recent stats
+	•	Ignoring Maps 1–2 only requirement
+	•	Ignoring round counts
+	•	Ignoring role
+	•	Ignoring map veto
+	•	Ignoring match odds
+	•	Overreacting to one huge game
+	•	Using stale H2H from last year
+	•	Trusting average without checking hit rate and median
+	•	Not checking HLTV detailed stats for headshots
+	•	Not separating close-match overs from stomp-risk overs
+
+⸻
+
+BEST TIPS/TRICKS
+	•	Always log kills and headshots manually from HLTV detailed stats when needed.
+	•	Median is often better than average for spotting fake lines.
+	•	Compare:
+	•	recent average
+	•	recent median
+	•	hit rate
+	•	projected rounds
+	•	A player averaging high kills in long games may still be an under if this matchup projects short.
+	•	A player averaging only modest kills can still be an over if:
+	•	line is extremely low
+	•	matchup projects long
+	•	role is strong
+	•	Watch for books hanging lines off name value.
+	•	Watch for support players getting inflated because of one recent spike.
+	•	Watch for star AWPers with lines too low in competitive series.
+	•	Watch for entries in bloodbath maps with close odds.
+	•	Use H2H as support, not as the foundation.
+	•	If the line looks too easy, confirm there is no stomp risk trap.
+	•	If the line looks too high, confirm the book is not baiting off one monster performance.
+
+⸻
+
+STEP-BY-STEP WORKFLOW
+	•	Step 1:
+	•	identify the match
+	•	confirm BO3 format
+	•	Step 2:
+	•	find the player’s last 10 BO3 series
+	•	take Maps 1–2 only
+	•	Step 3:
+	•	extract kills, deaths, headshots, rounds, ADR, rating, impact
+	•	Step 4:
+	•	calculate:
+	•	KPR
+	•	DPR
+	•	HS rate
+	•	average kills
+	•	median kills
+	•	hit rate
+	•	Step 5:
+	•	classify player role
+	•	Step 6:
+	•	check team strength, ranking, odds, and recent form
+	•	Step 7:
+	•	estimate likely Maps 1–2
+	•	Step 8:
+	•	project round volume
+	•	Step 9:
+	•	adjust for role, matchup, pace, and map pool
+	•	Step 10:
+	•	simulate or project expected kills/headshots
+	•	Step 11:
+	•	compare projection to sportsbook line
+	•	Step 12:
+	•	identify:
+	•	value
+	•	misprice
+	•	trap
+	•	no bet
+	•	Step 13:
+	•	assign grade
+	•	Step 14:
+	•	make final recommendation
+
+⸻
+
+FINAL RESULT FORMAT
+	•	Player:
+	•	Match:
+	•	Prop:
+	•	Role:
+	•	Recent sample used:
+	•	Recent average:
+	•	Recent median:
+	•	Hit rate:
+	•	Projected rounds:
+	•	Expected kills:
+	•	Simulated mean:
+	•	Standard deviation:
+	•	Over probability:
+	•	Under probability:
+	•	Edge vs line:
+	•	Mispriced or not:
+	•	Final grade:
+	•	Bet recommendation:
+
+⸻
+
+SIMPLE FINAL DECISION RULES
+	•	If player is averaging far above the line, median is above the line, hit rate is strong, and matchup is not a stomp trap:
+	•	over
+	•	If player is averaging below the line, median is below the line, role is weak, or match is likely short:
+	•	under
+	•	If average is close to line and context is mixed:
+	•	no bet
+	•	If the sportsbook line is clearly off relative to recent data and matchup context:
+	•	call it a mispriced prop
+	•	If the line is wildly below realistic output:
+	•	call it a prop error
+
+⸻
+
+GOLD STANDARD SUMMARY
+	•	Use recent stats only.
+	•	Use last 10 BO3 series.
+	•	Use Maps 1–2 only.
+	•	Use HLTV detailed stats for headshots.
+	•	Include recent H2H.
+	•	Include role.
+	•	Include map pool.
+	•	Include match odds.
+	•	Include rankings/team strength.
+	•	Include projected rounds.
+	•	Include simulation/probability.
+	•	Compare projection to sportsbook line.
+	•	Identify mispriced lines and clear errors.
+	•	Grade the edge.
+	•	Do not bet props just because of average alone.
+	•	Bet props when numbers, context, and line all agree
