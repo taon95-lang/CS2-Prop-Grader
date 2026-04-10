@@ -1756,18 +1756,20 @@ def build_result_embed(
         )
 
     # ── Simulation field ──────────────────────────────────────────────────────
-    over_p   = result.get("over_prob",  "N/A")
-    under_p  = result.get("under_prob", "N/A")
-    push_p   = result.get("push_prob",  0)
-    sim_mean = result.get("sim_mean",   "N/A")
-    sim_std  = result.get("sim_std",    "N/A")
-    n_sims   = result.get("n_simulations", 10000)
-    eco_tag  = " _(eco-adj)_" if result.get("economy_adjusted") else ""
-    sim_p10  = result.get("sim_p10")
-    sim_p25  = result.get("sim_p25")
-    sim_p75  = result.get("sim_p75")
-    sim_p90  = result.get("sim_p90")
-    dpr_val  = result.get("dpr")
+    over_p    = result.get("over_prob",  "N/A")
+    under_p   = result.get("under_prob", "N/A")
+    push_p    = result.get("push_prob",  0)
+    sim_mean  = result.get("sim_mean",   "N/A")
+    sim_std   = result.get("sim_std",    "N/A")
+    n_sims    = result.get("n_simulations", 10000)
+    eco_tag   = " _(eco-adj)_" if result.get("economy_adjusted") else ""
+    sim_p10   = result.get("sim_p10")
+    sim_p25   = result.get("sim_p25")
+    sim_p75   = result.get("sim_p75")
+    sim_p90   = result.get("sim_p90")
+    dpr_val   = result.get("dpr")
+    hist_ceil = result.get("ceiling")
+    hist_flr  = result.get("floor")
     misprice_type_val = result.get("misprice_type", "")
     outlier_note_val  = result.get("outlier_note", "")
     book_odds_raw_val = result.get("book_odds_raw")
@@ -1807,12 +1809,18 @@ def build_result_embed(
     # Outlier note
     outlier_str = f"\n• {outlier_note_val}" if outlier_note_val else ""
 
+    # Historical series ceiling / floor (actual observed max/min M1+M2 kills)
+    if hist_ceil is not None and hist_flr is not None:
+        hist_range_str = f"\n• **Historical Ceiling/Floor:** `{hist_flr}–{hist_ceil}`"
+    else:
+        hist_range_str = ""
+
     sim_val = (
         f"• **Simulated Mean:** `{sim_mean}`  ·  **σ:** `{sim_std}`\n"
         f"• **Over Probability:** `{over_p}%` {eco_tag} `{over_bar}`\n"
         f"• **Under Probability:** `{under_p}%`  ·  Push: `{push_p}%`\n"
         f"• **Edge vs. Line:** `{edge_sign}{edge_pct}%`  ·  **Fair Line:** `{fair_ln}`"
-        f"{ev_str}{range_str}{dpr_str}{misprice_badge}{outlier_str}"
+        f"{ev_str}{range_str}{hist_range_str}{dpr_str}{misprice_badge}{outlier_str}"
     )
     embed.add_field(name=f"📊 SIMULATION ({n_sims:,} RUNS)", value=sim_val, inline=False)
 
@@ -1841,6 +1849,12 @@ def build_result_embed(
         bm = map_intel["best_map"]
         wm = map_intel["worst_map"]
         mi_parts.append(f"Best: {bm[0].title()} `{bm[1]}` ↑ · Worst: {wm[0].title()} `{wm[1]}` ↓")
+    # Per-map KPR breakdown (from simulator — shows kill efficiency per map name)
+    _map_kpr = result.get("map_kpr") or {}
+    if _map_kpr:
+        _mkpr_sorted = sorted(_map_kpr.items(), key=lambda x: x[1], reverse=True)
+        _mkpr_parts  = [f"{mn.title()} `{kpr:.2f}`" for mn, kpr in _mkpr_sorted[:5]]
+        mi_parts.append("**KPR by Map:** " + " · ".join(_mkpr_parts))
     if mi_parts:
         embed.add_field(name="🗺️ Map Intelligence", value="\n".join(mi_parts), inline=False)
 

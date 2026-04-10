@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+“””
+CS2 Prop Grader — HLTV Data Scraper (v2)
+Built from HLTV site structure scan — targets exact URL patterns.
+
+Pulls player stats directly from HLTV for recent BO3 Maps 1–2.
+
+Usage:
+python hltv_scraper.py –search “donk”
+python hltv_scraper.py –player-url “https://www.hltv.org/player/19170/donk”
+python hltv_scraper.py –player-id 19170 –player-name “donk”
+
+Outputs JSON with per-map stats ready for simulate.py.
+
+HLTV blocks automated requests (403/429). This scraper uses realistic
+browser headers and respectful delays. When HLTV blocks, it outputs
+fallback search queries for manual data gathering.
+
+─── HLTV URL PATTERNS (from site scan) ───
+
+Navigation tabs:
+/                          → News / frontpage
+/matches                   → Upcoming & live matches
+/results                   → Past results (filterable)
+/ranking/teams/{year}/{month}/{day} → Weekly team rankings
+
+Stats section (the gold mine for props):
+/stats                     → Stats overview
+/stats/players             → Player leaderboard
+/stats/players/{id}/{name} → Individual player stats
+/stats/players/matches/{id}/{name} → Player’s match list
+/stats/teams               → Team stats (sub: Overview, FTU, Pistol rounds)
+/stats/matches             → Match stats archive
+/stats/events              → Per-event stats
+/stats/maps                → Map-level aggregates
+/stats/leaderboards        → Stat leader rankings
+/stats/compare             → H2H player comparison
+
+Stats filters (query params — all combinable):
+?csVersion=CS2             → CS2 only
+?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD  → Date range
+?matchType=bo3             → BO3 only (also: bo1, bo5)
+?rankingFilter=Top50       → vs Top 50 teams
+?event=XXXX                → Specific event
+?maps=de_mirage            → Specific map
+
+Match pages:
+/matches/{id}/{slug}       → Match overview + veto
+/stats/matches/mapstatsid/{id}/{slug} → Per-map detailed stats
+
+Player profile:
+/player/{id}/{name}        → Profile overview
+/player/{id}/{name}#tab-matchesBox → Recent matches tab
+
+Forum sections:
+Counter-Strike, Fantasy, Hardware & Tweaks,
+Bugs & Suggestions, Betting, Off-Topic
+“””
+
+import argparse
+import json
+import re
+import sys
+import time
+from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote_plus, urlencode
+from datetime import datetime, timedelta
+
+# ═══════════════════════════════════════════════════════════════
+
+# HTTP CONFIG
+
+# ═══════════════════════════════════════════════════════════════
+
+HEADERS = {
+“User-Agent”: (
+“Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 “
+“(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36”
+),
+“Accept”: “text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8”,
+“Accept-Language”: “en-US,en;q=0.9”,
+“Accept-Encoding”: “identity”,
+“Connection”: “keep-alive”,
+“Referer”: “https://www.hltv.org/stats”,
+“Sec-Fetch-Dest”: “document”,
+“Sec-Fetch-Mode”: “navigate”,
+“Sec-Fetch-Site”: “same-origin”,
+“Sec-Fetch-User”: “?1”,
+“Upgrade-Insecure-Requests”: “1”,
+“Cache-Control”: “max-age=0”,
+}
+
+RATE_LIMIT_DELAY = 3.5  # seconds between requests
+BASE_URL = “https://www.hltv.org”
+
+# ═══════════════════════════════════════════════════════════════
+
+# HTTP HELPERS
+
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_page(url, max_retries=2):
+“”“Fetch a page with retries, exponential backoff, and rate limiting.”””
+for attempt in range(max_retries + 1):
+try:
+req = Request(url, headers=HEADERS)
+with urlopen(req, timeout=20) as resp:
+html = resp.read().decode(“utf-8”, errors=“replace”)
+time.sleep(RATE_LIMIT_DELAY)
+return html
+except HTTPError as e:
+if e.code == 403:
+log(f”403 Forbidden: {url} (attempt {attempt+1}/{max_retries+1})”)
+if attempt < max_retries:
+wait = 8 * (attempt + 1)
+log(f”Retrying in {wait}s…”)
+time.sleep(wait)
+continue
+return None
+elif e.code == 429:
+log(“429 Rate limited — waiting 45s…”)
+time.sleep(45)
+continue
+else:
+log(f”HTTP {e.code}: {url}”)
+return None
+except (URLError, TimeoutError, OSError) as e:
+log(f”Connection error: {url} — {e}”)
+if attempt < max_retries:
+time.sleep(5 * (attempt + 1))
+continue
+return None
+return None
+
+def log(msg):
+“”“Log to stderr (keeps stdout clean for JSON output).”””
+print(f”[hltv] {msg}”, file=sys.stderr)
+
+# ═══════════════════════════════════════════════════════════════
+
+# STEP 1: FIND THE PLAYER
+
+# ═══════════════════════════════════════════════════════════════
+
+def search_player(player_name):
+“”“Search HLTV for a player by nickname.
+
+```
+Returns (profile_url, player_id, slug) or None.
+"""
+search_url = f"{BASE_URL}/search?query={quote_plus(player_name)}"
+html = fetch_page(search_url)
+if not html:
+    return None
+
+pattern = r'/player/(\d+)/([a-zA-Z0-9_-]+)'
+matches = re.findall(pattern, html)
+if matches:
+    player_id, slug = matches[0]
+    url = f"{BASE_URL}/player/{player_id}/{slug}"
+    log(f"Found: {url}")
+    return url, int(player_id), slug
+
+log(f"No player found for '{player_name}'")
+return None
+```
+
+def resolve_player(player_url=None, player_id=None, player_name=None):
+“”“Resolve any input combo to (url, id, name).”””
+if player_url:
+m = re.search(r’/player/(\d+)/([a-zA-Z0-9_-]+)’, player_url)
+if m:
+player_id = int(m.group(1))
+player_name = player_name or m.group(2)
+return player_url, player_id, player_name
+
+```
+if player_name and not player_id:
+    result = search_player(player_name)
+    if result:
+        return result
+    return None, None, player_name
+
+if player_id:
+    name = player_name or "unknown"
+    url = f"{BASE_URL}/player/{player_id}/{name}"
+    return url, player_id, name
+
+return None, None, None
+```
+
+# ═══════════════════════════════════════════════════════════════
+
+# STEP 2: STATS OVERVIEW PAGE (filtered by date + CS2)
+
+# ═══════════════════════════════════════════════════════════════
+
+def build_stats_url(player_id, player_name, days_back=30):
+“”“Build /stats/players/{id}/{name}?csVersion=CS2&startDate=…&endDate=…”””
+end_date = datetime.now().strftime(”%Y-%m-%d”)
+start_date = (datetime.now() - timedelta(days=days_back)).strftime(”%Y-%m-%d”)
+params = {“csVersion”: “CS2”, “startDate”: start_date, “endDate”: end_date}
+return f”{BASE_URL}/stats/players/{player_id}/{player_name}?{urlencode(params)}”
+
+def build_matches_url(player_id, player_name, days_back=30):
+“”“Build /stats/players/matches/{id}/{name}?csVersion=CS2&startDate=…”””
+end_date = datetime.now().strftime(”%Y-%m-%d”)
+start_date = (datetime.now() - timedelta(days=days_back)).strftime(”%Y-%m-%d”)
+params = {“csVersion”: “CS2”, “startDate”: start_date, “endDate”: end_date}
+return f”{BASE_URL}/stats/players/matches/{player_id}/{player_name}?{urlencode(params)}”
+
+def parse_player_overview(html):
+“”“Parse aggregate stats from the player stats page.”””
+stats = {}
+patterns = {
+“rating”: r’(?:Rating|rating)[^0-9]*([012].\d{2})’,
+“kpr”: r’(?:Kills / round|KPR|kills/round)[^0-9]*(0?.\d{2,3})’,
+“dpr”: r’(?:Deaths / round|DPR|deaths/round)[^0-9]*(0?.\d{2,3})’,
+“hs_pct”: r’(?:Headshot|HS)[^0-9]*(\d{1,3}(?:.\d)?)\s*%’,
+“adr”: r’(?:Damage / Round|ADR|damage/round)[^0-9]*(\d{2,3}(?:.\d)?)’,
+“kast”: r’(?:KAST)[^0-9]*(\d{1,3}(?:.\d)?)\s*%’,
+“maps_played”: r’(?:Maps played|maps)[^0-9]*(\d+)’,
+“rounds_played”: r’(?:Rounds played|rounds)[^0-9]*(\d+)’,
+“total_kills”: r’(?:Total kills|Kills total)[^0-9]*(\d+)’,
+“total_deaths”: r’(?:Total deaths|Deaths total)[^0-9]*(\d+)’,
+}
+for key, pattern in patterns.items():
+match = re.search(pattern, html, re.IGNORECASE)
+if match:
+try:
+stats[key] = float(match.group(1))
+except ValueError:
+stats[key] = match.group(1)
+return stats
+
+# ═══════════════════════════════════════════════════════════════
+
+# STEP 3: GET MATCH LIST
+
+# ═══════════════════════════════════════════════════════════════
+
+def get_match_list(player_id, player_name, player_url, days_back=30):
+“”“Get recent match URLs. Tries stats/matches first, then profile page.”””
+matches = []
+seen_ids = set()
+
+```
+# Try stats matches page (has built-in date filtering)
+stats_url = build_matches_url(player_id, player_name, days_back)
+log(f"Fetching: {stats_url}")
+html = fetch_page(stats_url)
+if html:
+    matches = _extract_match_links(html, seen_ids)
+    if matches:
+        log(f"Got {len(matches)} matches from stats/players/matches")
+        return matches
+
+# Fallback: player profile page
+log("Trying player profile page...")
+html = fetch_page(player_url)
+if html:
+    matches = _extract_match_links(html, seen_ids)
+    if matches:
+        log(f"Got {len(matches)} matches from profile page")
+        return matches
+
+return matches
+```
+
+def _extract_match_links(html, seen_ids):
+“”“Extract match URLs and dates from any HLTV page.”””
+matches = []
+
+```
+for match_id, slug in re.findall(r'/matches/(\d+)/([a-zA-Z0-9_-]+)', html):
+    if match_id in seen_ids:
+        continue
+    seen_ids.add(match_id)
+    matches.append({
+        "match_id": match_id,
+        "slug": slug,
+        "url": f"{BASE_URL}/matches/{match_id}/{slug}",
+        "date": _find_date_near(html, match_id),
+    })
+
+return matches
+```
+
+def _find_date_near(html, match_id):
+“”“Find a date near a match ID reference in the HTML.”””
+idx = html.find(str(match_id))
+if idx < 0:
+return None
+context = html[max(0, idx - 600):idx + 300]
+
+```
+# HLTV data-unix (milliseconds)
+epoch = re.search(r'data-unix="(\d{13})"', context)
+if epoch:
+    return datetime.fromtimestamp(int(epoch.group(1)) / 1000).strftime("%Y-%m-%d")
+
+# ISO date
+iso = re.search(r'(\d{4}-\d{2}-\d{2})', context)
+if iso:
+    return iso.group(1)
+
+# Text date: "7th Apr 2026"
+td = re.search(
+    r'(\d{1,2})(?:st|nd|rd|th)?\s+'
+    r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+(\d{4})',
+    context, re.IGNORECASE
+)
+if td:
+    try:
+        return datetime.strptime(
+            f"{td.group(1)} {td.group(2)[:3]} {td.group(3)}", "%d %b %Y"
+        ).strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+return None
+```
+
+# ═══════════════════════════════════════════════════════════════
+
+# STEP 4: PARSE MATCH PAGES
+
+# ═══════════════════════════════════════════════════════════════
+
+def is_bo3(html):
+“”“Detect if a match page is best-of-3.”””
+lower = html.lower()
+if “best of 3” in lower:
+return True
+if ‘“bestof”:3’ in lower or ‘“bestOf”:3’ in html:
+return True
+map_holders = re.findall(r’class=”[^”]*mapholder[^”]*”’, html)
+if len(map_holders) >= 2:
+return True
+if “veto” in lower and re.search(r’(picked|removed|banned)’, lower):
+return True
+return False
+
+def parse_veto(html):
+“”“Extract map veto actions from match page.”””
+vetos = []
+valid_maps = {
+‘mirage’, ‘inferno’, ‘dust2’, ‘nuke’, ‘anubis’, ‘ancient’,
+‘vertigo’, ‘overpass’, ‘train’, ‘cache’
+}
+pattern = r’(?:class=”[^”]*”[^>]*>)?\s*(\w[\w\s.]+?)\s+(removed|picked|left over)\s+(\w+)’
+for team, action, map_name in re.findall(pattern, html, re.IGNORECASE):
+team = team.strip()
+if len(team) < 25 and map_name.lower() in valid_maps:
+vetos.append({
+“team”: team,
+“action”: action.lower(),
+“map”: map_name.capitalize(),
+})
+return vetos
+
+def extract_map_names(html):
+“”“Extract map names from a match page.”””
+names = re.findall(r’class=“mapname”[^>]*>\s*([A-Za-z0-9]+)\s*<’, html)
+if names:
+return names[:3]
+
+```
+de_maps = re.findall(r'de_([a-z]+)', html)
+seen = []
+for m in de_maps:
+    cap = m.capitalize()
+    if cap not in seen:
+        seen.append(cap)
+return seen[:3] if seen else []
+```
+
+def extract_map_scores(html):
+“”“Extract per-map round scores → list of total rounds per map.”””
+rounds = []
+pattern = r’>(\d{1,2})\s*</\w+>\s*(?::|[-\u2013])\s*<\w+[^>]*>\s*(\d{1,2})<’
+for s1, s2 in re.findall(pattern, html):
+r1, r2 = int(s1), int(s2)
+total = r1 + r2
+if 24 <= total <= 50 and (r1 >= 13 or r2 >= 13):
+rounds.append(total)
+return rounds
+
+def parse_match_stats(html, player_name):
+“”“Extract per-map kills/hs/deaths/ADR/rating for a player.
+
+```
+MAPS 1–2 ONLY — never Map 3.
+"""
+player_lower = player_name.lower()
+maps = []
+map_names = extract_map_names(html)
+map_rounds = extract_map_scores(html)
+
+# Full: name ... kills(HS) ... deaths ... ADR ... rating
+full_pat = (
+    r'(?i)' + re.escape(player_lower) +
+    r'(?:</[^>]+>|\s|[^<])*?'
+    r'(\d{1,2})\s*\(\s*(\d{1,2})\s*\)'
+    r'(?:</[^>]+>|\s|[^<])*?'
+    r'(\d{1,2})'
+    r'(?:</[^>]+>|\s|[^<])*?'
+    r'(\d{2,3}(?:\.\d)?)'
+    r'(?:</[^>]+>|\s|[^<])*?'
+    r'([012]\.\d{2})'
+)
+stat_matches = re.findall(full_pat, html, re.DOTALL)
+has_extended = bool(stat_matches)
+
+if not stat_matches:
+    simple_pat = (
+        r'(?i)' + re.escape(player_lower) +
+        r'(?:</[^>]+>|\s|[^<])*?'
+        r'(\d{1,2})\s*\(\s*(\d{1,2})\s*\)'
+        r'(?:</[^>]+>|\s|[^<])*?'
+        r'(\d{1,2})'
+    )
+    stat_matches = re.findall(simple_pat, html, re.DOTALL)
+
+for i, stat in enumerate(stat_matches):
+    if i >= 2:
+        break
+    try:
+        kills = int(stat[0])
+        headshots = int(stat[1])
+        deaths = int(stat[2])
+        if kills > 55 or deaths > 55 or headshots > kills:
+            continue
+
+        md = {
+            "map": map_names[i] if i < len(map_names) else f"Map{i+1}",
+            "kills": kills,
+            "headshots": headshots,
+            "deaths": deaths,
+            "rounds": map_rounds[i] if i < len(map_rounds) else None,
+            "adr": None,
+            "rating": None,
+        }
+        if has_extended and len(stat) >= 5:
+            adr = float(stat[3])
+            rating = float(stat[4])
+            if 20 <= adr <= 160:
+                md["adr"] = adr
+            if 0.1 <= rating <= 3.5:
+                md["rating"] = rating
+        maps.append(md)
+    except (ValueError, IndexError):
+        continue
+
+return maps if maps else None
+```
+
+def extract_match_date(html):
+“”“Extract match date from a match page.”””
+for pattern in [
+r’class=”[^”]*date[^”]*”[^>]*data-unix=”(\d{13})”’,
+r’data-unix=”(\d{13})”’,
+]:
+m = re.search(pattern, html)
+if m:
+return datetime.fromtimestamp(int(m.group(1)) / 1000).strftime(”%Y-%m-%d”)
+m = re.search(r’<meta[^>]*content=”(\d{4}-\d{2}-\d{2})’, html)
+if m:
+return m.group(1)
+return None
+
+# ═══════════════════════════════════════════════════════════════
+
+# STEP 5: AGGREGATE & OUTPUT
+
+# ═══════════════════════════════════════════════════════════════
+
+def compute_aggregates(all_map_stats, bo3_count, player_name, player_url,
+days_back, overview_stats=None):
+“”“Compute all aggregate stats from collected per-map data.”””
+total_kills = sum(m[“kills”] for m in all_map_stats)
+total_deaths = sum(m[“deaths”] for m in all_map_stats)
+total_headshots = sum(m[“headshots”] for m in all_map_stats)
+
+```
+maps_wr = [m for m in all_map_stats if m.get("rounds") and m["rounds"] > 0]
+total_rounds = sum(m["rounds"] for m in maps_wr)
+
+if total_rounds > 0:
+    kpr = total_kills / total_rounds
+    dpr = total_deaths / total_rounds
+else:
+    est = len(all_map_stats) * 21
+    kpr, dpr = total_kills / est, total_deaths / est
+    total_rounds = est
+    log("WARNING: No round counts — estimating 21/map")
+
+per_map_kpr = [m["kills"] / (m["rounds"] if m.get("rounds") and m["rounds"] > 0 else 21)
+               for m in all_map_stats]
+if len(per_map_kpr) >= 2:
+    mean_k = sum(per_map_kpr) / len(per_map_kpr)
+    kpr_std = (sum((x - mean_k) ** 2 for x in per_map_kpr) / (len(per_map_kpr) - 1)) ** 0.5
+else:
+    kpr_std = kpr * 0.15
+
+hs_rate = total_headshots / total_kills if total_kills > 0 else 0.0
+kills_sorted = sorted(m["kills"] for m in all_map_stats)
+avg_kpm = total_kills / len(all_map_stats)
+med_kpm = kills_sorted[len(kills_sorted) // 2]
+
+# BO3 combined M1+M2
+bo3_kills, bo3_hs = [], []
+for i in range(0, len(all_map_stats) - 1, 2):
+    bo3_kills.append(all_map_stats[i]["kills"] + all_map_stats[i + 1]["kills"])
+    bo3_hs.append(all_map_stats[i]["headshots"] + all_map_stats[i + 1]["headshots"])
+
+# Per-map summary
+mp = {}
+for m in all_map_stats:
+    n = m["map"]
+    if n not in mp:
+        mp[n] = {"kills": [], "headshots": [], "rounds": [], "count": 0}
+    mp[n]["kills"].append(m["kills"])
+    mp[n]["headshots"].append(m["headshots"])
+    if m.get("rounds"):
+        mp[n]["rounds"].append(m["rounds"])
+    mp[n]["count"] += 1
+
+map_summary = {}
+for n, d in mp.items():
+    ak = sum(d["kills"]) / len(d["kills"])
+    ar = sum(d["rounds"]) / len(d["rounds"]) if d["rounds"] else 21
+    map_summary[n] = {
+        "maps_played": d["count"],
+        "avg_kills": round(ak, 1),
+        "avg_rounds": round(ar, 1),
+        "kpr": round(ak / ar, 3) if ar > 0 else 0,
+        "avg_headshots": round(sum(d["headshots"]) / len(d["headshots"]), 1),
+    }
+
+m_adr = [m for m in all_map_stats if m.get("adr") is not None]
+m_rat = [m for m in all_map_stats if m.get("rating") is not None]
+avg_adr = (round(sum(m["adr"] for m in m_adr) / len(m_adr), 1) if m_adr
+           else (overview_stats or {}).get("adr"))
+avg_rating = (round(sum(m["rating"] for m in m_rat) / len(m_rat), 3) if m_rat
+              else (overview_stats or {}).get("rating"))
+
+proj_rounds = round((total_rounds / len(maps_wr)) * 2, 0) if maps_wr else 42
+cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+
+return {
+    "player": player_name,
+    "player_url": player_url,
+    "data_source": "hltv_direct",
+    "scrape_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    "data_window": f"Last {days_back} days (cutoff: {cutoff})",
+    "bo3_series_used": bo3_count,
+    "maps_used": len(all_map_stats),
+    "aggregate": {
+        "kpr": round(kpr, 4), "kpr_std": round(kpr_std, 4),
+        "dpr": round(dpr, 4), "hs_rate": round(hs_rate, 4),
+        "avg_kills_per_map": round(avg_kpm, 1),
+        "median_kills_per_map": med_kpm,
+        "total_kills": total_kills, "total_deaths": total_deaths,
+        "total_headshots": total_headshots, "total_rounds": total_rounds,
+        "avg_adr": avg_adr, "avg_rating": avg_rating,
+    },
+    "bo3_combined_kills": bo3_kills,
+    "bo3_combined_headshots": bo3_hs,
+    "bo3_avg_combined": round(sum(bo3_kills) / len(bo3_kills), 1) if bo3_kills else None,
+    "bo3_median_combined": sorted(bo3_kills)[len(bo3_kills) // 2] if bo3_kills else None,
+    "bo3_avg_combined_hs": round(sum(bo3_hs) / len(bo3_hs), 1) if bo3_hs else None,
+    "bo3_median_combined_hs": sorted(bo3_hs)[len(bo3_hs) // 2] if bo3_hs else None,
+    "ceiling_game": max(bo3_kills) if bo3_kills else None,
+    "floor_game": min(bo3_kills) if bo3_kills else None,
+    "per_map_stats": all_map_stats,
+    "map_summary": map_summary,
+    "sim_config_ready": {
+        "kpr": round(kpr, 4), "kpr_std": round(kpr_std, 4),
+        "hs_rate": round(hs_rate, 4), "projected_rounds": proj_rounds,
+    },
+}
+```
+
+# ═══════════════════════════════════════════════════════════════
+
+# MAIN PIPELINE
+
+# ═══════════════════════════════════════════════════════════════
+
+def get_player_stats(player_url=None, player_id=None, player_name=None,
+max_bo3s=10, days_back=30):
+“”“Main entry: pull recent BO3 Maps 1–2 stats.
+
+```
+Pipeline:
+1. Resolve player (search HLTV if needed)
+2. Fetch /stats/players/{id}/{name}?csVersion=CS2 for overview
+3. Get match list from /stats/players/matches/{id}/{name}
+4. Fetch each match, filter BO3, extract Maps 1–2 stats
+5. Aggregate → return sim-ready JSON
+
+Check returned dict for "error" key on failure.
+"""
+# Step 1
+player_url, player_id, player_name = resolve_player(
+    player_url, player_id, player_name
+)
+if not player_url:
+    return _error(f"Could not find player '{player_name}' on HLTV", player_name)
+
+log(f"Player: {player_name} (ID: {player_id})")
+
+# Step 2: overview stats
+overview_stats = None
+if player_id and player_name:
+    stats_url = build_stats_url(player_id, player_name, days_back)
+    log(f"Stats overview: {stats_url}")
+    html = fetch_page(stats_url)
+    if html:
+        overview_stats = parse_player_overview(html)
+        if overview_stats:
+            log(f"Overview: {json.dumps(overview_stats)}")
+
+# Step 3: match list
+match_list = get_match_list(player_id, player_name, player_url, days_back)
+if not match_list:
+    return _error("Could not retrieve match list — HLTV likely 403'd", player_name)
+log(f"Found {len(match_list)} potential matches")
+
+# Step 4: fetch & parse each match
+cutoff = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
+all_map_stats = []
+bo3_count = 0
+skip = {"old": 0, "not_bo3": 0, "parse": 0, "fetch": 0}
+
+for match in match_list:
+    if bo3_count >= max_bo3s:
+        break
+    if match.get("date") and match["date"] < cutoff:
+        skip["old"] += 1
+        continue
+
+    mhtml = fetch_page(match["url"])
+    if not mhtml:
+        skip["fetch"] += 1
+        continue
+
+    mdate = match.get("date") or extract_match_date(mhtml)
+    if mdate and mdate < cutoff:
+        skip["old"] += 1
+        continue
+
+    if not is_bo3(mhtml):
+        skip["not_bo3"] += 1
+        continue
+
+    veto = parse_veto(mhtml)
+    mstats = parse_match_stats(mhtml, player_name)
+    if not mstats or len(mstats) < 2:
+        skip["parse"] += 1
+        log(f"Parse failed: {match['slug']}")
+        continue
+
+    for j, md in enumerate(mstats[:2]):
+        md["match_url"] = match["url"]
+        md["match_slug"] = match["slug"]
+        md["match_date"] = mdate
+        md["map_number"] = j + 1
+        if veto:
+            md["veto"] = veto
+        all_map_stats.append(md)
+
+    bo3_count += 1
+    k12 = mstats[0]["kills"] + mstats[1]["kills"]
+    log(f"BO3 #{bo3_count}: {match['slug']} ({mdate or '?'}) — {k12} kills M1+M2")
+
+if not all_map_stats:
+    return _error(
+        f"No stats from {len(match_list)} matches. Skipped: {json.dumps(skip)}",
+        player_name
+    )
+
+if bo3_count < 3:
+    log(f"WARNING: Only {bo3_count} BO3s — try --days-back 60")
+
+# Step 5
+result = compute_aggregates(
+    all_map_stats, bo3_count, player_name, player_url, days_back, overview_stats
+)
+
+log(f"\n{'='*50}")
+log(f"DONE: {bo3_count} BO3s, {len(all_map_stats)} maps")
+a = result["aggregate"]
+log(f"KPR: {a['kpr']} | HS%: {a['hs_rate']:.1%} | ADR: {a.get('avg_adr','?')}")
+if result.get("bo3_combined_kills"):
+    log(f"M1+M2: {result['bo3_combined_kills']}")
+    log(f"Avg: {result['bo3_avg_combined']} | Med: {result['bo3_median_combined']} | "
+        f"Ceil: {result['ceiling_game']} | Floor: {result['floor_game']}")
+log(f"{'='*50}\n")
+
+return result
+```
+
+def _error(message, player_name=None):
+name = player_name or “unknown”
+yr = datetime.now().year
+return {
+“error”: message,
+“fallback_searches”: [
+f’”{name}” site:hltv.org stats {yr}’,
+f’”{name}” hltv kills headshots bo3 {yr}’,
+f’”{name}” profilerr cs2 stats’,
+f’”{name}” site:theesportslab.com stats’,
+],
+“fallback_urls”: [
+f”{BASE_URL}/search?query={quote_plus(name)}”,
+f”{BASE_URL}/stats/players?csVersion=CS2”,
+],
+}
+
+# ═══════════════════════════════════════════════════════════════
+
+# CLI
+
+# ═══════════════════════════════════════════════════════════════
+
+def main():
+parser = argparse.ArgumentParser(
+description=“HLTV Player Stats Scraper for CS2 Prop Grading (v2)”,
+epilog=(
+“Examples:\n”
+“  python hltv_scraper.py –search donk\n”
+“  python hltv_scraper.py –player-id 19170 –player-name donk\n”
+“  python hltv_scraper.py –search ropz –days-back 60 –max-bo3s 15\n”
+),
+formatter_class=argparse.RawDescriptionHelpFormatter,
+)
+parser.add_argument(”–player-url”, help=“Full HLTV player profile URL”)
+parser.add_argument(”–player-id”, type=int, help=“HLTV player ID”)
+parser.add_argument(”–player-name”, “–search”, dest=“player_name”,
+help=“Player nickname to search”)
+parser.add_argument(”–max-bo3s”, type=int, default=10,
+help=“Max BO3 series (default: 10)”)
+parser.add_argument(”–days-back”, type=int, default=30,
+help=“Match window in days (default: 30)”)
+parser.add_argument(”–output”, “-o”, help=“Save JSON to file”)
+
+```
+args = parser.parse_args()
+if not any([args.player_url, args.player_id, args.player_name]):
+    parser.error("Provide --player-url, --player-id, or --player-name/--search")
+
+result = get_player_stats(
+    player_url=args.player_url,
+    player_id=args.player_id,
+    player_name=args.player_name or str(args.player_id or ""),
+    max_bo3s=args.max_bo3s,
+    days_back=args.days_back,
+)
+
+out = json.dumps(result, indent=2)
+if args.output:
+    with open(args.output, "w") as f:
+        f.write(out)
+    log(f"Saved to {args.output}")
+else:
+    print(out)
+
+if "error" in result:
+    sys.exit(1)
+```
+
+if **name** == “**main**”:
+main()

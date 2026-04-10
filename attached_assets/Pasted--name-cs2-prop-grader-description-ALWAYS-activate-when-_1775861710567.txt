@@ -1,0 +1,498 @@
+-----
+
+## name: cs2-prop-grader
+description: >
+ALWAYS activate when the user says “grade this prop” — this is the primary trigger phrase.
+Also activate for: “grade prop”, “cs2 prop”, “counter-strike prop”, CS2 kills line, CS2
+headshots line, “is this line good”, “should I bet X player”, CS2 over/under, HLTV player
+stats for betting, sportsbook lines for CS matches, or any CS2 player prop analysis request.
+Grades CS2 player props for Maps 1–2 combined in a BO3 series using HLTV data, Monte Carlo
+simulation, and edge calculation. Goal: find mispriced lines and prop errors, not just
+say over or under. Always use this skill even if the user just pastes a prop line without
+explicitly asking — catch the edge before they bet.
+
+# CS2 Prop Grader — Maps 1–2 BO3 (Ultimate Edition)
+
+## Core Mission
+
+Grade CS2 player props for Maps 1–2 combined in a BO3.  
+**The goal is not just over or under. The goal is: is this line beatable? Did the book make a mistake?**
+
+Find: mispriced lines, clear edges, matchup advantages, prop errors, strong overs, strong unders.
+
+-----
+
+## Data Source Chain (in priority order)
+
+Data retrieval is the hardest part. Follow this chain and exhaust every option before flagging a limitation.
+
+### Primary: HLTV
+
+- Player profiles, match pages, detailed stats
+- **HLTV blocks direct page fetching (403 errors)** — stats must come from web search snippets
+- Search queries that work: `"playername" site:hltv.org stats 2026`, `"playername" hltv rating kills`
+- Extract kills, deaths, headshots, rounds, ADR, rating from snippets and cached results
+
+### Fallback 1: Profilerr
+
+- Best source for per-map kill/headshot granularity in BO3 contexts
+- Fetching sometimes works; always try `web_fetch` on Profilerr player pages
+
+### Fallback 2: TheEsportsLab
+
+- Reliably returns per-map aggregate averages
+- Good for KPR, average kills, map-level stats
+
+### Fallback 3: Liquipedia
+
+- Match format confirmation, roster verification, event info, recent results
+- Does not have per-map kill/headshot detail
+
+### Fallback 4: Web search snippets
+
+- Search `"playername" cs2 kills stats 2026`, `"playername" cs2 headshots recent`
+- escorenews.com and ggscore.com occasionally return readable content
+
+### Known Dead Ends (do not waste time)
+
+- bo3.gg, GosuGamers, Sofascore → fully JS-rendered, return no usable data via fetch
+- HLTV direct fetch → 403 blocked
+
+**Rule: Exhaust all technical options before telling the user data is unavailable. Try at least 3 different search queries and 2 fetch attempts.**
+
+-----
+
+## Step-by-Step Workflow
+
+### Step 1 — Identify the Match
+
+- Confirm BO3 format via Liquipedia or event page
+- Note event name, teams, match date
+- Confirm rosters (Liquipedia preferred)
+- Look up team HLTV rankings
+- Find match odds / moneyline if available
+
+### Step 2 — Pull Player Data
+
+- Target: **last 10 BO3 series → Maps 1–2 only**
+- Default window: last 30 days / current month
+- If sample < 8 maps: expand to most recent 8 Maps 1–2 — **clearly label the expanded window**
+- Never silently use old data; if forced beyond 30 days, state this explicitly
+- Do not use Map 3 data. Ever.
+
+### Step 3 — Extract Per-Map Stats
+
+For every relevant map, record:
+
+|Field          |Source                                            |
+|---------------|--------------------------------------------------|
+|Map name       |HLTV / Profilerr                                  |
+|Kills          |HLTV detailed stats                               |
+|Deaths         |HLTV detailed stats                               |
+|Headshots      |HLTV detailed stats (in parentheses next to kills)|
+|Rounds played  |HLTV match page                                   |
+|ADR            |HLTV detailed stats                               |
+|HLTV Rating 3.0|HLTV detailed stats                               |
+|Impact rating  |HLTV detailed stats                               |
+|Side splits    |HLTV if available                                 |
+
+### Step 4 — Calculate Key Metrics
+
+|Metric              |Formula                                            |
+|--------------------|---------------------------------------------------|
+|KPR                 |Total kills ÷ total rounds                         |
+|DPR                 |Total deaths ÷ total rounds                        |
+|HS rate             |Total headshots ÷ total kills                      |
+|Avg kills (Maps 1–2)|Sum kills ÷ number of maps                         |
+|Median kills        |Middle value of sorted per-map kill list           |
+|Hit rate            |Maps where combined M1+M2 kills > line ÷ total BO3s|
+|KPR std dev         |Standard deviation of per-map KPR values           |
+|Ceiling game        |Highest combined M1+M2 kill total                  |
+|Floor game          |Lowest combined M1+M2 kill total                   |
+
+**Median is often better than average for spotting fake lines.** Always compute both.
+
+### Step 5 — Classify Player Role
+
+|Role             |Prop implications                                                                                          |
+|-----------------|-----------------------------------------------------------------------------------------------------------|
+|**Entry fragger**|High volatility, first-fight exposure. Smashes overs in long/close maps. Dies early in stomps.             |
+|**AWPer**        |Highest kill ceiling in many matchups. Best over candidate in close series. Sensitive to pace and map pool.|
+|**Lurker**       |Steadier than entry. Good for stable projections. Less explosive.                                          |
+|**Support**      |Lower frag share. Usually worse over candidate. Better under candidate when line inflated.                 |
+|**Star rifler**  |Strongest overall prop profile. Solid floor + ceiling. Best when team favored but match competitive.       |
+
+Role affects both the projection and the confidence in the projection.
+
+### Step 6 — Team & Match Context
+
+Collect ALL of the following:
+
+- Team HLTV ranking difference
+- Match odds / series moneyline (derive implied win probability)
+- Recent team form (last 5–10 matches)
+- Team pace (fast/slow T-side, utility-heavy CT?)
+- T-side and CT-side round win %
+- Opening kill success %
+- Economy conversion tendencies
+- Does the team stomp weak opponents or play close maps?
+- Does the team lose quickly when behind or fight back?
+
+### Step 7 — Estimate Likely Maps 1–2
+
+This is one of the biggest factors. Do not skip it.
+
+1. Check each team’s recent pick tendencies (last 5–10 vetoes)
+1. Check recent bans
+1. Identify comfort maps for each team
+1. Check H2H veto patterns if available
+1. Weight each potential map by:
+- Pick frequency
+- Recent play frequency
+- Team strength on that map
+- Opponent ban habits
+1. **Normalize total probability to 100%**
+1. Apply player’s per-map performance to each weighted map
+
+### Step 8 — Project Round Volume
+
+Kills come from rounds. No round projection = weak grading.
+
+|Scenario             |Rounds per map|Total Maps 1–2|
+|---------------------|--------------|--------------|
+|Default              |20–22         |40–44         |
+|Close match / OT risk|23–26         |46–52         |
+|Stomp risk           |16–19         |32–38         |
+
+Adjust based on:
+
+- Match odds (close → more rounds)
+- Both teams play tight maps → more rounds
+- One team dominates → fewer rounds
+- Weak opponent → fewer rounds
+
+### Step 9 — Apply Match Odds Logic
+
+|Odds scenario    |Kill expectation                                 |
+|-----------------|-------------------------------------------------|
+|Coinflip / close |Boost — more rounds, longer maps                 |
+|Moderate favorite|Neutral to slight over lean for stars            |
+|Heavy favorite   |**Stomp trap** — match may end too fast for overs|
+
+**Exception:** A player can still go over in a stomp if the line is too low and the player is high-usage.
+
+The stomp trap is the #1 reason people lose over bets. If implied win probability > 75%, flag stomp risk.
+
+### Step 10 — Run Core Formula
+
+```
+Expected kills = projected_rounds × KPR
+Expected headshots = expected_kills × recent_HS_rate
+```
+
+Then adjust for: likely maps (weighted), role, opponent strength, match odds, map pace, recent form, H2H.
+
+### Step 11 — Run Monte Carlo Simulation
+
+Use the bundled scripts at `scripts/simulate.py` + `scripts/hltv_scraper.py`.
+
+**Preferred: Auto-pull mode (HLTV → simulate in one command):**
+
+```bash
+cd /path/to/cs2-prop-grader
+python scripts/simulate.py \
+    --player "donk" \
+    --line 31.5 \
+    --hs-line 14.5 \
+    --match "Spirit vs Vitality" \
+    --stomp-risk 0.15 \
+    --save-scrape /home/claude/donk_hltv_data.json
+```
+
+This will:
+
+1. Search HLTV for the player
+1. Pull last 10 BO3 series → Maps 1–2 only
+1. Extract kills, deaths, headshots, rounds, ADR, rating per map
+1. Calculate KPR, KPR std dev, HS rate automatically
+1. Build per-map weights from actual play history
+1. Run 100K Monte Carlo simulations
+1. Output full results JSON with edge and grade
+
+If HLTV returns 403 (common), the script prints fallback search queries to use with web_search. In that case, gather data manually and use config or CLI mode.
+
+**Config mode (when data already gathered):**
+
+```bash
+python scripts/simulate.py --config /home/claude/sim_config.json
+```
+
+Config JSON format:
+
+```json
+{
+    "player": "PlayerName",
+    "match": "TeamA vs TeamB",
+    "kpr": 0.78,
+    "kpr_std": 0.12,
+    "projected_rounds": 42,
+    "round_std": 5,
+    "kills_line": 29.5,
+    "hs_rate": 0.45,
+    "hs_line": 13.5,
+    "map_weights": [
+        {"map": "Mirage", "prob": 0.35, "kpr_adj": 1.05, "round_adj": 0},
+        {"map": "Inferno", "prob": 0.30, "kpr_adj": 0.98, "round_adj": 1}
+    ],
+    "stomp_risk": 0.15,
+    "stomp_round_reduction": 6,
+    "n_simulations": 100000,
+    "seed": 42
+}
+```
+
+**Manual CLI mode (quick single-player):**
+
+```bash
+python scripts/simulate.py --kpr 0.78 --rounds 42 --line 29.5 --hs-rate 0.45 --hs-line 13.5 --stomp-risk 0.15
+```
+
+**Models used:**
+
+- **Negative Binomial** for kill totals — captures overdispersion (ceiling/floor behavior) better than Poisson or Normal
+- **Binomial** for headshots — each kill is a Bernoulli trial with player’s HS rate
+- **Normal** for round counts — with per-map variance
+- Stomp risk modeled as probability of reduced round count
+
+If `scripts/simulate.py` is unavailable, replicate the logic manually in Python:
+
+1. For each of 100,000 runs: pick 2 maps → simulate rounds per map → simulate kills via NegBin → sum across maps
+1. For headshots: apply Binomial(kills, hs_rate) per map
+1. Aggregate and compute percentiles
+
+### Step 12 — Calculate Edge
+
+```
+Edge = model_over_probability − sportsbook_implied_over_probability
+```
+
+If sportsbook line is standard -110/-110, implied probability ≈ 50% each side (after juice).  
+If your model says over hits 61% → edge = +11%.
+
+**Edge drives the grade, not feelings or averages alone.**
+
+### Step 13 — Check H2H
+
+- Include recent H2H if available (secondary input, not foundation)
+- H2H doesn’t need to fall within the 10-series window, but must be somewhat recent
+- Do not use H2H from >6 months ago unless clearly labeled as weak context
+- Use H2H to answer:
+  - Does this player repeatedly farm this opponent?
+  - Does opponent’s system suppress this player’s role?
+  - Does the matchup create repeated success or failure?
+
+### Step 14 — Identify Misprice / Error / Trap
+
+**Mispriced over indicators:**
+
+- Average well above line + strong median + good map pool + close odds
+- Player clears line in 7+ of last 10 relevant samples
+- Book ignores favorable map pool or role advantage
+- Book uses stale reputation instead of recent form
+
+**Mispriced under indicators:**
+
+- Inflated line + weak recent form + blowout risk + support role
+- Player only clears via outlier games
+- Map pool hurts the player
+
+**Clear prop error:**
+
+- Line wildly out of range (e.g., averaging 35, line is 27.5)
+- Confirmed by: median, hit rate, round projection, AND map pool — not average alone
+
+**Stomp trap:**
+
+- Line looks easy but stomp risk kills the over
+- Heavy favorite (~75%+ implied) reduces expected rounds
+- If the line looks too easy, always check for this
+
+-----
+
+## Map-Specific Kill Adjustments
+
+|Map    |Tendency                         |Notes                                |
+|-------|---------------------------------|-------------------------------------|
+|Mirage |Generally good for fraggers      |Often produces high kill counts      |
+|Inferno|Strong frag volume in close games|Suppresses in blowouts               |
+|Ancient|Role/map dependent               |Check player-specific data           |
+|Vertigo|High volatility                  |Wild swings possible                 |
+|Nuke   |Can suppress roles               |Especially if one side dominates     |
+|Anubis |Pace/context dependent           |Check recent trends                  |
+|Dust2  |Classic fragger map              |If still in pool, high kill potential|
+
+**Always check what THIS player does on THIS map recently. Generic map takes are starting points only.**
+
+-----
+
+## Grading Scale
+
+|Grade |Edge range|Meaning                               |
+|------|----------|--------------------------------------|
+|10/10 |≥18%      |Elite edge, clear misprice, strong bet|
+|9/10  |15–17%    |Very strong edge                      |
+|8/10  |11–14%    |Strong playable edge                  |
+|7/10  |7–10%     |Solid lean / good value               |
+|6/10  |4–6%      |Small edge, playable if needed        |
+|5/10  |2–3%      |Thin / borderline                     |
+|< 5/10|< 2%      |No bet                                |
+
+-----
+
+## Required Output Format
+
+```
+═══════════════════════════════════════════
+CS2 PROP GRADE — [Player] — [Match]
+═══════════════════════════════════════════
+
+PLAYER:           
+MATCH:            
+EVENT:            
+PROP:             [Over/Under X.X kills/headshots]
+ROLE:             
+
+── DATA SUMMARY ──────────────────────────
+Sample:           [e.g., "Last 8 BO3s, Maps 1–2, Mar 10 – Apr 8 2026"]
+Maps used:        [count]
+Avg kills (M1+M2):[value]
+Median kills:     [value]
+Hit rate vs line: [X/Y = Z%]
+KPR:              [value]
+HS rate:          [value]
+Ceiling game:     [value]
+Floor game:       [value]
+
+── MATCH CONTEXT ─────────────────────────
+Team rankings:    [#X vs #Y]
+Match odds:       [line or implied %]
+Stomp risk:       [Low / Medium / High]
+Likely maps:      [Map A (X%), Map B (Y%), ...]
+Projected rounds: [Maps 1–2 combined]
+
+── SIMULATION (100K runs) ────────────────
+Simulated mean:   [value]
+Std deviation:    [value]
+Median:           [value]
+25th percentile:  [value]
+75th percentile:  [value]
+Over probability: [value]
+Under probability:[value]
+Fair line:        [value]
+
+── VERDICT ───────────────────────────────
+Edge vs line:     [+/- X%]
+Mispriced:        [Yes/No — explain briefly]
+FINAL GRADE:      [X/10]
+BET:              [Over / Under / No Bet]
+
+── NARRATIVE ─────────────────────────────
+[2–4 sentences: Why the line is or isn't beatable.
+Cover map pool, role/matchup edge, stomp risk, 
+and any traps or red flags.]
+
+═══════════════════════════════════════════
+```
+
+-----
+
+## Pre-Flight Sanity Checklist
+
+Before finalizing any grade, verify all 10:
+
+1. ☐ Using recent stats only (last 30 days / 10 BO3s)?
+1. ☐ Maps 1–2 only — no Map 3 contamination?
+1. ☐ Checked median AND average, not just one?
+1. ☐ Calculated hit rate against the specific line?
+1. ☐ Classified player role and factored it in?
+1. ☐ Estimated map pool and weighted player stats by map?
+1. ☐ Projected round volume based on match odds?
+1. ☐ Checked for stomp trap (implied win prob > 75%)?
+1. ☐ Ran simulation or projection, not just vibes?
+1. ☐ Edge drives the grade, not gut feeling?
+
+If any box is unchecked, go back and fix it before outputting the grade.
+
+-----
+
+## Common Mistakes to Avoid
+
+- Using full-season stats instead of recent form
+- Using Map 3 data (never do this)
+- Ignoring round counts — kills come from rounds
+- Ignoring role classification
+- Ignoring map veto — one of the biggest factors
+- Overreacting to one outlier game
+- Trusting average without checking median and hit rate
+- Not extracting headshots from HLTV detailed stats
+- Using stale H2H from >6 months ago without labeling it weak
+- Calling something a “clear error” based on average alone
+- Ignoring stomp risk when team is heavy favorite
+- Not separating close-match overs from stomp-risk overs
+- Using generic map takes without checking player-specific map data
+- Inflating grade because of name value instead of current form
+
+-----
+
+## Decision Rules (Final)
+
+|Condition                                                          |Decision      |
+|-------------------------------------------------------------------|--------------|
+|Avg far above line + median above + strong hit rate + no stomp trap|**OVER**      |
+|Avg below line + weak role + likely short match + inflated line    |**UNDER**     |
+|Avg near line + mixed context                                      |**NO BET**    |
+|Line clearly doesn’t reflect recent data + matchup context         |**MISPRICED** |
+|Line wildly below realistic output across all checks               |**PROP ERROR**|
+
+-----
+
+## Player Form Quick-Check
+
+Before grading, verify current form:
+
+- Has kill volume risen or fallen recently?
+- Is ADR climbing or declining?
+- Is impact rating trending?
+- Are headshots stable or spiking/dropping?
+- Is the player facing weaker/stronger opposition than usual?
+- Was there a recent roster change affecting role?
+
+If a player is underperforming recently, do not trust season averages.  
+If a player is on a heater, do not ignore it.
+
+-----
+
+## H2H Usage Rules
+
+- H2H is a **secondary input** — it supports or challenges the primary projection
+- Best H2H: recent matchups, similar roster versions, same role still in place
+- Avoid H2H from different roster eras
+- Use to confirm: does player farm this opponent? Does opponent’s system limit this role?
+- Label any H2H older than ~3 months as “older context — weight accordingly”
+
+-----
+
+## Tips for Catching Book Mistakes
+
+Books often misprice when:
+
+- They use stale reputation instead of current form
+- They hang lines off name value for declining players
+- They inflate support player lines because of one recent spike
+- They set star AWPer lines too low in competitive series
+- They ignore that a close matchup = more rounds = higher kill ceiling
+- They don’t adjust for map pool changes (new pick meta, recent veto shifts)
+- They set lines assuming average round counts when the matchup clearly projects long or short
+
+Watch for entries in bloodbath maps with close odds — that’s where the biggest overs live.  
+Watch for support players with inflated lines in potential stomp matches — that’s where the biggest unders live.

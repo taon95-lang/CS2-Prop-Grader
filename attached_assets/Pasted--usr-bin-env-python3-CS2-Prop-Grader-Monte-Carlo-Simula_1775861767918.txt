@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+“””
+CS2 Prop Grader — Monte Carlo Simulation Engine
+Maps 1–2 combined kills & headshots for BO3 series.
+
+THREE MODES:
+
+1. –player  → Auto-pull KPR/HS from HLTV via hltv_scraper.py, then simulate
+1. –config  → Read all params from a JSON file
+1. –kpr     → Manual CLI params (no HLTV pull)
+
+Auto-pull mode (preferred):
+python simulate.py –player “donk” –line 31.5 –hs-line 14.5
+
+Config mode:
+python simulate.py –config config.json
+
+Manual mode:
+python simulate.py –kpr 0.78 –rounds 42 –line 29.5 –hs-rate 0.45 –hs-line 13.5
+
+Output: JSON with simulation results, edge, and grade.
+“””
+
+import argparse
+import json
+import sys
+import numpy as np
+
+def derive_negbin_params(mean_kills, variance_kills):
+“”“Derive Negative Binomial r, p from mean and variance.
+
+```
+NegBin parameterization:
+    mean = r * (1-p) / p
+    var  = r * (1-p) / p^2
+So:
+    p = mean / variance
+    r = mean * p / (1-p)
+
+Variance must exceed mean (overdispersed). If not, fall back to
+variance = mean * 1.3 (mild overdispersion).
+"""
+if variance_kills <= mean_kills:
+    variance_kills = mean_kills * 1.3
+
+p = mean_kills / variance_kills
+r = mean_kills * p / (1 - p)
+
+# Clamp r to reasonable range
+r = max(r, 1.0)
+r = min(r, 200.0)
+p = max(p, 0.01)
+p = min(p, 0.99)
+
+return r, p
+```
+
+def run_simulation(config):
+“”“Run full Monte Carlo simulation.”””
+np.random.seed(config.get(“seed”, 42))
+
+```
+n_sims = config.get("n_simulations", 100000)
+kpr = config["kpr"]
+kpr_std = config.get("kpr_std", kpr * 0.15)  # default 15% CV
+projected_rounds = config["projected_rounds"]
+round_std = config.get("round_std", projected_rounds * 0.12)
+kills_line = config["kills_line"]
+hs_rate = config.get("hs_rate", 0.0)
+hs_line = config.get("hs_line", None)
+stomp_risk = config.get("stomp_risk", 0.0)
+stomp_round_reduction = config.get("stomp_round_reduction", 6)
+
+map_weights = config.get("map_weights", None)
+
+# Pre-compute map selection probabilities
+if map_weights:
+    map_names = [m["map"] for m in map_weights]
+    map_probs = np.array([m["prob"] for m in map_weights])
+    map_probs = map_probs / map_probs.sum()
+    map_kpr_adj = np.array([m.get("kpr_adj", 1.0) for m in map_weights])
+    map_round_adj = np.array([m.get("round_adj", 0) for m in map_weights])
+
+all_kills = np.zeros(n_sims)
+all_headshots = np.zeros(n_sims)
+
+for sim in range(n_sims):
+    total_kills = 0
+    total_hs = 0
+    
+    # Determine if this sim is a stomp scenario
+    is_stomp = np.random.random() < stomp_risk
+    
+    for map_idx in range(2):  # Maps 1 and 2 only
+        # Select map
+        if map_weights:
+            chosen = np.random.choice(len(map_weights), p=map_probs)
+            kpr_multiplier = map_kpr_adj[chosen]
+            round_offset = map_round_adj[chosen]
+        else:
+            kpr_multiplier = 1.0
+            round_offset = 0
+        
+        # Simulate rounds for this map
+        base_rounds = projected_rounds / 2  # per-map rounds
+        map_rounds = max(16, int(np.random.normal(
+            base_rounds + round_offset, 
+            round_std / 2
+        )))
+        
+        # Apply stomp reduction
+        if is_stomp:
+            map_rounds = max(16, map_rounds - stomp_round_reduction // 2)
+        
+        # Effective KPR for this map (add some per-sim variance)
+        effective_kpr = max(0.1, np.random.normal(kpr * kpr_multiplier, kpr_std))
+        
+        # Expected kills this map
+        expected_kills_map = effective_kpr * map_rounds
+        variance_kills_map = expected_kills_map * 1.4  # overdispersion factor
+        
+        # Derive NegBin params and simulate
+        r, p = derive_negbin_params(expected_kills_map, variance_kills_map)
+        map_kills = int(np.random.negative_binomial(r, p))
+        total_kills += map_kills
+        
+        # Headshots via Binomial
+        if hs_rate > 0 and map_kills > 0:
+            map_hs = int(np.random.binomial(map_kills, hs_rate))
+            total_hs += map_hs
+    
+    all_kills[sim] = total_kills
+    all_headshots[sim] = total_hs
+
+# Calculate results
+results = {
+    "player": config.get("player", "Unknown"),
+    "match": config.get("match", "Unknown"),
+    "n_simulations": n_sims,
+    "kills": {
+        "line": kills_line,
+        "simulated_mean": round(float(np.mean(all_kills)), 2),
+        "simulated_median": round(float(np.median(all_kills)), 1),
+        "std_dev": round(float(np.std(all_kills)), 2),
+        "p25": round(float(np.percentile(all_kills, 25)), 1),
+        "p75": round(float(np.percentile(all_kills, 75)), 1),
+        "p10": round(float(np.percentile(all_kills, 10)), 1),
+        "p90": round(float(np.percentile(all_kills, 90)), 1),
+        "over_probability": round(float(np.mean(all_kills > kills_line)), 4),
+        "under_probability": round(float(np.mean(all_kills <= kills_line)), 4),
+        "edge_vs_book": round(float(np.mean(all_kills > kills_line)) - 0.50, 4),
+        "fair_line": round(float(np.percentile(all_kills, 50)), 1),
+    }
+}
+
+if hs_rate > 0 and hs_line is not None:
+    results["headshots"] = {
+        "line": hs_line,
+        "simulated_mean": round(float(np.mean(all_headshots)), 2),
+        "simulated_median": round(float(np.median(all_headshots)), 1),
+        "std_dev": round(float(np.std(all_headshots)), 2),
+        "p25": round(float(np.percentile(all_headshots, 25)), 1),
+        "p75": round(float(np.percentile(all_headshots, 75)), 1),
+        "over_probability": round(float(np.mean(all_headshots > hs_line)), 4),
+        "under_probability": round(float(np.mean(all_headshots <= hs_line)), 4),
+        "edge_vs_book": round(float(np.mean(all_headshots > hs_line)) - 0.50, 4),
+        "fair_line": round(float(np.percentile(all_headshots, 50)), 1),
+    }
+
+return results
+```
+
+def grade_edge(edge):
+“”“Convert raw edge to 4-10 grade.”””
+abs_edge = abs(edge)
+if abs_edge >= 0.18:
+return 10
+elif abs_edge >= 0.15:
+return 9
+elif abs_edge >= 0.11:
+return 8
+elif abs_edge >= 0.07:
+return 7
+elif abs_edge >= 0.04:
+return 6
+elif abs_edge >= 0.02:
+return 5
+else:
+return 4
+
+def main():
+parser = argparse.ArgumentParser(description=“CS2 Prop Grader Monte Carlo Simulation”)
+# — Mode 1: Auto-pull from HLTV —
+parser.add_argument(”–player”, help=“Player name — auto-pulls stats from HLTV”)
+parser.add_argument(”–player-url”, help=“Direct HLTV player profile URL”)
+parser.add_argument(”–player-id”, type=int, help=“HLTV player ID”)
+parser.add_argument(”–line”, type=float, help=“Sportsbook kills line”)
+parser.add_argument(”–hs-line”, type=float, default=None, help=“Headshot line”)
+parser.add_argument(”–match”, help=“Match description (e.g. ‘TeamA vs TeamB’)”)
+parser.add_argument(”–max-bo3s”, type=int, default=10, help=“Max BO3 series to pull from HLTV”)
+
+```
+# --- Mode 2: Config file ---
+parser.add_argument("--config", help="Path to JSON config file")
+
+# --- Mode 3: Manual CLI params ---
+parser.add_argument("--kpr", type=float, help="Kills per round (manual mode)")
+parser.add_argument("--kpr-std", type=float, help="KPR standard deviation")
+parser.add_argument("--rounds", type=float, help="Projected total rounds (Maps 1-2)")
+parser.add_argument("--round-std", type=float, help="Round count std dev")
+parser.add_argument("--hs-rate", type=float, default=0.0, help="Headshot rate")
+
+# --- Shared params ---
+parser.add_argument("--stomp-risk", type=float, default=0.0, help="Stomp probability 0-1")
+parser.add_argument("--stomp-reduction", type=int, default=6, help="Round reduction in stomp")
+parser.add_argument("--sims", type=int, default=100000, help="Number of simulations")
+parser.add_argument("--seed", type=int, default=42, help="Random seed")
+parser.add_argument("--save-scrape", help="Save raw HLTV scrape data to this JSON path")
+
+args = parser.parse_args()
+
+# ─── MODE 1: Auto-pull from HLTV ───
+if args.player or args.player_url or args.player_id:
+    if not args.line:
+        parser.error("--line is required when using --player mode")
+    
+    # Import the scraper
+    import importlib.util
+    import os
+    scraper_path = os.path.join(os.path.dirname(__file__), "hltv_scraper.py")
+    spec = importlib.util.spec_from_file_location("hltv_scraper", scraper_path)
+    scraper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scraper)
+    
+    player_name = args.player or str(args.player_id)
+    print(f"[INFO] Pulling stats for '{player_name}' from HLTV...", file=sys.stderr)
+    
+    hltv_data = scraper.get_player_stats(
+        player_url=args.player_url,
+        player_id=args.player_id,
+        player_name=player_name,
+        max_bo3s=args.max_bo3s,
+    )
+    
+    # Check for errors
+    if "error" in hltv_data:
+        print(f"\n[ERROR] {hltv_data['error']}", file=sys.stderr)
+        if "fallback_searches" in hltv_data:
+            print("\n[FALLBACK] Try these web searches:", file=sys.stderr)
+            for q in hltv_data["fallback_searches"]:
+                print(f"  → {q}", file=sys.stderr)
+        sys.exit(1)
+    
+    # Save raw scrape if requested
+    if args.save_scrape:
+        with open(args.save_scrape, 'w') as f:
+            json.dump(hltv_data, f, indent=2)
+        print(f"[INFO] Raw HLTV data saved to {args.save_scrape}", file=sys.stderr)
+    
+    # Build sim config from scraped data
+    sim_ready = hltv_data["sim_config_ready"]
+    config = {
+        "player": player_name,
+        "match": args.match or "Unknown",
+        "kpr": sim_ready["kpr"],
+        "kpr_std": sim_ready["kpr_std"],
+        "projected_rounds": sim_ready["projected_rounds"],
+        "round_std": sim_ready["projected_rounds"] * 0.12,
+        "kills_line": args.line,
+        "hs_rate": sim_ready["hs_rate"],
+        "hs_line": args.hs_line,
+        "stomp_risk": args.stomp_risk,
+        "stomp_round_reduction": args.stomp_reduction,
+        "n_simulations": args.sims,
+        "seed": args.seed,
+    }
+    
+    # Build map weights from scraped per-map data
+    if hltv_data.get("map_summary"):
+        map_weights = []
+        total_maps = sum(v["maps_played"] for v in hltv_data["map_summary"].values())
+        overall_kpr = sim_ready["kpr"]
+        
+        for map_name, stats in hltv_data["map_summary"].items():
+            prob = stats["maps_played"] / total_maps if total_maps > 0 else 0.25
+            kpr_adj = stats["kpr"] / overall_kpr if overall_kpr > 0 else 1.0
+            round_adj = stats["avg_rounds"] - 21  # deviation from baseline
+            map_weights.append({
+                "map": map_name,
+                "prob": round(prob, 3),
+                "kpr_adj": round(kpr_adj, 3),
+                "round_adj": round(round_adj, 1),
+            })
+        config["map_weights"] = map_weights
+    
+    # Print data summary before simulation
+    agg = hltv_data["aggregate"]
+    print(f"\n[DATA] {hltv_data['bo3_series_used']} BO3s, {hltv_data['maps_used']} maps", 
+          file=sys.stderr)
+    print(f"[DATA] KPR: {agg['kpr']} | HS%: {agg['hs_rate']:.1%} | "
+          f"ADR: {agg['avg_adr']} | Rating: {agg['avg_rating']}", file=sys.stderr)
+    if hltv_data.get("bo3_combined_kills"):
+        print(f"[DATA] BO3 M1+M2 kills: {hltv_data['bo3_combined_kills']}", file=sys.stderr)
+        print(f"[DATA] Avg: {hltv_data['bo3_avg_combined']} | "
+              f"Median: {hltv_data['bo3_median_combined']} | "
+              f"Ceiling: {hltv_data['ceiling_game']} | "
+              f"Floor: {hltv_data['floor_game']}", file=sys.stderr)
+    print(f"[DATA] Line: {args.line}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+# ─── MODE 2: Config file ───
+elif args.config:
+    with open(args.config) as f:
+        config = json.load(f)
+
+# ─── MODE 3: Manual CLI params ───
+elif args.kpr and args.rounds and args.line:
+    config = {
+        "kpr": args.kpr,
+        "kpr_std": args.kpr_std or args.kpr * 0.15,
+        "projected_rounds": args.rounds,
+        "round_std": args.round_std or args.rounds * 0.12,
+        "kills_line": args.line,
+        "hs_rate": args.hs_rate,
+        "hs_line": args.hs_line,
+        "stomp_risk": args.stomp_risk,
+        "stomp_round_reduction": args.stomp_reduction,
+        "n_simulations": args.sims,
+        "seed": args.seed,
+    }
+else:
+    parser.error("Provide --player, --config, or (--kpr, --rounds, --line)")
+
+# ─── RUN SIMULATION ───
+results = run_simulation(config)
+
+# Add grades
+kills_edge = results["kills"]["edge_vs_book"]
+results["kills"]["grade"] = grade_edge(kills_edge)
+
+if "headshots" in results:
+    hs_edge = results["headshots"]["edge_vs_book"]
+    results["headshots"]["grade"] = grade_edge(hs_edge)
+
+# If HLTV data was pulled, attach summary to results
+if args.player or args.player_url or args.player_id:
+    results["hltv_data"] = {
+        "bo3_series_used": hltv_data["bo3_series_used"],
+        "maps_used": hltv_data["maps_used"],
+        "aggregate": hltv_data["aggregate"],
+        "bo3_combined_kills": hltv_data.get("bo3_combined_kills"),
+        "bo3_avg_combined": hltv_data.get("bo3_avg_combined"),
+        "bo3_median_combined": hltv_data.get("bo3_median_combined"),
+        "ceiling_game": hltv_data.get("ceiling_game"),
+        "floor_game": hltv_data.get("floor_game"),
+        "map_summary": hltv_data.get("map_summary"),
+    }
+
+print(json.dumps(results, indent=2))
+```
+
+if **name** == “**main**”:
+main()

@@ -1003,6 +1003,69 @@ def search_player_v2(
 _MATCH_IDS_CACHE: dict[str, tuple[float, list]] = {}
 _MATCH_IDS_CACHE_TTL = 3 * 3600  # 3 hours
 
+# ── CS2 Valid Map Pool ──────────────────────────────────────────────────────
+_VETO_VALID_MAPS = {
+    'mirage', 'inferno', 'dust2', 'nuke', 'anubis', 'ancient',
+    'vertigo', 'overpass', 'train', 'cache', 'cobblestone',
+}
+
+
+def parse_veto(html: str) -> list[dict]:
+    """
+    Extract map veto actions (picks, bans, left-overs) from an HLTV match page.
+
+    Returns a list of dicts:
+        [{'team': 'NaVi', 'action': 'removed', 'map': 'Mirage'}, ...]
+
+    Actions:
+        'removed'   — team banned this map
+        'picked'    — team picked this map (will be played)
+        'left over' — default / decider map (neither team picked/banned)
+    """
+    vetos: list[dict] = []
+    pattern = (
+        r'(?:class="[^"]*"[^>]*>)?\s*(\w[\w\s.]+?)\s+'
+        r'(removed|picked|left over)\s+(\w+)'
+    )
+    for team, action, map_name in re.findall(pattern, html, re.IGNORECASE):
+        team = team.strip()
+        if len(team) < 30 and map_name.lower() in _VETO_VALID_MAPS:
+            vetos.append({
+                'team':   team,
+                'action': action.lower(),
+                'map':    map_name.capitalize(),
+            })
+    return vetos
+
+
+def is_bo3_html(html: str) -> bool:
+    """
+    Multi-signal BO3 detection for an HLTV match page.
+
+    Checks (in order of reliability):
+      1. JSON  "bestof":3  or  "bestOf":3  embedded in page data
+      2. Plain text "best of 3"
+      3. Number of mapholder divs ≥ 2 (HLTV always renders a div per map)
+      4. Veto page contains "picked" or "removed" (single-map BO1s rarely have
+         a veto section)
+    Returns True if any strong signal confirms BO3.
+    """
+    lower = html.lower()
+    # Signal 1 — JSON bestof field (most reliable)
+    if '"bestof":3' in lower or '"bestof": 3' in lower or '"bestOf":3' in html:
+        return True
+    # Signal 2 — plain text
+    if 'best of 3' in lower:
+        return True
+    # Signal 3 — mapholder count
+    mh_count = len(re.findall(r'class="[^"]*mapholder[^"]*"', html))
+    if mh_count >= 2:
+        return True
+    # Signal 4 — veto verbs (weak — only use if nothing else fired)
+    if 'veto' in lower and re.search(r'\b(picked|removed|banned)\b', lower):
+        return True
+    return False
+
 
 def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[str, str]]:
     """
@@ -2415,6 +2478,12 @@ def get_player_info(
             errors += 1
             if errors >= 5:
                 break
+            continue
+
+        # Quick BO3 pre-filter — reject BO1/BO2 before the expensive parse.
+        # is_bo3_html() checks JSON bestof field, plain text, and mapholder count.
+        if not is_bo3_html(html):
+            logger.debug(f"[bo3_filter] Skipping {match_id} — not BO3 (pre-filter)")
             continue
 
         # series_num is 1-indexed before increment (next series will be bo3_series_count+1)
