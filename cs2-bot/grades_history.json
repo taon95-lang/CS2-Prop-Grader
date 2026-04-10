@@ -1897,6 +1897,26 @@
       "outcome": "under",
       "baseline_match_id": null,
       "note": "DATA ERROR: grade was based on wrong player (reiko/ESC). Real R3salt on Nemesis had 29 kills vs Eyeballers. Fix applied."
+    },
+    {
+      "id": "f8c8044f-9f6c-4806-8f3e-74d9669c9666",
+      "ts": 1775863976.279245,
+      "date": "2026-04-10",
+      "player": "r3salt",
+      "display": "R3salt",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 79.4,
+      "under_pct": 20.6,
+      "grade": "10/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 33.0,
+      "hist_median": 31.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
