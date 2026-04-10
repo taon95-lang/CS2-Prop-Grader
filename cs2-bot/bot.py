@@ -1305,6 +1305,28 @@ def _analyze_player(
                     f"over_prob={_adj_over}% under_prob={_adj_under}%"
                 )
 
+    # --- Step 8c: Recompute Grade String (post-adjustment) ---
+    # run_simulation baked the grade before matchup veto / coherence check /
+    # probability deltas changed decision or over_prob.  Recompute now so the
+    # displayed grade always matches the final decision and final probability.
+    _final_dec = sim_result.get("decision", "PASS")
+    if _final_dec == "PASS" or sim_result.get("used_fallback"):
+        sim_result["grade"] = "N/A"
+    else:
+        _final_op   = sim_result.get("over_prob", 50.0) / 100.0   # % → fraction
+        _book_imp   = 0.5238                                        # -110 implied
+        if _final_dec == "OVER":
+            _de = (_final_op - _book_imp) * 100
+        else:  # UNDER
+            _de = ((1.0 - _final_op) - _book_imp) * 100
+        if   _de >= 15: sim_result["grade"] = "10/10 (Elite edge)"
+        elif _de >= 12: sim_result["grade"] = "9/10 (Elite edge)"
+        elif _de >= 8:  sim_result["grade"] = "8/10 (Strong edge)"
+        elif _de >= 5:  sim_result["grade"] = "7/10 (Solid lean)"
+        elif _de >= 3:  sim_result["grade"] = "6/10 (Marginal edge)"
+        elif _de >= 0:  sim_result["grade"] = "5/10 (Fair line)"
+        else:           sim_result["grade"] = "4/10 (Negative edge)"
+
     # --- Step 9: Confidence Score (A–F) + Unit Sizing ---
     conf_score = 50  # baseline
 

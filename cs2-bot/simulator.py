@@ -313,6 +313,19 @@ def run_simulation(
 
     expected_total = blended_kpr * total_projected_rounds
 
+    # Sanity clamp: KPR-based projection can drift when stomp maps inflate
+    # per-round efficiency.  A stomp map (13-4, 17 rounds) yields high KPR
+    # which, when multiplied by projected 21 rounds, overshoots actual kills.
+    # Cap projection at ±20% of actual historical series average so the
+    # simulation stays anchored to real observed performance.
+    if series_totals:
+        _series_avg = mean(series_totals)
+        if _series_avg > 0:
+            expected_total = max(
+                _series_avg * 0.80,
+                min(_series_avg * 1.20, expected_total),
+            )
+
     # --- NB Fit + Simulation ---
     # If opponent quality weighting is active, use weighted mean/variance
     # to fit the NB distribution so similar-quality historical maps dominate.
@@ -562,8 +575,10 @@ def calculate_grade(
     elif trend_pct >= -15:  s3 = -1
     else:                   s3 = -2
 
-    # ── S4: Raw simulation probability (weight 1) ────────────────────────────
-    # Runs on un-inflated historical data — minor confirmation signal.
+    # ── S4: Raw simulation probability (weight 2) ────────────────────────────
+    # 100 K Monte Carlo runs are the most statistically robust signal in the
+    # stack.  Weight raised from 1→2 so a clear 76% UNDER sim result cannot
+    # be outvoted to PASS by a noisy hit-rate reading from 3–4 series.
     if   over_prob >= 0.68:  s4 = 2
     elif over_prob >= 0.60:  s4 = 1
     elif over_prob >= 0.40:  s4 = 0
@@ -571,7 +586,7 @@ def calculate_grade(
     else:                    s4 = -2
 
     # ── Weighted consensus ───────────────────────────────────────────────────
-    raw_total = (s1 * 3) + (s2 * 2) + (s3 * 2) + (s4 * 1)
+    raw_total = (s1 * 3) + (s2 * 2) + (s3 * 2) + (s4 * 2)
 
     # ── Stomp modifier ───────────────────────────────────────────────────────
     # Stomps shorten maps ~10% (≈21→19 rounds).  A 30% score reduction keeps
@@ -582,10 +597,13 @@ def calculate_grade(
     else:
         total = raw_total
 
-    # ── Decision ─────────────────────────────────────────────────────────────
-    if total >= 7:
+    # ── Decision (threshold lowered 7→6) ─────────────────────────────────────
+    # Old ±7 left clear directional signals (e.g. 76% under) as PASS when the
+    # evidence stack landed at -6.  Lowering to ±6 lets the strongest combos
+    # of hist evidence + sim probability convert into UNDER/OVER calls.
+    if total >= 6:
         decision = "OVER"
-    elif total <= -7:
+    elif total <= -6:
         decision = "UNDER"
     else:
         decision = "PASS"
