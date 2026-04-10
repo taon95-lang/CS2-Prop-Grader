@@ -21,6 +21,7 @@ from scraper import get_actual_result as _scraper_get_actual_result
 from prizepicks import get_cs2_lines, get_player_line, get_all_cs2_props, invalidate_cache as pp_invalidate
 from grade_engine import (
     compute_grade_package,
+    build_grade_summary,
     run_lines_table,
     build_prob_bar as ge_prob_bar,
     determine_role,
@@ -1857,6 +1858,43 @@ def build_result_embed(
         mi_parts.append("**KPR by Map:** " + " · ".join(_mkpr_parts))
     if mi_parts:
         embed.add_field(name="🗺️ Map Intelligence", value="\n".join(mi_parts), inline=False)
+
+    # ── Grade Summary — Pros / Cons / Player Attributes ───────────────────────
+    try:
+        _gs = build_grade_summary(
+            sim_result   = result,
+            form         = form,
+            variance     = variance,
+            deep         = deep,
+            period_stats = result.get("period_stats"),
+            map_intel    = map_intel if map_intel else {},
+        )
+        _gs_pros  = _gs.get("pros", [])
+        _gs_cons  = _gs.get("cons", [])
+        _gs_attrs = _gs.get("attributes", [])
+
+        _summary_parts: list[str] = []
+
+        if _gs_attrs:
+            _summary_parts.append("**📌 Player Profile**")
+            _summary_parts.extend(f"• {a}" for a in _gs_attrs)
+
+        if _gs_pros:
+            _summary_parts.append("**✅ FOR THE BET**" if decision != "PASS" else "**✅ Factors For**")
+            _summary_parts.extend(f"• {p}" for p in _gs_pros)
+
+        if _gs_cons:
+            _summary_parts.append("**⚠️ AGAINST THE BET**" if decision != "PASS" else "**⚠️ Risk Factors**")
+            _summary_parts.extend(f"• {c}" for c in _gs_cons)
+
+        if _summary_parts:
+            _summary_text = "\n".join(_summary_parts)
+            # Discord embed field value limit is 1024 chars
+            if len(_summary_text) > 1020:
+                _summary_text = _summary_text[:1017] + "…"
+            embed.add_field(name="📝 GRADE SUMMARY", value=_summary_text, inline=False)
+    except Exception as _gse:
+        logger.warning(f"[grade_summary] Failed to build summary: {_gse}")
 
     # ── Opponent Deep Analysis ────────────────────────────────────────────────
     if deep and not deep.get("error") and opp_display:
