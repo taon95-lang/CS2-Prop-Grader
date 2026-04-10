@@ -1120,6 +1120,16 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
             max_score = max(filtered)
             if max_score >= 2:
                 bo_type = 3
+    # Fallback: if score-based detection thinks BO1, count played mapholder divs.
+    # Matches with 2+ played maps are always BO3 regardless of score encoding.
+    if bo_type == 1:
+        _ph_played = sum(
+            1 for _mh in soup.find_all('div', class_='mapholder')
+            if 'not-played' not in ' '.join(_mh.get('class', []))
+        )
+        if _ph_played >= 2:
+            bo_type = 3
+            logger.info(f"[parse] BO type corrected to 3 via mapholder count ({_ph_played} played)")
 
     matchstats = soup.find(id='match-stats')
     if not matchstats:
@@ -1496,6 +1506,68 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
             f"[parse] Map {map_num} ({map_name}): {player_slug} — "
             f"{kills}K{_hs_str}/{deaths}D rounds={rounds_on_map} rating={rating} fk={fk}"
         )
+
+    # ── Inline-table fallback ─────────────────────────────────────────────────
+    # Some HLTV tournament formats (e.g. Clutch Series, ESL Challenger smaller
+    # events) render map scorecards as plain <table class="table"> elements in
+    # the page *without* assigning them a match-stats tab ID.  When we captured
+    # fewer maps than the played-map count from the mapholder divs, scan all
+    # inline tables in DOM order and back-fill the missing maps.
+    _played_mapholders = sum(
+        1 for _mh in soup.find_all('div', class_='mapholder')
+        if 'not-played' not in ' '.join(_mh.get('class', []))
+    )
+    _want_maps = min(2, _played_mapholders)   # Props only need Maps 1+2
+    if len(maps_result) < _want_maps:
+        logger.info(
+            f"[parse] Only {len(maps_result)} map(s) from tab system; "
+            f"{_played_mapholders} played mapholders — running inline-table fallback"
+        )
+        # Collect player rows from every <table class="table"> in DOM order.
+        # Each unique table that contains the player corresponds to one played map.
+        _inline_entries: list[dict] = []
+        for _tbl in soup.find_all('table', class_='table'):
+            for _tr in _tbl.find_all('tr'):
+                _rn = re.sub(r'[^a-z0-9]', '', _tr.get_text().lower())
+                if slug_norm not in _rn:
+                    continue
+                # Found player row — grab K-D from first matching cell
+                for _td in _tr.find_all('td'):
+                    _kd_m = re.match(r'^(\d+)\s*[-–]\s*(\d+)$', _td.get_text(strip=True))
+                    if _kd_m:
+                        _k = int(_kd_m.group(1))
+                        _d = int(_kd_m.group(2))
+                        if 0 <= _k <= 60:
+                            _inline_entries.append({'kills': _k, 'deaths': _d})
+                        break
+                break  # one row per table
+
+        # _inline_entries is in DOM order → index 0 = Map 1, index 1 = Map 2 …
+        _already_map_nums = {m['map_number'] for m in maps_result}
+        for _mi, _ie in enumerate(_inline_entries, start=1):
+            if _mi > _want_maps:
+                break
+            if _mi in _already_map_nums:
+                continue   # already captured via the tab system
+            maps_result.append({
+                'map_name':      f'Map{_mi}',
+                'kills':         _ie['kills'],
+                'headshots':     None,
+                'deaths':        _ie['deaths'],
+                'rounds':        24,
+                'rating':        None,
+                'kast_pct':      None,
+                'adr':           None,
+                'survival_rate': None,
+                'fk':            None,
+                'fd':            None,
+                'map_number':    _mi,
+            })
+            logger.info(
+                f"[parse] Inline-table fallback Map{_mi}: "
+                f"{player_slug} — {_ie['kills']}K/{_ie['deaths']}D"
+            )
+        maps_result.sort(key=lambda m: m['map_number'])
 
     if not maps_result:
         return None
