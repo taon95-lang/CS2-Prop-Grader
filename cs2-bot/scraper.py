@@ -1911,6 +1911,259 @@ def _parse_hs_kills(html: str, player_slug: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
+# Stats-Matches page scraper  (/stats/players/matches/{id}/{slug})
+# ---------------------------------------------------------------------------
+
+_CS2_MAPS_SET = {
+    'dust2', 'mirage', 'inferno', 'nuke', 'anubis',
+    'ancient', 'overpass', 'vertigo',
+}
+
+_PRE_CS2_ID_THRESHOLD_SM = 2_366_000   # reused from main flow
+
+
+def get_player_stats_matches(
+    player_id: str,
+    player_slug: str,
+    stat_type: str = "Kills",
+    max_series: int = 10,
+) -> list[dict] | None:
+    """
+    Fetch per-map kills + headshots from the HLTV stats/players/matches page.
+
+    URL: /stats/players/matches/{player_id}/{player_slug}?startDate=2023-09-27
+
+    The stats-table lists every map the player competed in with a "K (hs)"
+    column — giving kills and headshots together in a single fetch.  This is
+    the cleanest path for Headshots props and supplements the match-page flow
+    for Kills when fewer than the desired 10 series are available.
+
+    Returns a list of map_stat dicts compatible with run_simulation(), or None
+    if the page is unreachable / has no usable data.
+    """
+    CS2_START = "2023-09-27"
+    url = (
+        f"{HLTV_BASE}/stats/players/matches/{player_id}/{player_slug}"
+        f"?startDate={CS2_START}"
+    )
+    logger.info(f"[stats_matches] Fetching {url}")
+    html = _fetch(url)
+    if not html:
+        logger.info(f"[stats_matches] No HTML returned for {player_slug} — likely blocked")
+        return None
+
+    soup = BeautifulSoup(html, "lxml")
+    table = soup.find("table", {"class": "stats-table"})
+    if not table:
+        logger.info(f"[stats_matches] No stats-table found for {player_slug}")
+        return None
+
+    # ── Detect column indices from header ──────────────────────────────────
+    thead = table.find("thead")
+    header_cells = thead.find_all("th") if thead else []
+    headers = [th.get_text(strip=True).lower() for th in header_cells]
+    n_headers = len(headers)
+    logger.info(f"[stats_matches] Headers ({n_headers}): {headers}")
+
+    map_col    = 1    # default — HLTV stats/matches typically: date|map|event|opponent|result|K(hs)|…
+    result_col = 3
+    khs_col    = 4
+
+    for i, h in enumerate(headers):
+        h_clean = h.strip()
+        if h_clean == "map" and map_col == 1:
+            map_col = i
+        if h_clean in ("result", "res") and result_col == 3:
+            result_col = i
+        # "k (hs)" or "k" column containing headshots
+        if ("k" in h_clean and "hs" in h_clean) or h_clean == "k":
+            khs_col = i
+
+    logger.info(
+        f"[stats_matches] col indices — map:{map_col} result:{result_col} k_hs:{khs_col}"
+    )
+
+    # ── Parse rows ─────────────────────────────────────────────────────────
+    tbody = table.find("tbody")
+    if not tbody:
+        return None
+    all_rows = tbody.find_all("tr")
+
+    # Each "full" row has n_headers tds (including date with rowspan).
+    # "Continuation" rows (covered by rowspan) have n_headers-1 tds — date cell absent.
+    # Strategy: when a row has fewer tds than the full width, all column indices shift -1.
+    parsed_maps: list[dict] = []
+    match_counter = 0
+
+    for row in all_rows:
+        cells = row.find_all("td")
+        if not cells:
+            continue
+
+        # Determine col offset — continuation rows lack the date/leading cell
+        offset = 0
+        if n_headers > 0 and len(cells) < n_headers:
+            # Missing leading column(s) — shift indices left by the difference
+            offset = -(n_headers - len(cells))
+
+        def _get(col_idx: int) -> str:
+            idx = col_idx + offset
+            if 0 <= idx < len(cells):
+                return cells[idx].get_text(strip=True)
+            return ""
+
+        # Detect new series start: full row restores the date cell
+        if len(cells) >= n_headers or n_headers == 0:
+            match_counter += 1
+
+        # Also try to extract a real match ID from any embedded link
+        real_match_id: str | None = None
+        for cell in cells:
+            a = cell.find("a", href=re.compile(r"/matches/\d+/"))
+            if a:
+                m = re.search(r"/matches/(\d+)/", a["href"])
+                if m:
+                    real_match_id = m.group(1)
+                    break
+
+        # Map name
+        map_name = _get(map_col).lower()
+        if map_name not in _CS2_MAPS_SET:
+            # Try every cell for a map name
+            map_name = next(
+                (c.get_text(strip=True).lower()
+                 for c in cells
+                 if c.get_text(strip=True).lower() in _CS2_MAPS_SET),
+                None,
+            )
+        if not map_name:
+            continue
+
+        # Rounds from result ("16 - 12", "W (16:12)", etc.)
+        result_text = _get(result_col)
+        nums = re.findall(r"\d+", result_text[:25])
+        if len(nums) >= 2:
+            rounds = sum(int(n) for n in nums[:2])
+            if rounds < 16 or rounds > 50:   # sanity check
+                rounds = 22
+        else:
+            rounds = 22
+
+        # Kills and headshots from "K (hs)" cell
+        k_hs_text = _get(khs_col)
+        k_match = re.search(r"(\d+)\s*\((\d+)\)", k_hs_text)
+        if k_match:
+            kills     = int(k_match.group(1))
+            headshots = int(k_match.group(2))
+        else:
+            # Fallback: scan every cell for "N (M)" pattern
+            kills = headshots = None
+            for cell in cells:
+                ct = cell.get_text(strip=True)
+                m2 = re.search(r"(\d+)\s*\((\d+)\)", ct)
+                if m2:
+                    kills     = int(m2.group(1))
+                    headshots = int(m2.group(2))
+                    break
+            if kills is None:
+                # Last resort: parse a plain integer from khs cell
+                k_only = re.search(r"(\d+)", k_hs_text)
+                kills = int(k_only.group(1)) if k_only else None
+            if kills is None:
+                continue
+
+        mid_str = real_match_id or f"sm{match_counter:04d}"
+
+        parsed_maps.append({
+            "match_id":  mid_str,
+            "map_name":  map_name,
+            "kills":     kills,
+            "headshots": headshots,
+            "rounds":    rounds,
+        })
+
+    if not parsed_maps:
+        logger.info(f"[stats_matches] No usable map rows parsed for {player_slug}")
+        return None
+
+    logger.info(
+        f"[stats_matches] Parsed {len(parsed_maps)} raw map rows for {player_slug}"
+    )
+
+    # ── Group into series (consecutive maps sharing the same match_id) ─────
+    # Preserve order (newest first from HLTV) — group by match_id runs.
+    from itertools import groupby as _groupby
+
+    series_list: list[list[dict]] = []
+    for _mid, group in _groupby(parsed_maps, key=lambda x: x["match_id"]):
+        series_list.append(list(group))
+
+    # ── Build map_stats output ─────────────────────────────────────────────
+    is_hs = stat_type.lower() in ("headshots", "hs")
+    map_stats: list[dict] = []
+    series_count = 0
+
+    for smaps in series_list:
+        if series_count >= max_series:
+            break
+        if len(smaps) < 2:
+            continue   # BO1 — skip
+
+        # CS2 era gate on real match IDs
+        first_mid = smaps[0]["match_id"]
+        try:
+            if int(first_mid) < _PRE_CS2_ID_THRESHOLD_SM:
+                logger.info(
+                    f"[stats_matches] Skipping series {first_mid} — pre-CS2 ID"
+                )
+                continue
+        except (ValueError, TypeError):
+            pass   # synthetic IDs ("sm0001") pass through
+
+        for m in smaps[:2]:
+            stat_val = m["headshots"] if is_hs else m["kills"]
+            if stat_val is None:
+                # For HS props, skip maps with no HS data
+                if is_hs:
+                    continue
+                stat_val = m["kills"]   # kills always present
+            map_stats.append({
+                "stat_value":    stat_val,
+                "headshots":     m["headshots"],
+                "kills":         m["kills"],
+                "rounds":        m["rounds"],
+                "match_id":      m["match_id"],
+                "match_slug":    "",
+                "map_name":      m["map_name"],
+                "rating":        None,
+                "kast_pct":      None,
+                "adr":           None,
+                "survival_rate": None,
+                "fk":            None,
+                "fd":            None,
+                "deaths":        None,
+                "pistol_kills":  None,
+                "opp_rank":      None,
+                "match_hs_pct":  None,
+            })
+
+        series_count += 1
+
+    if len(map_stats) < 4:
+        logger.info(
+            f"[stats_matches] Insufficient data for {player_slug}: "
+            f"{len(map_stats)} maps from {series_count} series"
+        )
+        return None
+
+    logger.info(
+        f"[stats_matches] Built {len(map_stats)} map_stats "
+        f"({series_count} series) for {player_slug} [{stat_type}]"
+    )
+    return map_stats
+
+
+# ---------------------------------------------------------------------------
 # Main entry point — used by the bot
 # ---------------------------------------------------------------------------
 
@@ -1991,6 +2244,59 @@ def get_player_info(
         f"[scraper] bo3.gg context: {_bo3gg_ctx} | Liquipedia role: {_liq_role} "
         f"(stat_type={stat_type})"
     )
+
+    # Step 1c: For Headshots props — try stats/players/matches page as PRIMARY source.
+    # That page has a K (hs) column with both kills and headshots in a single fetch,
+    # eliminating the need to hop through mapstatsid pages.  If it returns ≥ 8 map
+    # samples (4 series × 2 maps), return early with that data — it's cleaner and faster.
+    _is_hs_prop = stat_type.lower() in ("headshots", "hs")
+    if _is_hs_prop:
+        _sm_data = get_player_stats_matches(player_id, player_slug, stat_type="Headshots")
+        if _sm_data and len(_sm_data) >= 8:
+            logger.info(
+                f"[scraper] stats/matches page returned {len(_sm_data)} maps for "
+                f"{display_name} [HS prop] — using as primary data source"
+            )
+            import statistics as _stats_mod
+            _hs_vals = [m["stat_value"] for m in _sm_data]
+            _hs_mean = _stats_mod.mean(_hs_vals)
+            _hs_std  = _stats_mod.stdev(_hs_vals) if len(_hs_vals) > 1 else 2.0
+            _hs_std  = max(_hs_std, 1.0)
+            # Compute recent_hs_pct from actual kill/hs pairs on this page
+            _hs_rate_pairs = [
+                (m["headshots"], m["kills"])
+                for m in _sm_data
+                if m.get("headshots") is not None and m.get("kills", 0) > 0
+            ]
+            if _hs_rate_pairs:
+                _recent_hs_pct = sum(h / k for h, k in _hs_rate_pairs) / len(_hs_rate_pairs)
+            else:
+                _recent_hs_pct = None
+            _country_sm = _bo3gg_ctx.get("country") if _bo3gg_ctx else None
+            return {
+                "player":            display_name,
+                "player_id":         player_id,
+                "player_slug":       player_slug,
+                "player_team_id":    None,
+                "player_team_slug":  None,
+                "match_ids":         [],
+                "map_kills":         _sm_data,   # full map_stat dicts (same as normal flow)
+                "mean":              round(_hs_mean, 2),
+                "std":               round(_hs_std, 2),
+                "sample_size":       len(_sm_data),
+                "source":            "HLTV Stats/Matches",
+                "recent_hs_pct":     _recent_hs_pct,
+                "hs_pct_n_matches":  0,
+                "bo3gg_context":     _bo3gg_ctx,
+                "liquipedia_role":   _liq_role,
+                "country":           _country_sm,
+                "team_mismatch":     False,
+            }
+        else:
+            logger.info(
+                f"[scraper] stats/matches primary path insufficient for {display_name} "
+                f"({len(_sm_data) if _sm_data else 0} maps) — falling through to match pages"
+            )
 
     # Step 2: Get recent match IDs
     match_ids = get_player_match_ids(player_id, max_matches=40)
@@ -2132,6 +2438,27 @@ def get_player_info(
             f"[scraper] Series {bo3_series_count}: match {match_id} — "
             f"maps: {[(m['map_name'], m['kills']) for m in _series_maps]}"
         )
+
+    # Step 3b: Supplemental fill — if main loop found fewer than 6 series, try
+    # the stats/players/matches page (single fetch, CS2 era only).  This covers
+    # players with sparse results-page data (new to the circuit, bot-era gap, etc.)
+    # We only use it to ADD series that are absent from map_kills (no duplicates).
+    if not _is_hs_prop and bo3_series_count < 6:
+        _sm_supp = get_player_stats_matches(player_id, player_slug, stat_type="Kills")
+        if _sm_supp:
+            _existing_mids = {m["match_id"] for m in map_kills}
+            _added = 0
+            for _sm_map in _sm_supp:
+                mid_sm = _sm_map["match_id"]
+                if mid_sm not in _existing_mids:
+                    map_kills.append(_sm_map)
+                    _existing_mids.add(mid_sm)
+                    _added += 1
+            if _added:
+                logger.info(
+                    f"[scraper] stats/matches supplemented {_added} maps "
+                    f"for {display_name} (total now {len(map_kills)})"
+                )
 
     if len(map_kills) < 4:
         raise RuntimeError(
