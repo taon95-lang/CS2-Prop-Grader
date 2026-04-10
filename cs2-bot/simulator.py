@@ -239,6 +239,20 @@ def run_simulation(
     if stomp_via_rank and stat_type == "Kills":
         rounds_per_map_projected = max(18, rounds_per_map_projected - 1)
 
+    # Fix 2: Cap rounds projection at avg historical rounds + 2 per map.
+    # Coinflip odds formula can produce 24 rounds/map (OT risk), but if a player's
+    # historical maps averaged 20 rounds, projecting 24 inflates expected kills by 20%.
+    # Cap prevents this compounding with any KPR inflation.
+    if rounds_per_map:
+        _avg_hist_rounds = sum(rounds_per_map) / len(rounds_per_map)
+        _round_cap = int(_avg_hist_rounds) + 2
+        if rounds_per_map_projected > _round_cap:
+            logger.debug(
+                f"[sim] Round cap applied: {rounds_per_map_projected} → {_round_cap} "
+                f"(hist avg={_avg_hist_rounds:.1f})"
+            )
+            rounds_per_map_projected = _round_cap
+
     total_projected_rounds = rounds_per_map_projected * 2
     per_map_values = stat_values
 
@@ -313,17 +327,18 @@ def run_simulation(
 
     expected_total = blended_kpr * total_projected_rounds
 
-    # Sanity clamp: KPR-based projection can drift when stomp maps inflate
-    # per-round efficiency.  A stomp map (13-4, 17 rounds) yields high KPR
-    # which, when multiplied by projected 21 rounds, overshoots actual kills.
-    # Cap projection at ±20% of actual historical series average so the
-    # simulation stays anchored to real observed performance.
+    # Fix 1 (tighter anchor): KPR-based projection can overshoot when stomp maps
+    # inflate per-round efficiency AND when projected rounds exceed historical avg.
+    # Anchor to observed hist_median: allow +8% upside (genuine hot form) and
+    # -10% downside (cold form / stomp risk).  Never let the sim median drift
+    # far above the actual observed median — that's what caused sim_median=39
+    # when hist_median=31 and actual result was 29.
     if series_totals:
-        _series_avg = mean(series_totals)
-        if _series_avg > 0:
+        _hist_med_anchor = median(series_totals)
+        if _hist_med_anchor > 0:
             expected_total = max(
-                _series_avg * 0.80,
-                min(_series_avg * 1.20, expected_total),
+                _hist_med_anchor * 0.90,
+                min(_hist_med_anchor * 1.08, expected_total),
             )
 
     # --- NB Fit + Simulation ---
@@ -437,6 +452,7 @@ def run_simulation(
         trend_pct=trend_pct,
         stomp_via_rank=stomp_via_rank,
         book_implied_prob=book_implied_prob,
+        series_totals=series_totals,
     )
 
     return {
@@ -517,6 +533,7 @@ def calculate_grade(
     trend_pct: float = 0.0,
     stomp_via_rank: bool = False,
     book_implied_prob: float = BOOK_IMPLIED_PROB,
+    series_totals: list = None,
 ) -> tuple:
     """
     Evidence-stacking grade engine — v2.
@@ -585,8 +602,19 @@ def calculate_grade(
     elif over_prob >= 0.32:  s4 = -1
     else:                    s4 = -2
 
+    # ── Fix 3: Consecutive cold-series penalty ───────────────────────────────
+    # series_totals[0] = most recent completed series (newest-first ordering).
+    # If the 2 most recent series are BOTH under the line the player is clearly
+    # cold at this exact number.  Penalise the raw score so borderline OVER
+    # calls flip to PASS and strong OVER calls lose at least one grade tier.
+    cold_penalty = 0
+    if series_totals and len(series_totals) >= 2:
+        n_cold = sum(1 for v in series_totals[:3] if v < line)
+        if series_totals[0] < line and series_totals[1] < line:
+            cold_penalty = -3 if n_cold >= 3 else -2
+
     # ── Weighted consensus ───────────────────────────────────────────────────
-    raw_total = (s1 * 3) + (s2 * 2) + (s3 * 2) + (s4 * 2)
+    raw_total = (s1 * 3) + (s2 * 2) + (s3 * 2) + (s4 * 2) + cold_penalty
 
     # ── Stomp modifier ───────────────────────────────────────────────────────
     # Stomps shorten maps ~10% (≈21→19 rounds).  A 30% score reduction keeps
@@ -636,6 +664,16 @@ def calculate_grade(
         elif dir_edge_pct >= 3:  grade_num, edge_label = 6,  "Marginal edge"
         elif dir_edge_pct >= 0:  grade_num, edge_label = 5,  "Fair line"
         else:                    grade_num, edge_label = 4,  "Negative edge"
+
+        # Fix 4: Volatility cap — high-variance players cannot earn top grades.
+        # A volatile player (stability_std > 8) with two cold series is NOT
+        # an "Elite edge" regardless of the historical hit-rate.
+        if stability_std > 8.0 and cold_penalty < 0 and grade_num >= 9:
+            grade_num = 8
+            edge_label = "Strong edge (volatile)"
+        elif stability_std > 5.0 and cold_penalty < 0 and grade_num == 10:
+            grade_num = 9
+            edge_label = "Elite edge (volatile)"
 
         grade_str = f"{grade_num}/10 ({edge_label})"
         sign = "✅" if decision == "OVER" else "❌"
