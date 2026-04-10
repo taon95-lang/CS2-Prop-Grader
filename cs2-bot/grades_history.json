@@ -1874,7 +1874,8 @@
       "hist_median": 31.0,
       "actual": 29.0,
       "outcome": "under",
-      "baseline_match_id": null
+      "baseline_match_id": null,
+      "note": "DATA ERROR: grade was based on wrong player (reiko/ESC). Real R3salt on Nemesis had 29 kills vs Eyeballers. Fix applied."
     },
     {
       "id": "38facad4-cd8c-421f-bdce-38d9f869fa9e",
@@ -1894,7 +1895,8 @@
       "hist_median": 31.0,
       "actual": 29.0,
       "outcome": "under",
-      "baseline_match_id": null
+      "baseline_match_id": null,
+      "note": "DATA ERROR: grade was based on wrong player (reiko/ESC). Real R3salt on Nemesis had 29 kills vs Eyeballers. Fix applied."
     }
   ]
 }

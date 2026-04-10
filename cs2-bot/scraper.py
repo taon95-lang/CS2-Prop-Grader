@@ -2207,24 +2207,46 @@ def get_player_info(
             # Already cached — let search_player_v2 verify it's the right team
             result = search_player_v2(player_name, team_hint=team_hint)
         else:
-            # Not cached — go straight to the team roster (most reliable)
-            result = resolve_player_from_roster(player_name, team_hint)
-            if result:
-                pid, slug, display = result
-                # Populate cache so subsequent calls are instant
-                cache_key = _normalise_player_key(player_name)
-                _PLAYER_ID_CACHE[cache_key] = result
-                slug_key = _normalise_player_key(slug)
-                if slug_key != cache_key:
-                    _PLAYER_ID_CACHE[slug_key] = result
-                logger.info(f"[scraper] Roster resolved and cached: {display} (id={pid})")
-            else:
-                # Roster lookup failed — fall back to name search with team hint
-                logger.warning(
-                    f"[scraper] Roster lookup failed for '{player_name}' on '{team_hint}' "
-                    f"— falling back to name search"
-                )
-                result = search_player_v2(player_name, team_hint=team_hint)
+            # Step A: Try a direct HLTV name/slug search FIRST.
+            # If the search returns a player whose normalised slug is an exact
+            # (or very close) match to what was typed, trust that player
+            # regardless of team_hint.  This prevents wrong-player resolutions
+            # like "R3salt" → reiko-on-ESC when the real R3salt is on Nemesis
+            # and the user passed 'esc' as a stale team hint.
+            _name_norm = re.sub(r'[^a-z0-9]', '', player_name.lower())
+            _direct = search_player_v2(player_name)   # no team hint — pure name match
+            if _direct:
+                _dpid, _dslug, _ddisp = _direct
+                _dslug_norm = re.sub(r'[^a-z0-9]', '', _dslug.lower())
+                # Accept the direct hit if the slug is an exact match (covers
+                # names with numbers/special chars like "r3salt", "s1mple").
+                if _dslug_norm == _name_norm:
+                    result = _direct
+                    logger.info(
+                        f"[scraper] Exact slug match from direct search — "
+                        f"using {_dslug} (id={_dpid}) — ignoring stale team_hint='{team_hint}'"
+                    )
+
+            if not result:
+                # Step B: Direct search didn't give an exact match — fall back to
+                # the team roster lookup which handles nicknames that differ from slugs.
+                result = resolve_player_from_roster(player_name, team_hint)
+                if result:
+                    pid, slug, display = result
+                    # Populate cache so subsequent calls are instant
+                    cache_key = _normalise_player_key(player_name)
+                    _PLAYER_ID_CACHE[cache_key] = result
+                    slug_key = _normalise_player_key(slug)
+                    if slug_key != cache_key:
+                        _PLAYER_ID_CACHE[slug_key] = result
+                    logger.info(f"[scraper] Roster resolved and cached: {display} (id={pid})")
+                else:
+                    # Roster lookup also failed — try name search with team hint
+                    logger.warning(
+                        f"[scraper] Roster lookup failed for '{player_name}' on '{team_hint}' "
+                        f"— falling back to name search"
+                    )
+                    result = search_player_v2(player_name, team_hint=team_hint)
     else:
         # No team_hint — use opponent-based disambiguation if available
         result = search_player_v2(player_name, opponent_hint=opponent_hint)
