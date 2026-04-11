@@ -715,191 +715,202 @@ def compute_grade_package(
     }
 
 
-def build_grade_summary(
+def build_analysis_blurb(
+    player_name: str,
     sim_result: dict,
     form: dict,
     variance: dict,
     deep: dict | None,
     period_stats: dict | None,
     map_intel: dict | None,
-) -> dict:
+) -> str:
     """
-    Build a structured pros / cons / player-attributes summary for the grade embed.
-
-    Returns a dict with keys:
-      pros        – list of ✅ bullet strings (factors favouring the bet direction)
-      cons        – list of ❌ bullet strings (factors against or raising risk)
-      attributes  – list of 📌 player attribute strings
+    Return a short 2–3 sentence analyst-style narrative explaining why the
+    player is going OVER or UNDER. Written in plain English, not bullets.
+    References the player's unique traits, form, and matchup context.
     """
-    decision  = sim_result.get("decision", "PASS")
-    line      = sim_result.get("line", 0) or 0
-    over_prob = sim_result.get("over_prob", 50) or 50
-    hist_avg  = sim_result.get("hist_avg", 0) or 0
-    hist_med  = sim_result.get("hist_median", 0) or 0
-    hit_rate  = sim_result.get("hit_rate", 50) or 50
-    n_series  = sim_result.get("n_series", 0) or 0
-    trend_pct = sim_result.get("trend_pct", 0) or 0
-    kpr       = (period_stats or {}).get("kpr")
-    adr_val   = (period_stats or {}).get("adr")
-    rating    = (period_stats or {}).get("rating")
-    kast      = (period_stats or {}).get("kast")
-
-    pros: list[str] = []
-    cons: list[str] = []
-    attrs: list[str] = []
-
-    # ── Player attributes ─────────────────────────────────────────────────────
-    if kpr is not None:
-        tier = "Elite" if kpr >= 0.85 else "Above Avg" if kpr >= 0.72 else "Average" if kpr >= 0.60 else "Below Avg"
-        attrs.append(f"KPR `{kpr:.2f}` ({tier})")
-    if adr_val is not None:
-        tier = "Elite" if adr_val >= 85 else "Solid" if adr_val >= 72 else "Average"
-        attrs.append(f"ADR `{adr_val:.0f}` ({tier})")
-    if rating is not None:
-        tier = "Top Tier" if rating >= 1.15 else "Above Avg" if rating >= 1.05 else "Average" if rating >= 0.95 else "Below Avg"
-        attrs.append(f"Rating `{rating:.2f}` ({tier})")
-    if kast is not None:
-        attrs.append(f"KAST `{kast:.0f}%`")
-
-    # Per-map best/worst from map intelligence
-    if map_intel:
-        bm = map_intel.get("best_map")
-        wm = map_intel.get("worst_map")
-        if bm:
-            attrs.append(f"Best map: {bm[0].title()} `{bm[1]:.1f}` avg kills")
-        if wm:
-            attrs.append(f"Worst map: {wm[0].title()} `{wm[1]:.1f}` avg kills")
-
-    # ── PROS (things supporting the bet direction) ────────────────────────────
-
-    # Form
-    ftype = form.get("type", "NEUTRAL")
-    streak = form.get("streak", 0)
-    if ftype == "HOT":
-        label = form.get("label", f"🔥 {streak} straight hits")
-        if decision in ("OVER", "PASS"):
-            pros.append(f"On a {label} — recent results are trending up")
-        else:
-            cons.append(f"Running hot ({label}) — headwind for UNDER bet")
-    elif ftype == "COLD" and streak >= 2:
-        label = form.get("label", f"❄️ {streak} straight misses")
-        if decision in ("UNDER", "PASS"):
-            pros.append(f"On a {label} — recent misses back the UNDER")
-        else:
-            cons.append(f"Cold streak ({label}) — going against recent form")
-
-    # Historical averages vs line
-    if isinstance(hist_avg, (int, float)) and line:
-        gap_pct = (hist_avg - line) / max(line, 1) * 100
-        if gap_pct >= 8 and decision in ("OVER", "PASS"):
-            pros.append(f"Recent avg `{hist_avg}` is `{gap_pct:.0f}%` above the line")
-        elif gap_pct <= -8 and decision in ("UNDER", "PASS"):
-            pros.append(f"Recent avg `{hist_avg}` sits `{abs(gap_pct):.0f}%` below the line")
-        elif gap_pct >= 8 and decision == "UNDER":
-            cons.append(f"Recent avg `{hist_avg}` is `{gap_pct:.0f}%` above the line — tough for UNDER")
-        elif gap_pct <= -8 and decision == "OVER":
-            cons.append(f"Recent avg `{hist_avg}` sits `{abs(gap_pct):.0f}%` below the line — tough for OVER")
-
-    # Hit rate
-    if isinstance(hit_rate, (int, float)):
-        if hit_rate >= 65 and decision == "OVER":
-            pros.append(f"Cleared this line `{hit_rate:.0f}%` of last {n_series} series")
-        elif hit_rate >= 65 and decision == "UNDER":
-            cons.append(f"Player clears this line `{hit_rate:.0f}%` of the time — UNDER risk")
-        elif hit_rate <= 35 and decision == "UNDER":
-            pros.append(f"Only hit the OVER `{hit_rate:.0f}%` historically — favors UNDER")
-        elif hit_rate <= 35 and decision == "OVER":
-            cons.append(f"Only `{hit_rate:.0f}%` hit rate on this line historically")
-
-    # Simulation probability
+    decision   = sim_result.get("decision", "PASS")
+    line       = sim_result.get("line", 0) or 0
+    over_prob  = sim_result.get("over_prob", 50) or 50
     under_prob = 100 - over_prob
-    if decision == "OVER" and over_prob >= 60:
-        pros.append(f"Monte Carlo: `{over_prob:.1f}%` simulated OVER probability")
-    elif decision == "OVER" and over_prob < 52:
-        cons.append(f"Monte Carlo only gives `{over_prob:.1f}%` OVER — borderline")
-    elif decision == "UNDER" and under_prob >= 60:
-        pros.append(f"Monte Carlo: `{under_prob:.1f}%` simulated UNDER probability")
-    elif decision == "UNDER" and under_prob < 52:
-        cons.append(f"Monte Carlo only gives `{under_prob:.1f}%` UNDER — borderline")
+    hist_avg   = sim_result.get("hist_avg", 0) or 0
+    hist_med   = sim_result.get("hist_median", 0) or 0
+    hit_rate   = sim_result.get("hit_rate", 50) or 50
+    n_series   = sim_result.get("n_series", 0) or 0
+    trend_pct  = sim_result.get("trend_pct", 0) or 0
+    kpr        = (period_stats or {}).get("kpr")
+    adr_val    = (period_stats or {}).get("adr")
+    rating     = (period_stats or {}).get("rating")
+    hs_pct     = (period_stats or {}).get("hs_pct")
+    total_rds  = sim_result.get("total_projected_rounds")
+    stomp      = sim_result.get("stomp_via_rank", False)
+    n_name     = player_name.strip().title() if player_name else "This player"
 
-    # Trend
-    if trend_pct >= 12:
-        if decision == "OVER":
-            pros.append(f"Form trending `+{trend_pct:.0f}%` vs career baseline — player is peaking")
+    # ── Sentence 1: Player profile + role + key attribute ─────────────────────
+    sentences: list[str] = []
+
+    ftype  = form.get("type", "NEUTRAL")
+    streak = form.get("streak", 0)
+    vtier  = variance.get("tier", "MEDIUM")
+
+    # Build a role descriptor from the available signals
+    if kpr is not None and rating is not None:
+        if kpr >= 0.85 and rating >= 1.15:
+            role_desc = "elite star player with consistently high output"
+        elif kpr >= 0.75:
+            role_desc = "high-volume rifler who produces at a strong rate across maps"
+        elif kpr is not None and kpr < 0.60:
+            role_desc = "support-oriented player whose kill numbers run lean"
         else:
-            cons.append(f"Form trending `+{trend_pct:.0f}%` upward — momentum against UNDER")
-    elif trend_pct <= -12:
-        if decision == "UNDER":
-            pros.append(f"Form dropped `{trend_pct:.0f}%` vs career baseline — player is slumping")
+            role_desc = "reliable contributor in his team's system"
+    elif kpr is not None:
+        if kpr >= 0.80:
+            role_desc = "high-volume fragger who racks up kills consistently"
+        elif kpr < 0.60:
+            role_desc = "low-KPR player whose role limits his kill ceiling"
         else:
-            cons.append(f"Form trending `{trend_pct:.0f}%` downward — momentum against OVER")
+            role_desc = "mid-range producer across BO3 series"
+    else:
+        role_desc = "player whose historical output is the primary signal here"
 
-    # KPR context vs line expectation
-    if kpr is not None and line:
-        expected_from_kpr = round(kpr * 26, 1)   # ~26 rounds across 2 maps baseline
-        if expected_from_kpr > line * 1.08 and decision in ("OVER",):
-            pros.append(f"KPR-implied total `{expected_from_kpr}` projects above the line")
-        elif expected_from_kpr < line * 0.92 and decision in ("UNDER",):
-            pros.append(f"KPR-implied total `{expected_from_kpr}` projects below the line")
+    # HS rate flavour
+    hs_flavour = ""
+    if hs_pct is not None:
+        if hs_pct >= 58:
+            hs_flavour = f" His {hs_pct:.0f}% headshot rate signals a dueling, entry-first style."
+        elif hs_pct >= 45:
+            hs_flavour = f" A {hs_pct:.0f}% HS rate suggests he trades efficiently in aim duels."
 
-    # Opponent deep analysis
+    # Variance flavour
+    var_flavour = ""
+    if vtier == "VERY_HIGH":
+        var_flavour = " He is a boom-or-bust type — the ceiling is real but so is the floor."
+    elif vtier == "LOW":
+        var_flavour = " He runs with low variance, meaning his output is predictable and steady."
+    elif vtier == "HIGH":
+        var_flavour = " His numbers swing series-to-series, so the range matters as much as the average."
+
+    sentences.append(
+        f"{n_name} is a {role_desc}.{hs_flavour}{var_flavour}"
+    )
+
+    # ── Sentence 2: Form + average vs line — the core 'why' ───────────────────
+    avg_gap_pct = ((hist_avg - line) / max(line, 1) * 100) if line else 0
+
+    core_why = ""
+    if decision == "OVER":
+        if ftype == "HOT" and streak >= 2:
+            core_why = (
+                f"He's on a {streak}-series hot streak and his recent average of "
+                f"{hist_avg} kills sits {avg_gap_pct:.0f}% above the {line} line, "
+                f"with the simulation returning a {over_prob:.0f}% OVER probability."
+            )
+        elif hist_avg > line * 1.06:
+            core_why = (
+                f"His recent average of {hist_avg} kills clears this line "
+                f"comfortably, hitting the OVER in {hit_rate:.0f}% of his last "
+                f"{n_series} series."
+            )
+        elif trend_pct >= 12:
+            core_why = (
+                f"His output is trending {trend_pct:.0f}% above his career baseline, "
+                f"and the sim projects an OVER {over_prob:.0f}% of the time."
+            )
+        else:
+            core_why = (
+                f"The simulation gives a {over_prob:.0f}% OVER probability, "
+                f"with a recent average of {hist_avg} vs the line at {line}."
+            )
+    elif decision == "UNDER":
+        if ftype == "COLD" and streak >= 2:
+            core_why = (
+                f"He's on a {streak}-series cold streak, and his recent average of "
+                f"{hist_avg} kills falls short of the {line} line. "
+                f"The simulation returns a {under_prob:.0f}% UNDER probability."
+            )
+        elif hist_avg < line * 0.94:
+            core_why = (
+                f"His recent average of {hist_avg} puts him {abs(avg_gap_pct):.0f}% "
+                f"below the {line} line, and he's only cleared it "
+                f"{hit_rate:.0f}% of the time across {n_series} series."
+            )
+        elif trend_pct <= -12:
+            core_why = (
+                f"Output has dropped {abs(trend_pct):.0f}% from his career baseline, "
+                f"and the sim agrees — {under_prob:.0f}% UNDER probability."
+            )
+        else:
+            core_why = (
+                f"The simulation gives a {under_prob:.0f}% UNDER probability, "
+                f"with a recent average of {hist_avg} vs the line at {line}."
+            )
+    else:
+        core_why = (
+            f"His recent average of {hist_avg} sits near the {line} line "
+            f"and signals are split — the simulation shows no clear edge."
+        )
+
+    if core_why:
+        sentences.append(core_why)
+
+    # ── Sentence 3: Matchup / round context / risk ────────────────────────────
+    context = ""
+
     if deep and not deep.get("error"):
-        comb      = deep.get("combined_multiplier", 1.0) or 1.0
-        comb_pct  = round((comb - 1) * 100, 1)
+        comb_pct  = round(((deep.get("combined_multiplier", 1.0) or 1.0) - 1) * 100, 1)
         def_prof  = (deep.get("defensive_profile") or {}).get("label", "")
-        rank_lbl  = (deep.get("rank_info") or {}).get("label", "")
         h2h_recs  = deep.get("h2h", [])
         h2h_cmpl  = [s for s in h2h_recs if not s.get("partial")]
         h2h_n     = len(h2h_cmpl)
         h2h_clrs  = sum(1 for s in h2h_cmpl if s.get("cleared"))
 
-        sign = "+" if comb_pct >= 0 else ""
-        if comb_pct >= 5 and decision in ("OVER",):
-            pros.append(f"Opponent analysis: `{sign}{comb_pct}%` combined boost ({def_prof})")
-        elif comb_pct >= 5 and decision == "UNDER":
-            cons.append(f"Opponent gives `{sign}{comb_pct}%` boost — tailwind against UNDER")
-        elif comb_pct <= -5 and decision in ("UNDER",):
-            pros.append(f"Tough opponent: `{comb_pct}%` combined suppression ({def_prof})")
-        elif comb_pct <= -5 and decision == "OVER":
-            cons.append(f"Opponent suppresses output by `{comb_pct}%` — headwind for OVER")
+        opp_name_d = deep.get("opponent_display", "the opponent") or "the opponent"
 
-        if rank_lbl:
-            if "high-ranked" in rank_lbl.lower() or "top" in rank_lbl.lower():
-                cons.append(f"Facing {rank_lbl} — elite opposition")
-            elif "lower" in rank_lbl.lower() or "weaker" in rank_lbl.lower():
-                pros.append(f"Opponent rank: {rank_lbl} — softer competition")
-
-        if h2h_n >= 2:
+        if stomp:
+            rg = sim_result.get("rank_gap", "")
+            context = (
+                f"The rank gap against {opp_name_d} introduces a stomp risk "
+                f"that could shorten maps and suppress his total{' (' + str(rg) + ' positions)' if rg else ''}."
+            )
+        elif comb_pct <= -7 and decision in ("OVER",):
+            context = (
+                f"{opp_name_d}'s defensive structure suppresses output by {abs(comb_pct):.0f}% "
+                f"on average, which is the main headwind for this OVER."
+                + (f" He's cleared {h2h_clrs}/{h2h_n} times H2H." if h2h_n >= 2 else "")
+            )
+        elif comb_pct >= 6 and decision in ("OVER",):
+            context = (
+                f"{opp_name_d} plays an open style that inflates kill totals, "
+                f"giving a {comb_pct:.0f}% expected boost to his output."
+                + (f" He's cleared {h2h_clrs}/{h2h_n} times H2H." if h2h_n >= 2 else "")
+            )
+        elif comb_pct <= -6 and decision in ("UNDER",):
+            context = (
+                f"{opp_name_d} runs a disciplined defence ({def_prof}), "
+                f"suppressing kill volume by {abs(comb_pct):.0f}% — a key driver for this UNDER."
+            )
+        elif h2h_n >= 2:
             h2h_rate = h2h_clrs / h2h_n
-            if h2h_rate >= 0.75 and decision == "OVER":
-                pros.append(f"Head-to-head: cleared `{h2h_clrs}/{h2h_n}` times vs this opponent")
+            if h2h_rate >= 0.70 and decision == "OVER":
+                context = f"He's cleared this line {h2h_clrs}/{h2h_n} times against {opp_name_d} historically, showing genuine H2H comfort."
             elif h2h_rate <= 0.33 and decision == "UNDER":
-                pros.append(f"Head-to-head: only cleared `{h2h_clrs}/{h2h_n}` times vs this opponent")
-            elif h2h_rate >= 0.75 and decision == "UNDER":
-                cons.append(f"H2H: cleared `{h2h_clrs}/{h2h_n}` times vs this opponent — UNDER risk")
+                context = f"He's only cleared this line {h2h_clrs}/{h2h_n} times against {opp_name_d} historically, backing the UNDER."
+        elif total_rds and total_rds >= 52:
+            context = f"Full, competitive maps are projected ({total_rds} rounds), giving his volume every opportunity to hit."
+        elif total_rds and total_rds <= 44:
+            context = f"Shorter maps are projected ({total_rds} rounds), capping the kill ceiling and increasing UNDER probability."
 
-    # Variance
-    vtier = variance.get("tier", "MEDIUM")
-    vstd  = variance.get("std", "")
-    if vtier == "LOW":
-        pros.append(f"Low variance player (σ=`{vstd}`) — consistent output")
-    elif vtier == "VERY_HIGH":
-        cons.append(f"Boom/bust profile (σ=`{vstd}`) — results are unpredictable")
-    elif vtier == "HIGH":
-        cons.append(f"High variance (σ=`{vstd}`) — be cautious sizing")
+    elif stomp:
+        context = "A significant rank mismatch introduces stomp risk — shorter maps could cap his output."
+    elif total_rds and total_rds >= 52:
+        context = f"Full, competitive maps are projected ({total_rds} rounds), which is ideal for volume."
+    elif total_rds and total_rds <= 44:
+        context = f"Shorter maps projected ({total_rds} rounds) — the kill ceiling may be lower than the line assumes."
 
-    # Small sample warning
-    if n_series < 6:
-        cons.append(f"Small sample — only `{n_series}` BO3 series in the dataset")
+    if context:
+        sentences.append(context)
 
-    # Stomp / rounds
-    if sim_result.get("stomp_via_rank"):
-        rg = sim_result.get("rank_gap", "?")
-        cons.append(f"Stomp risk — rank gap of `{rg}` could shorten maps")
-    elif sim_result.get("total_projected_rounds", 0) and sim_result.get("total_projected_rounds", 0) >= 50:
-        pros.append(f"Projected `{sim_result['total_projected_rounds']}` rounds — full maps expected")
-
-    return {"pros": pros[:5], "cons": cons[:4], "attributes": attrs[:5]}
+    return " ".join(sentences)
 
 
 def _extract_series_totals(map_stats: list) -> list[float]:
