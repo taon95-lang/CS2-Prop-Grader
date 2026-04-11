@@ -1977,6 +1977,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "2fc1831c-b916-4ab3-9828-0a784b6cd084",
+      "ts": 1775872436.721893,
+      "date": "2026-04-11",
+      "player": "8juho8",
+      "display": "8juho8",
+      "line": 15.5,
+      "stat": "HS",
+      "opponent": "",
+      "over_pct": 48.8,
+      "under_pct": 51.2,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 15.0,
+      "hist_median": 14.29,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

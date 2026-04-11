@@ -87,7 +87,7 @@ def _rotate_session() -> "_cffi_req.Session | None":
     under a profile that the previous one couldn't use).
     """
     global _HLTV_SESSION, _HLTV_SESSION_WARMED, _HLTV_SESSION_PROFILE, _profile_idx
-    global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
+    global _STATS_SESSION_WARMED, _MAPSTATS_CIRCUIT_BLOCKED
     _profile_idx = (_profile_idx + 1) % len(_PROFILES)
     new_profile = _PROFILES[_profile_idx]
     logger.warning(f"[session] Rotating profile → {new_profile}")
@@ -95,7 +95,7 @@ def _rotate_session() -> "_cffi_req.Session | None":
     _HLTV_SESSION_PROFILE = new_profile
     _HLTV_SESSION_WARMED = False        # re-warm homepage with new session
     _STATS_SESSION_WARMED = False       # re-warm stats referer with new session
-    _STATS_PAGES_BLOCKED = False        # give stats pages a fresh chance
+    _MAPSTATS_CIRCUIT_BLOCKED = False   # give mapstats pages a fresh chance
     return _HLTV_SESSION
 
 
@@ -409,20 +409,49 @@ def _warm_stats_session(match_url: str) -> bool:
 
 def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
     """
-    Placeholder for an external unblocking service fallback.
+    Fetch a URL through the Apify residential proxy network.
 
-    HLTV's /stats/matches/mapstatsid/ pages are blocked at the IP level for
-    all cloud/datacenter IPs including Apify's residential proxy network.
-    A specialized "web unlocker" service (e.g. BrightData Web Unlocker)
-    would be required — not currently configured.
-
-    Returns None immediately so the circuit-breaker is tripped cleanly
-    rather than wasting time on requests that are known to fail.
+    Uses the APIFY_TOKEN environment variable.  Residential IPs bypass
+    the HLTV datacenter-IP block on /stats/matches/mapstatsid/ pages.
+    Returns the HTML on success, None on failure (caller trips circuit).
     """
+    import os
+    import requests as _requests
+
     if url in _MAPSTATS_HTML_CACHE:
         return _MAPSTATS_HTML_CACHE[url]
-    # No unblocking service configured — return None to trip circuit-breaker
-    return None
+
+    token = os.environ.get("APIFY_TOKEN", "").strip()
+    if not token:
+        logger.warning("[apify] APIFY_TOKEN not set — skipping proxy fetch")
+        return None
+
+    proxy_url = f"http://auto:{token}@proxy.apify.com:8000"
+    proxies   = {"http": proxy_url, "https": proxy_url}
+    headers   = {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer":         referer or "https://www.hltv.org/",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest":  "document",
+        "Sec-Fetch-Mode":  "navigate",
+        "Sec-Fetch-Site":  "same-origin",
+    }
+
+    try:
+        logger.info(f"[apify] Fetching via residential proxy: {url[-70:]}")
+        resp = _requests.get(url, headers=headers, proxies=proxies, timeout=20, verify=False)
+        if resp.status_code == 200 and len(resp.text) > 3000 and "Just a moment" not in resp.text:
+            logger.info(f"[apify] Success — {len(resp.text):,} chars")
+            _MAPSTATS_HTML_CACHE[url] = resp.text
+            return resp.text
+        logger.warning(f"[apify] Bad response: status={resp.status_code} len={len(resp.text)}")
+        return None
+    except Exception as e:
+        logger.warning(f"[apify] Request failed: {type(e).__name__}: {e}")
+        return None
 
 
 def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
@@ -440,13 +469,11 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     if stats_url in _MAPSTATS_HTML_CACHE:
         return _MAPSTATS_HTML_CACHE[stats_url]
 
-    global _STATS_PAGES_BLOCKED, _STATS_SESSION_WARMED
-    if _STATS_PAGES_BLOCKED:
-        return None
+    global _STATS_SESSION_WARMED
 
     # ── Global /stats/ circuit-breaker fast-path ──────────────────────────────
     if _is_stats_blocked(stats_url):
-        logger.debug(f"[stats_fetch] /stats/ circuit open — skipping {stats_url}")
+        logger.info(f"[stats_fetch] mapstats circuit open — skipping {stats_url[-60:]}")
         return None
 
     # Build the complete list of profiles to try (current first, then rest)
@@ -554,12 +581,12 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
         logger.info("[stats_fetch] Apify proxy succeeded — circuit-breaker NOT tripped.")
         return html
 
-    # Apify also failed — trip the circuit-breaker
+    # Apify also failed — trip the TTL-based circuit-breaker (auto-resets in 5 min)
     logger.warning(
         "[stats_fetch] Apify proxy also failed — "
-        "activating circuit-breaker. HS will use calibrated fallback rates."
+        "tripping mapstats circuit (resets in 5 min). HS will use calibrated fallback."
     )
-    _STATS_PAGES_BLOCKED = True
+    _trip_stats_circuit(stats_url)
     return None
 
 
