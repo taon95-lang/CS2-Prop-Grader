@@ -1937,6 +1937,46 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "78fc2699-9207-465a-80bb-82cf7fd132ee",
+      "ts": 1775871374.78289,
+      "date": "2026-04-11",
+      "player": "sh1nejezzz",
+      "display": "Sh1nejezzz",
+      "line": 28.0,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 62.5,
+      "under_pct": 32.7,
+      "grade": "8/10 (Strong edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 31.0,
+      "hist_median": 33.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "bd42e024-afea-495f-94b4-6a6ad85b9c10",
+      "ts": 1775871524.091718,
+      "date": "2026-04-11",
+      "player": "8juho8",
+      "display": "8juho8",
+      "line": 15.5,
+      "stat": "HS",
+      "opponent": "",
+      "over_pct": 48.8,
+      "under_pct": 51.2,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 15.0,
+      "hist_median": 14.29,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

@@ -602,9 +602,24 @@ def _parse_map_stats_hs(
         )
         return None, None
 
+    # ── Pre-filter: skip tables with fewer than 5 rows (summary / scoreline junk)
+    # and prefer tables that explicitly have a K(hs) header.  Sort: labelled first.
+    def _tbl_has_khs_header(t: object) -> bool:
+        hr = t.find('tr')  # type: ignore[attr-defined]
+        if not hr:
+            return False
+        for hdr in hr.find_all(['th', 'td']):
+            ht = hdr.get_text(strip=True).lower()
+            if re.search(r'k[^a-z]*\(?hs|hs.*\)', ht):
+                return True
+        return False
+
+    stats_tables = sorted(stats_tables, key=lambda t: (not _tbl_has_khs_header(t), -len(t.find_all('tr'))))
+
     for tbl in stats_tables:
         all_rows = tbl.find_all('tr')
-        if len(all_rows) < 2:
+        # Skip tiny tables (scoreboard headers, overview blocks, etc.)
+        if len(all_rows) < 5:
             continue
 
         header_row = all_rows[0]
@@ -620,21 +635,32 @@ def _parse_map_stats_hs(
                 logger.debug(f"[HS][{ctx}] K(hs) column found at index {ci}, header={ht!r}")
                 break
 
-        # Fallback: if no labelled header, probe data rows for "N (N)" pattern
+        # Fallback: scan ALL data rows (not just the first) for "N (N)" pattern
+        # and require that the same column is consistent across ≥2 rows.
         if khs_col is None:
             all_headers_text = [h.get_text(strip=True) for h in headers]
             logger.debug(f"[HS][{ctx}] No K(hs) header in: {all_headers_text}")
-            first_data = all_rows[1]
-            data_cells = first_data.find_all('td')
-            for probe in (4, 5, 3, 2):
-                if probe < len(data_cells):
+            col_hits: dict[int, int] = {}
+            for dr in all_rows[1:6]:   # check up to 5 data rows
+                data_cells = dr.find_all('td')
+                for probe in range(min(len(data_cells), 8)):
                     ct = data_cells[probe].get_text(strip=True)
                     if re.search(r'^\d+\s*\(\d+\)$', ct):
-                        khs_col = probe
-                        logger.debug(
-                            f"[HS][{ctx}] K(hs) column probed at index {probe}: {ct!r}"
-                        )
-                        break
+                        # Extra guard: HS value (inside parens) must be ≤ kills value
+                        try:
+                            _k = int(ct.split('(')[0].strip())
+                            _h = int(ct.split('(')[1].rstrip(')').strip())
+                            if _h <= _k:       # valid K(hs) cell
+                                col_hits[probe] = col_hits.get(probe, 0) + 1
+                        except (ValueError, IndexError):
+                            pass
+            if col_hits:
+                # Pick the column with the most consistent hits
+                khs_col = max(col_hits, key=lambda c: col_hits[c])
+                logger.debug(
+                    f"[HS][{ctx}] K(hs) column probed at index {khs_col} "
+                    f"(consistency hits={col_hits[khs_col]})"
+                )
 
         if khs_col is None:
             logger.debug(f"[HS][{ctx}] K(hs) column not found in this table — trying next")
@@ -674,13 +700,26 @@ def _parse_map_stats_hs(
                 return None, None
 
             try:
-                # Exact user-specified extraction:
-                #   headshots = int(raw_text.split('(')[1].split(')')[0])
-                #   kills     = int(raw_text.split('(')[0].strip())
                 headshots = int(raw_text.split('(')[1].split(')')[0].strip())
                 kills_str = raw_text.split('(')[0].strip()
                 kills_m   = re.search(r'(\d+)', kills_str)
                 kills_hs  = int(kills_m.group(1)) if kills_m else None
+
+                # ── Sanity check: headshots can never exceed kills ─────────────
+                if kills_hs is not None and headshots > kills_hs:
+                    logger.error(
+                        f"[HS][{ctx}] Sanity FAIL — HS ({headshots}) > kills ({kills_hs}) "
+                        f"for {player_slug!r}, cell={raw_text!r} — wrong column, discarding"
+                    )
+                    return None, None
+
+                # Headshots in a single CS2 map realistically cap around 30
+                if headshots > 35:
+                    logger.error(
+                        f"[HS][{ctx}] Sanity FAIL — HS ({headshots}) implausibly high "
+                        f"for {player_slug!r} — discarding"
+                    )
+                    return None, None
 
                 logger.info(
                     f"[HS][{ctx}] Parsed — kills={kills_hs}  headshots={headshots}"
