@@ -411,12 +411,13 @@ def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
     """
     Fetch a URL through the Apify residential proxy network.
 
-    Uses the APIFY_TOKEN environment variable.  Residential IPs bypass
-    the HLTV datacenter-IP block on /stats/matches/mapstatsid/ pages.
-    Returns the HTML on success, None on failure (caller trips circuit).
+    Tries multiple credential formats so the correct one works regardless
+    of whether APIFY_TOKEN is an API key or proxy password.
+    Returns HTML on success, None on any failure (no circuit tripping).
     """
     import os
     import requests as _requests
+    from requests.auth import HTTPProxyAuth
 
     if url in _MAPSTATS_HTML_CACHE:
         return _MAPSTATS_HTML_CACHE[url]
@@ -426,9 +427,7 @@ def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
         logger.warning("[apify] APIFY_TOKEN not set — skipping proxy fetch")
         return None
 
-    proxy_url = f"http://auto:{token}@proxy.apify.com:8000"
-    proxies   = {"http": proxy_url, "https": proxy_url}
-    headers   = {
+    headers = {
         "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer":         referer or "https://www.hltv.org/",
@@ -440,50 +439,82 @@ def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
         "Sec-Fetch-Site":  "same-origin",
     }
 
-    try:
-        logger.info(f"[apify] Fetching via residential proxy: {url[-70:]}")
-        resp = _requests.get(url, headers=headers, proxies=proxies, timeout=20, verify=False)
-        if resp.status_code == 200 and len(resp.text) > 3000 and "Just a moment" not in resp.text:
-            logger.info(f"[apify] Success — {len(resp.text):,} chars")
-            _MAPSTATS_HTML_CACHE[url] = resp.text
-            return resp.text
-        logger.warning(f"[apify] Bad response: status={resp.status_code} len={len(resp.text)}")
-        return None
-    except Exception as e:
-        logger.warning(f"[apify] Request failed: {type(e).__name__}: {e}")
-        return None
+    # Try multiple auth formats — Apify changed how they handle credentials
+    proxy_candidates = [
+        f"http://auto:{token}@proxy.apify.com:8000",
+        f"http://groups-RESIDENTIAL:{token}@proxy.apify.com:8000",
+        f"http://{token}:@proxy.apify.com:8000",
+    ]
+
+    for proxy_url in proxy_candidates:
+        proxies = {"http": proxy_url, "https": proxy_url}
+        try:
+            logger.info(f"[apify] Trying proxy ({proxy_url.split('@')[0].split('//')[1][:12]}…): {url[-60:]}")
+            sess = _requests.Session()
+            sess.proxies = proxies
+            resp = sess.get(url, headers=headers, timeout=18, verify=False)
+            if resp.status_code == 200 and len(resp.text) > 3000 and "Just a moment" not in resp.text:
+                logger.info(f"[apify] Success — {len(resp.text):,} chars")
+                _MAPSTATS_HTML_CACHE[url] = resp.text
+                return resp.text
+            if resp.status_code == 407:
+                logger.warning(f"[apify] 407 Proxy Auth failed for this format — trying next")
+                continue
+            logger.warning(f"[apify] status={resp.status_code} len={len(resp.text)} — giving up")
+            return None
+        except Exception as e:
+            err = str(e)
+            if "407" in err or "Authentication Required" in err:
+                logger.warning(f"[apify] 407 in exception — trying next format")
+                continue
+            logger.warning(f"[apify] {type(e).__name__}: {err[:120]}")
+            return None
+
+    logger.warning("[apify] All proxy credential formats failed (407)")
+    return None
 
 
 def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     """
     Fetch an HLTV /stats/matches/mapstatsid/ page.
 
-    Cycles through ALL available impersonation profiles before giving up.
-    Each profile gets a full warm-up chain (homepage → match page) before
-    the stats page is attempted, mimicking real browser navigation.
+    Strategy for mapstatsid URLs (HS data):
+      - All tls_client profiles get an immediate 403 from HLTV for /stats/ paths
+        — cycling through them wastes 20+ seconds per URL with no benefit.
+      - Go straight to Apify residential proxy.
+      - On failure, return None without tripping any circuit so each URL
+        gets its own independent attempt next time.
 
-    Falls back to Apify proxy if all tls_client profiles are blocked.
-    Circuit-breaker only trips after Apify also fails.
+    Strategy for all other /stats/ URLs (player/team stats):
+      - Use the existing profile-cycling approach with circuit-breaker.
     """
-    # Check cache first — Apify may have already fetched this URL
+    # Check cache first
     if stats_url in _MAPSTATS_HTML_CACHE:
         return _MAPSTATS_HTML_CACHE[stats_url]
 
-    global _STATS_SESSION_WARMED
-
-    # ── Global /stats/ circuit-breaker fast-path ──────────────────────────────
-    if _is_stats_blocked(stats_url):
-        logger.info(f"[stats_fetch] mapstats circuit open — skipping {stats_url[-60:]}")
+    # ── fast-path: circuit-breaker for player/team stats only ─────────────────
+    if not _is_mapstats_url(stats_url) and _is_stats_blocked(stats_url):
+        logger.info(f"[stats_fetch] /stats/ circuit open — skipping {stats_url[-60:]}")
         return None
 
-    # Build the complete list of profiles to try (current first, then rest)
+    # ── mapstatsid URLs: skip profile cycling, go straight to Apify ───────────
+    if _is_mapstats_url(stats_url):
+        html = _fetch_via_apify_proxy(stats_url, referer=match_url)
+        if html:
+            logger.info("[stats_fetch] Apify mapstats fetch succeeded.")
+            return html
+        # No circuit trip — let each URL try independently
+        logger.info(f"[stats_fetch] Apify failed for {stats_url[-60:]} — using HS% fallback")
+        return None
+
+    # ── non-mapstats /stats/ URLs: profile-cycling with circuit-breaker ───────
+    global _STATS_SESSION_WARMED
+
     all_profiles = list(_PROFILES)
-    # Start from current profile index
     start_idx = _profile_idx
     ordered = all_profiles[start_idx:] + all_profiles[:start_idx]
 
     for profile_attempt, profile in enumerate(ordered):
-        # Switch to this profile and build a fresh session
         global _HLTV_SESSION, _HLTV_SESSION_PROFILE, _HLTV_SESSION_WARMED
         if _HLTV_SESSION_PROFILE != profile or _HLTV_SESSION is None:
             _HLTV_SESSION = _make_session(profile)
@@ -496,18 +527,13 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
             continue
 
         try:
-            # Step 1: Homepage warm-up (seeds Cloudflare cookie)
             if not _HLTV_SESSION_WARMED:
                 r_home = sess.get(HLTV_BASE + "/", timeout=12)
                 if r_home.status_code == 200 and "Just a moment" not in r_home.text:
                     _HLTV_SESSION_WARMED = True
                     logger.info(f"[stats_fetch] Homepage warm-up OK [{profile}]")
                     time.sleep(random.uniform(0.4, 0.9))
-                else:
-                    logger.warning(f"[stats_fetch] Homepage warm-up {r_home.status_code} [{profile}]")
-                    # don't give up — still try the stats page
 
-            # Step 2: Match page warm-up (builds referer chain)
             if not _STATS_SESSION_WARMED and match_url:
                 r_match = sess.get(match_url, timeout=15)
                 if r_match.status_code == 200:
@@ -515,7 +541,6 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
                     logger.info(f"[stats_fetch] Match-page warm-up OK [{profile}]")
                     time.sleep(random.uniform(0.3, 0.7))
 
-            # Step 3: Fetch the actual stats page with browser-like headers
             logger.info(
                 f"[stats_fetch] GET {stats_url} [{profile}]"
                 + (f" (attempt {profile_attempt + 1}/{len(ordered)})" if profile_attempt else "")
@@ -523,14 +548,14 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
             resp = sess.get(
                 stats_url,
                 headers={
-                    "Referer":          match_url or HLTV_BASE + "/",
-                    "Accept":           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language":  "en-US,en;q=0.9",
-                    "Accept-Encoding":  "gzip, deflate, br",
-                    "Sec-Fetch-Dest":   "document",
-                    "Sec-Fetch-Mode":   "navigate",
-                    "Sec-Fetch-Site":   "same-origin",
-                    "Sec-Fetch-User":   "?1",
+                    "Referer":                   match_url or HLTV_BASE + "/",
+                    "Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language":           "en-US,en;q=0.9",
+                    "Accept-Encoding":           "gzip, deflate, br",
+                    "Sec-Fetch-Dest":            "document",
+                    "Sec-Fetch-Mode":            "navigate",
+                    "Sec-Fetch-Site":            "same-origin",
+                    "Sec-Fetch-User":            "?1",
                     "Upgrade-Insecure-Requests": "1",
                 },
                 timeout=15,
@@ -541,29 +566,16 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
                 return resp.text
 
             if resp.status_code == 403:
-                _trip_stats_circuit(stats_url)   # trips only the relevant circuit
-                # For mapstatsid: trip sets _MAPSTATS_CIRCUIT_BLOCKED; rotate profile
-                # For player/team stats: trip sets _STATS_SUBDOMAIN_BLOCKED; bail fast
-                if not _is_mapstats_url(stats_url) and _STATS_SUBDOMAIN_BLOCKED:
-                    logger.warning(
-                        f"[stats_fetch] player-stats circuit TRIPPED on 403 — "
-                        f"abandoning player stats for 30 min"
-                    )
+                _trip_stats_circuit(stats_url)
+                if _STATS_SUBDOMAIN_BLOCKED:
+                    logger.warning("[stats_fetch] player-stats circuit TRIPPED — 30 min block")
                     return None
-                logger.warning(
-                    f"[stats_fetch] 403 on profile={profile} url={stats_url[-60:]} "
-                    f"(attempt {profile_attempt + 1}/{len(ordered)}) — rotating"
-                )
                 _STATS_SESSION_WARMED = False
-                # Exponential backoff: 1s, 2s, 3s, ...
                 delay = min(1.0 + profile_attempt * 1.0, 4.0) + random.uniform(0, 0.5)
                 time.sleep(delay)
                 continue
 
-            logger.warning(
-                f"[stats_fetch] Unexpected status={resp.status_code} "
-                f"len={len(resp.text)} [{profile}]"
-            )
+            logger.warning(f"[stats_fetch] status={resp.status_code} len={len(resp.text)}")
             return None
 
         except Exception as e:
@@ -571,22 +583,7 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
             time.sleep(1.0)
             continue
 
-    # All tls_client profiles exhausted — try Apify proxy as last resort
-    logger.warning(
-        f"[stats_fetch] All {len(ordered)} profiles returned 403 — "
-        "trying Apify proxy fallback before tripping circuit-breaker."
-    )
-    html = _fetch_via_apify_proxy(stats_url, referer=match_url)
-    if html:
-        logger.info("[stats_fetch] Apify proxy succeeded — circuit-breaker NOT tripped.")
-        return html
-
-    # Apify also failed — trip the TTL-based circuit-breaker (auto-resets in 5 min)
-    logger.warning(
-        "[stats_fetch] Apify proxy also failed — "
-        "tripping mapstats circuit (resets in 5 min). HS will use calibrated fallback."
-    )
-    _trip_stats_circuit(stats_url)
+    logger.warning("[stats_fetch] All profiles exhausted for non-mapstats URL")
     return None
 
 
