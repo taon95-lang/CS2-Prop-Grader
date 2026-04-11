@@ -49,3 +49,8 @@ timeoutMs = 20000
 [nix]
 channel = "stable-25_05"
 packages = ["geckodriver", "gitFull", "libxcrypt", "pkg-config", "playwright-driver", "xcodebuild", "xsimd", "zlib"]
+
+[userenv]
+
+[userenv.shared]
+TELEGRAM_TOKEN = "I: 8751606992:AAF8pw-Zcqp1Qr7PVd6UL8d5QKeUXarroRI"
