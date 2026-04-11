@@ -910,7 +910,105 @@ def build_analysis_blurb(
     if context:
         sentences.append(context)
 
-    return " ".join(sentences)
+    narrative = " ".join(sentences)
+
+    # ── Player Strengths ──────────────────────────────────────────────────────
+    p_strengths: list[str] = []
+
+    if kpr is not None:
+        if kpr >= 0.85:   p_strengths.append(f"Elite KPR ({kpr:.2f})")
+        elif kpr >= 0.75: p_strengths.append(f"Strong KPR ({kpr:.2f})")
+    if rating is not None:
+        if rating >= 1.15:   p_strengths.append(f"Top-tier rating ({rating:.2f})")
+        elif rating >= 1.05: p_strengths.append(f"Above-avg rating ({rating:.2f})")
+    if adr_val is not None and adr_val >= 80:
+        p_strengths.append(f"High ADR ({adr_val:.0f})")
+    if hs_pct is not None and hs_pct >= 52:
+        p_strengths.append(f"{hs_pct:.0f}% HS rate")
+    if ftype == "HOT" and streak >= 2:
+        p_strengths.append(f"Currently hot — {streak} straight hits")
+    elif ftype == "COLD" and streak >= 2 and decision == "UNDER":
+        p_strengths.append(f"Cold run supports the UNDER")
+    if vtier == "LOW":
+        p_strengths.append("Consistent / low variance")
+    if total_rds and total_rds >= 50 and not stomp:
+        p_strengths.append(f"Full maps projected ({total_rds} rds)")
+    if kpr is not None and kpr < 0.60:
+        p_strengths.append("Support role — lean kill profile")
+
+    # ── Opponent Strengths & Weaknesses ───────────────────────────────────────
+    opp_strengths:   list[str] = []
+    opp_weaknesses:  list[str] = []
+    opp_label = ""
+
+    if deep and not deep.get("error"):
+        opp_label  = deep.get("opponent_display", "") or ""
+        def_prof   = deep.get("defensive_profile") or {}
+        ct_win_pct = def_prof.get("ct_win_pct")
+        t_win_pct  = def_prof.get("t_win_pct")
+        avg_kills_allowed = def_prof.get("avg_kills_allowed")
+        rank_info  = deep.get("rank_info") or {}
+        opp_rank   = rank_info.get("opp_rank")
+        plr_rank   = rank_info.get("player_rank")
+        map_pool   = deep.get("map_pool") or {}
+        most_maps  = map_pool.get("most_played", [])
+        least_maps = map_pool.get("least_played", [])
+        hs_vuln    = (deep.get("hs_vulnerability") or {}).get("label", "")
+        h2h_recs   = deep.get("h2h", [])
+        h2h_cmpl   = [s for s in h2h_recs if not s.get("partial")]
+        h2h_n      = len(h2h_cmpl)
+        h2h_clrs   = sum(1 for s in h2h_cmpl if s.get("cleared"))
+
+        # Strengths (things the opponent does well → bad for OVER / good for UNDER)
+        if ct_win_pct is not None and ct_win_pct >= 53:
+            opp_strengths.append(f"Strong CT side ({ct_win_pct:.0f}% win rate)")
+        if t_win_pct is not None and t_win_pct >= 53:
+            opp_strengths.append(f"Aggressive T-side ({t_win_pct:.0f}% win rate)")
+        if opp_rank and opp_rank <= 10:
+            opp_strengths.append(f"Top-{opp_rank} world ranking")
+        elif opp_rank and opp_rank <= 20:
+            opp_strengths.append(f"Top-20 ranked (#{opp_rank})")
+        if avg_kills_allowed is not None and avg_kills_allowed < 14.0:
+            opp_strengths.append("Tight defensive structure — low kills allowed")
+        if least_maps:
+            opp_strengths.append(f"Avoids {least_maps[0].title()} — controlled pool")
+        if h2h_n >= 2 and (h2h_clrs / h2h_n) <= 0.33:
+            opp_strengths.append(f"H2H dominance — player cleared only {h2h_clrs}/{h2h_n}")
+
+        # Weaknesses (things the opponent does poorly → good for OVER / bad for UNDER)
+        if ct_win_pct is not None and ct_win_pct <= 45:
+            opp_weaknesses.append(f"Leaky CT side ({ct_win_pct:.0f}% win rate)")
+        if t_win_pct is not None and t_win_pct <= 40:
+            opp_weaknesses.append(f"Passive T-side ({t_win_pct:.0f}% win rate) — fewer duels")
+        if opp_rank and plr_rank and opp_rank > plr_rank + 15:
+            opp_weaknesses.append(f"Outranked (#{opp_rank} vs #{plr_rank}) — stomp risk")
+        if avg_kills_allowed is not None and avg_kills_allowed >= 16.5:
+            opp_weaknesses.append("Generous with kills — high avg allowed per player")
+        if most_maps:
+            top2 = ", ".join(m.title() for m in most_maps[:2])
+            _HIGH_FRAG = {"mirage", "inferno", "dust2", "overpass", "cache", "cobblestone"}
+            if any(m.lower() in _HIGH_FRAG for m in most_maps[:2]):
+                opp_weaknesses.append(f"High-frag map pool ({top2}) inflates kill totals")
+        if hs_vuln and "frag mine" in hs_vuln.lower():
+            opp_weaknesses.append("HS-vulnerable defence")
+        if h2h_n >= 2 and (h2h_clrs / h2h_n) >= 0.70:
+            opp_weaknesses.append(f"Player proven vs them — {h2h_clrs}/{h2h_n} H2H clears")
+
+    # ── Assemble final output ─────────────────────────────────────────────────
+    parts = [narrative]
+
+    if p_strengths:
+        parts.append(f"**💪 Player Strengths:** {', '.join(p_strengths[:4])}")
+
+    if opp_label and (opp_strengths or opp_weaknesses):
+        opp_header = f"**vs {opp_label}**"
+        if opp_strengths:
+            parts.append(f"{opp_header} — **Strengths:** {', '.join(opp_strengths[:3])}")
+        if opp_weaknesses:
+            label = "  **Weaknesses:**" if opp_strengths else f"{opp_header} — **Weaknesses:**"
+            parts.append(f"{label} {', '.join(opp_weaknesses[:3])}")
+
+    return "\n".join(parts)
 
 
 def _extract_series_totals(map_stats: list) -> list[float]:
