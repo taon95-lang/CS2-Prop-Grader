@@ -53,4 +53,3 @@ packages = ["geckodriver", "gitFull", "libxcrypt", "pkg-config", "playwright-dri
 [userenv]
 
 [userenv.shared]
-TELEGRAM_TOKEN = "I: 8751606992:AAF8pw-Zcqp1Qr7PVd6UL8d5QKeUXarroRI"
