@@ -25,7 +25,10 @@ from grade_engine import (
     run_lines_table,
     build_prob_bar as ge_prob_bar,
     determine_role,
+    detect_dog_line,
+    score_correlated_parlay,
 )
+from scraper import check_standin, get_recent_team_roster
 
 logging.basicConfig(
     level=logging.INFO,
@@ -976,6 +979,42 @@ def _analyze_player(
     sim_result["country"]          = (info or {}).get("country")
     sim_result["liquipedia_role"]  = (info or {}).get("liquipedia_role")
     sim_result["bo3gg_context"]    = (info or {}).get("bo3gg_context")
+
+    # --- Stand-in Detection ---
+    # Check the most recent match page for stand-in markers.
+    # A stand-in typically performs differently from a regular roster member —
+    # this is a critical esports-specific risk flag.
+    _standin_detected = False
+    if not used_fallback and info:
+        try:
+            _pslug_si = info.get("player_slug", "")
+            _mids_si  = info.get("match_ids", [])
+            if _pslug_si and _mids_si:
+                _latest_mid, _latest_slug = _mids_si[0][0], _mids_si[0][1]
+                from scraper import _fetch as _scraper_fetch, HLTV_BASE as _HLTV_BASE
+                _si_html = _scraper_fetch(f"{_HLTV_BASE}/matches/{_latest_mid}/{_latest_slug}")
+                if _si_html:
+                    _standin_detected = check_standin(_pslug_si, _si_html)
+        except Exception as _sie:
+            logger.debug(f"[standin] Check failed: {_sie}")
+    sim_result["standin_detected"] = _standin_detected
+    if _standin_detected:
+        logger.info(f"[standin] ⚠️ {player_name} flagged as stand-in in most recent match")
+
+    # --- Dog Line / Market Efficiency Detection ---
+    _dir_sim_prob = (
+        sim_result.get("over_prob",  0) if sim_result.get("decision") == "OVER"
+        else sim_result.get("under_prob", 0) if sim_result.get("decision") == "UNDER"
+        else 0
+    )
+    _dog = detect_dog_line(
+        sim_prob     = float(_dir_sim_prob or 0),
+        book_implied = book_implied,
+        hist_avg     = float(sim_result.get("hist_avg") or 0),
+        line         = line,
+        decision     = sim_result.get("decision", "PASS"),
+    )
+    sim_result["dog_line"] = _dog
 
     # If using estimated fallback data — override to PASS, never make directional calls
     # on invented stats. The grade stays for context but direction is unreliable.
@@ -1978,6 +2017,31 @@ def build_result_embed(
                 rows.append("_AWPer/default HS rate estimate applied_")
         embed.add_field(name="📋 Series Breakdown", value="\n".join(rows), inline=False)
 
+    # ── Stand-in Warning ──────────────────────────────────────────────────────
+    if result.get("standin_detected"):
+        embed.add_field(
+            name="🔄 ROSTER ALERT — Stand-in Detected",
+            value=(
+                f"⚠️ **{player_name}** appears to be playing as a **stand-in** in their most recent match.\n"
+                "Stand-ins often underperform their historical averages due to limited practice "
+                "with the team's system. Factor this into your bet sizing — consider reducing to 0.5u."
+            ),
+            inline=False,
+        )
+
+    # ── Dog Line / Market Efficiency Badge ────────────────────────────────────
+    _dog = result.get("dog_line")
+    if _dog:
+        embed.add_field(
+            name=f"💰 MARKET EDGE — {_dog['type']}",
+            value=(
+                f"{_dog['label']}\n"
+                f"Edge vs book: **+{_dog['edge']}%**\n"
+                "_Bookmaker inefficiency detected — this is the type of spot sharp bettors target._"
+            ),
+            inline=False,
+        )
+
     # ── Final Bet Recommendation ──────────────────────────────────────────────
     embed.add_field(name=final_rec_name, value=final_rec_value, inline=False)
 
@@ -1991,7 +2055,8 @@ def build_result_embed(
     enrichment_str = "  ·  " + "  ·  ".join(enrichment_parts) if enrichment_parts else ""
     embed.set_footer(
         text=(
-            f"Elite CS2 Prop Grader  ·  Negative Binomial Model  ·  "
+            f"Elite CS2 Prop Grader  ·  Esports Betting Guru  ·  "
+            f"EV+ Focus · Data-Driven · No Fluff  ·  "
             f"{data_note}{enrichment_str}  ·  Not financial advice"
         )
     )
@@ -2722,6 +2787,341 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
             for emb in _chunk_embed(f"❌ UNDER Calls ({len(under_rec)}){_sfx}", under_rec, 0xFF4136):
                 await ctx.send(embed=emb)
 
+    # ── EV+ Summary — always sent at the end of every !pp run ─────────────────
+    ev_plays: list[tuple] = []
+    for i, job in enumerate(jobs):
+        res = results[i]
+        if not res or "error" in res or res.get("used_fallback"):
+            continue
+        dec    = res.get("decision", "PASS")
+        if dec not in ("OVER", "UNDER"):
+            continue
+        ev_key = "ev_over" if dec == "OVER" else "ev_under"
+        ev_val = res.get(ev_key)
+        if ev_val is None:
+            continue
+        pkg_ev = res.get("grade_pkg") or {}
+        conf_ev = pkg_ev.get("confidence", res.get("confidence_score", 50))
+        dog = res.get("dog_line")
+        dog_tag = f"  🐕 {dog['type']}" if dog else ""
+        ev_plays.append((ev_val, job, res, conf_ev, dog_tag))
+
+    if ev_plays:
+        ev_plays.sort(key=lambda x: x[0], reverse=True)
+        top_ev  = [p for p in ev_plays if p[0] > 0]
+        neg_ev  = [p for p in ev_plays if p[0] <= 0]
+        ev_lines = []
+        for ev_val, job, res, conf_ev, dog_tag in top_ev[:8]:
+            dec   = res.get("decision", "?")
+            grade = res.get("grade", "?")
+            icon  = "✅" if dec == "OVER" else "❌"
+            ev_lines.append(
+                f"{icon} **{job['player']}** `{job['line']} {job['stat']}`  "
+                f"EV: `+{ev_val:.3f}u`  Grade: `{grade}`  Conf: {conf_ev}/100{dog_tag}"
+            )
+        if neg_ev:
+            ev_lines.append(f"\n_+ {len(neg_ev)} negative-EV calls omitted_")
+
+        ev_embed = discord.Embed(
+            title="🎯 EV+ PLAYS — Best Value on the Slate",
+            description=(
+                "\n".join(ev_lines) if ev_lines else "_No positive-EV plays found._"
+            ),
+            color=0xFFD700,
+        )
+        ev_embed.set_footer(
+            text=(
+                "Ranked by Expected Value vs -110 vig  ·  "
+                "Esports Betting Guru  ·  EV+ Focus · Data-Driven · No Fluff  ·  Not financial advice"
+            )
+        )
+        await ctx.send(embed=ev_embed)
+
+
+
+# ---------------------------------------------------------------------------
+# !ev — EV+ hunting: show only the best positive-EV plays from live slate
+# ---------------------------------------------------------------------------
+
+@bot.command(name="ev")
+async def cmd_ev(ctx, stat_arg: str = ""):
+    """
+    !ev         — fetch live PrizePicks slate, show only EV+ plays sorted by edge
+    !ev kills   — kills props only
+    !ev hs      — headshots props only
+    """
+    stat_filter = None
+    if stat_arg.lower() in ("hs", "headshots"):
+        stat_filter = "HS"
+    elif stat_arg.lower() in ("kills", "kill"):
+        stat_filter = "Kills"
+
+    status_msg = await ctx.send(
+        embed=discord.Embed(
+            title="🎯 EV+ Hunter — Scanning Live Slate…",
+            description="Fetching PrizePicks lines and running simulations to find positive-EV plays…",
+            color=0xFFD700,
+        )
+    )
+
+    try:
+        raw_items = await asyncio.to_thread(get_cs2_lines, None)
+    except Exception as exc:
+        await status_msg.edit(embed=discord.Embed(title="❌ Fetch Failed", description=str(exc)[:200], color=0xFF4136))
+        return
+
+    if not raw_items:
+        await status_msg.edit(embed=discord.Embed(title="📭 No Props Found", description="No CS2 props live right now.", color=0xFFDC00))
+        return
+
+    seen: set = set()
+    jobs: list[dict] = []
+    for item in raw_items:
+        pname = (item.get("player_name") or "").strip()
+        stat  = _pp_stat_type(item)
+        score = _pp_line_score(item)
+        if not pname or score is None:
+            continue
+        if stat_filter and stat != stat_filter:
+            continue
+        key = (pname.lower(), stat)
+        if key in seen:
+            continue
+        seen.add(key)
+        player_team = (item.get("player_team") or "").strip().lower()
+        home = (item.get("home_team_name") or item.get("home_team") or "").strip()
+        away = (item.get("away_team_name") or item.get("away_team") or "").strip()
+        opponent = away if home.lower() == player_team else home if player_team else (home or away or None)
+        jobs.append({"player": pname, "stat": stat, "line": score, "item": item, "opponent": opponent})
+
+    if not jobs:
+        await status_msg.edit(embed=discord.Embed(title="📭 No Props", description="No gradeable props found.", color=0xFFDC00))
+        return
+
+    await status_msg.edit(
+        embed=discord.Embed(
+            title=f"🎯 EV+ Hunter — Grading {len(jobs)} Props…",
+            description=f"Running analysis on {len(jobs)} props. Results stream in as each finishes (~30s each).\n_Only EV+ plays will appear in the final summary._",
+            color=0xFFD700,
+        )
+    )
+
+    ev_results: list[tuple] = []
+    sem = asyncio.Semaphore(1)
+
+    async def _ev_grade_one(job: dict):
+        async with sem:
+            try:
+                _team_hint = (job.get("item") or {}).get("player_team") or None
+                res = await asyncio.wait_for(
+                    asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], job.get("opponent"), _team_hint),
+                    timeout=90,
+                )
+            except Exception:
+                return
+        if not res or "error" in res or res.get("used_fallback"):
+            return
+        dec = res.get("decision", "PASS")
+        if dec not in ("OVER", "UNDER"):
+            return
+        ev_key = "ev_over" if dec == "OVER" else "ev_under"
+        ev_val = res.get(ev_key)
+        if ev_val is None or ev_val <= 0:
+            return
+        pkg_r  = res.get("grade_pkg") or {}
+        conf_r = pkg_r.get("confidence", 50)
+        dog    = res.get("dog_line")
+        ev_results.append((ev_val, job, res, conf_r, dog))
+
+    tasks = [asyncio.create_task(_ev_grade_one(j)) for j in jobs]
+    await asyncio.gather(*tasks)
+
+    if not ev_results:
+        await ctx.send(embed=discord.Embed(
+            title="📭 No EV+ Plays Found",
+            description="Graded all props — none cleared the positive-EV threshold vs -110 vig.",
+            color=0x95A5A6,
+        ))
+        return
+
+    ev_results.sort(key=lambda x: x[0], reverse=True)
+    lines = []
+    for ev_val, job, res, conf_r, dog in ev_results:
+        dec   = res.get("decision", "?")
+        grade = res.get("grade", "?")
+        icon  = "✅" if dec == "OVER" else "❌"
+        dog_tag = f"  🐕 **{dog['type']}**" if dog else ""
+        lines.append(
+            f"{icon} **{job['player']}** `{job['line']} {job['stat']}`\n"
+            f"  EV: `+{ev_val:.3f}u`  ·  Grade: `{grade}`  ·  Conf: {conf_r}/100{dog_tag}"
+        )
+
+    embed = discord.Embed(
+        title=f"🎯 EV+ PLAYS — {len(ev_results)} Found ({len(jobs)} Props Scanned)",
+        description="\n\n".join(lines[:10]),
+        color=0xFFD700,
+    )
+    embed.set_footer(text="Ranked by EV vs -110 vig  ·  Esports Betting Guru  ·  Data-Driven · No Fluff  ·  Not financial advice")
+    await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# !parlay — correlated parlay builder for a team's props
+# ---------------------------------------------------------------------------
+
+@bot.command(name="parlay")
+async def cmd_parlay(ctx, team_name: str = "", *, extra: str = ""):
+    """
+    !parlay <Team>
+    Grade all PrizePicks props for players on a given team playing today.
+    Identifies correlated legs (same match = round correlation) and ranks
+    the best combinations by combined EV.
+
+    Example: !parlay Vitality
+    """
+    if not team_name:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Usage",
+            description=(
+                "**Usage:** `!parlay <Team>`\n"
+                "**Example:** `!parlay Vitality`\n\n"
+                "Grades all PrizePicks props for players on that team, "
+                "then suggests the strongest correlated parlay legs."
+            ),
+            color=0xFF4136,
+        ))
+        return
+
+    status_msg = await ctx.send(embed=discord.Embed(
+        title=f"🔗 Building Correlated Parlay — {team_name}",
+        description="Fetching PrizePicks slate and finding props for this team…",
+        color=0x7289DA,
+    ))
+
+    try:
+        raw_items = await asyncio.to_thread(get_cs2_lines, None)
+    except Exception as exc:
+        await status_msg.edit(embed=discord.Embed(title="❌ Fetch Failed", description=str(exc)[:200], color=0xFF4136))
+        return
+
+    team_norm = team_name.lower().replace(" ", "")
+    team_jobs: list[dict] = []
+    seen: set = set()
+    for item in raw_items:
+        pname       = (item.get("player_name") or "").strip()
+        player_team = (item.get("player_team") or "").strip().lower().replace(" ", "")
+        stat        = _pp_stat_type(item)
+        score       = _pp_line_score(item)
+        if not pname or score is None:
+            continue
+        if team_norm not in player_team and player_team not in team_norm:
+            continue
+        key = (pname.lower(), stat)
+        if key in seen:
+            continue
+        seen.add(key)
+        home = (item.get("home_team_name") or item.get("home_team") or "").strip()
+        away = (item.get("away_team_name") or item.get("away_team") or "").strip()
+        opponent = away if home.lower().replace(" ", "") == player_team else home
+        team_jobs.append({"player": pname, "stat": stat, "line": score, "item": item, "opponent": opponent or ""})
+
+    if not team_jobs:
+        await status_msg.edit(embed=discord.Embed(
+            title="📭 No Props Found",
+            description=f"No PrizePicks CS2 props found for **{team_name}** today.\nTry the exact team name from `!lines`.",
+            color=0xFFDC00,
+        ))
+        return
+
+    opponent_name = team_jobs[0].get("opponent", "") if team_jobs else ""
+    await status_msg.edit(embed=discord.Embed(
+        title=f"🔗 Correlated Parlay — {team_name}",
+        description=(
+            f"Found **{len(team_jobs)}** prop(s) for {team_name} players"
+            + (f" vs **{opponent_name}**" if opponent_name else "") + ".\n"
+            "Grading each leg — this takes ~30s per player…"
+        ),
+        color=0x7289DA,
+    ))
+
+    graded: list[dict] = []
+    for job in team_jobs:
+        try:
+            _team_hint = (job.get("item") or {}).get("player_team") or None
+            res = await asyncio.wait_for(
+                asyncio.to_thread(_analyze_player, job["player"], job["line"], job["stat"], job.get("opponent"), _team_hint),
+                timeout=90,
+            )
+            res["_job"] = job
+            graded.append(res)
+            # Stream each result as it finishes
+            if "error" not in res and not res.get("used_fallback"):
+                await ctx.send(embed=build_result_embed(job["player"], job["line"], job["stat"], res))
+                try:
+                    save_grade(job["player"], job["line"], job["stat"], res, opponent=job.get("opponent"))
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.warning(f"[parlay] Grade failed for {job['player']}: {exc}")
+
+    if not graded:
+        await ctx.send(embed=discord.Embed(title="❌ No results", description="All grades failed.", color=0xFF4136))
+        return
+
+    # Score correlated parlay legs using grade_engine
+    scored = score_correlated_parlay(graded)
+
+    if not scored:
+        await ctx.send(embed=discord.Embed(
+            title="⏸️ No Directional Legs",
+            description=f"All {len(graded)} props graded PASS — no correlated parlay recommended.",
+            color=0xFFDC00,
+        ))
+        return
+
+    # Build parlay recommendation embed
+    parlay_lines = []
+    total_ev = 0.0
+    for p in scored:
+        job   = p.get("_job", {})
+        dec   = p.get("decision", "PASS")
+        grade = p.get("grade", "?")
+        ev_key = "ev_over" if dec == "OVER" else "ev_under"
+        ev    = p.get(ev_key) or 0
+        total_ev += float(ev)
+        icon  = "✅" if dec == "OVER" else "❌"
+        corr  = p.get("_corr_note", "")
+        dog   = p.get("dog_line")
+        dog_tag = f"  🐕 {dog['type']}" if dog else ""
+        parlay_lines.append(
+            f"{icon} **{job.get('player','?')}** `{job.get('line','?')} {job.get('stat','?')}` — "
+            f"Grade `{grade}`  EV: `{'+' if ev >= 0 else ''}{ev:.3f}u`{dog_tag}\n"
+            f"  _{corr}_"
+        )
+
+    # Correlation note: same team = positively correlated (round volume)
+    rounds_note = ""
+    sample_rounds = scored[0].get("total_projected_rounds")
+    if sample_rounds:
+        if sample_rounds >= 50:
+            rounds_note = f"\n✅ **Round correlation ACTIVE** — {sample_rounds} rounds projected. More rounds = more kills for all legs."
+        elif sample_rounds <= 44:
+            rounds_note = f"\n⚠️ **Short maps risk** — only {sample_rounds} rounds projected. Consider reducing parlay size."
+
+    ev_sign = "+" if total_ev >= 0 else ""
+    embed = discord.Embed(
+        title=f"🔗 Correlated Parlay — {team_name}" + (f" vs {opponent_name}" if opponent_name else ""),
+        description=(
+            f"**{len(scored)} Legs Graded** · Combined EV: `{ev_sign}{total_ev:.3f}u`"
+            f"{rounds_note}\n\n"
+            + "\n\n".join(parlay_lines)
+            + "\n\n_Same-team legs share round-count correlation — "
+            "when the match goes long, all players benefit._"
+        ),
+        color=0x7289DA,
+    )
+    embed.set_footer(text="Correlated Parlay  ·  Esports Betting Guru  ·  EV+ Focus · Data-Driven  ·  Not financial advice")
+    await ctx.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------

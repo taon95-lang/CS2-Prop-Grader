@@ -1024,3 +1024,101 @@ def _extract_series_totals(map_stats: list) -> list[float]:
             order.append(mid)
         seen[mid] += m["stat_value"]
     return [seen[mid] for mid in order]
+
+
+# ---------------------------------------------------------------------------
+# Dog Line / Market Efficiency Detection
+# ---------------------------------------------------------------------------
+
+def detect_dog_line(
+    sim_prob: float,
+    book_implied: float,
+    hist_avg: float,
+    line: float,
+    decision: str,
+) -> dict | None:
+    """
+    Detect mispriced 'dog' lines — where the bookmaker underprices a player
+    but our simulation shows a meaningful edge.
+
+    A 'dog' line occurs when:
+      - Book implied probability is low (player priced as unlikely to hit)
+      - But sim probability is significantly higher (we disagree with the book)
+
+    Returns a dict with type/edge/label or None if no misprice detected.
+    """
+    if decision not in ("OVER", "UNDER"):
+        return None
+
+    edge = sim_prob / 100 - book_implied
+
+    # Strong mispriced dog: sim says 62%+ but book implies under 45%
+    if sim_prob >= 62 and book_implied <= 0.45:
+        return {
+            "type":  "MISPRICED DOG",
+            "edge":  round(edge * 100, 1),
+            "label": (
+                f"🐕 MISPRICED DOG — Book implies only {round(book_implied*100)}% "
+                f"but data says {round(sim_prob)}%. Bookmaker undervalued this line."
+            ),
+        }
+    # Moderate dog value: sim 58%+ vs book under 48%
+    if sim_prob >= 58 and book_implied <= 0.48:
+        return {
+            "type":  "DOG VALUE",
+            "edge":  round(edge * 100, 1),
+            "label": (
+                f"🎯 DOG VALUE — {round(sim_prob)}% sim vs "
+                f"{round(book_implied*100)}% implied. Edge: +{round(edge*100,1)}%"
+            ),
+        }
+    # Line value: player avg clearly above/below line but book didn't adjust
+    if decision == "OVER" and hist_avg > line * 1.12 and sim_prob >= 60:
+        return {
+            "type":  "LINE VALUE",
+            "edge":  round(edge * 100, 1),
+            "label": (
+                f"💰 LINE VALUE — Avg {hist_avg} is {round((hist_avg/line-1)*100)}% "
+                f"above line {line}. Book hasn't priced the volume correctly."
+            ),
+        }
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Correlated Parlay Scoring
+# ---------------------------------------------------------------------------
+
+def score_correlated_parlay(grades: list[dict]) -> list[dict]:
+    """
+    Given a list of grade result dicts (same team, same match), score and
+    rank them by combined EV and correlation strength.
+
+    Players from the same team in the same match are positively correlated —
+    if one player has a long map, all players benefit from the extra rounds.
+    Returns the grades sorted by EV descending with correlation notes added.
+    """
+    ev_plays = []
+    for g in grades:
+        decision = g.get("decision", "PASS")
+        if decision not in ("OVER", "UNDER"):
+            continue
+        ev_key = "ev_over" if decision == "OVER" else "ev_under"
+        ev = g.get(ev_key) or g.get("edge", 0) or 0
+        pkg = g.get("grade_pkg") or {}
+        conf = pkg.get("confidence", 50)
+        ev_plays.append({**g, "_ev": float(ev), "_conf": conf})
+
+    ev_plays.sort(key=lambda x: x["_ev"], reverse=True)
+
+    # Tag correlation notes
+    for i, p in enumerate(ev_plays):
+        total_rounds = p.get("total_projected_rounds")
+        if total_rounds and total_rounds >= 50:
+            p["_corr_note"] = "✅ Full maps projected — correlated round volume"
+        elif total_rounds and total_rounds <= 44:
+            p["_corr_note"] = "⚠️ Short maps risk — negative correlation for OVER legs"
+        else:
+            p["_corr_note"] = "➖ Neutral map pace"
+
+    return ev_plays

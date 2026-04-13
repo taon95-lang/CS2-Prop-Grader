@@ -3385,6 +3385,38 @@ def get_team_defensive_stats(team_id: str, n_matches: int = 10) -> dict | None:
     return result
 
 
+def check_standin(player_slug: str, match_html: str) -> bool:
+    """
+    Check if a player is listed as a stand-in in an HLTV match page.
+    HLTV flags stand-ins with text like 'stand-in' near the player link.
+    Returns True if stand-in detected, False otherwise.
+    """
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+    soup = BeautifulSoup(match_html, 'html.parser')
+    for a in soup.find_all('a', href=re.compile(r'/player/\d+/')):
+        href_norm = re.sub(r'[^a-z0-9]', '', a.get('href', '').lower())
+        if slug_norm in href_norm:
+            for parent in [a.parent, a.parent.parent if a.parent else None]:
+                if parent:
+                    txt = parent.get_text().lower()
+                    if 'stand-in' in txt or 'standin' in txt or 'substitute' in txt:
+                        logger.info(f"[standin] Stand-in detected for {player_slug}")
+                        return True
+    return False
+
+
+def get_recent_team_roster(team_id: str, team_slug: str) -> list[str]:
+    """
+    Fetch the current HLTV roster for a team and return a list of player slugs.
+    Used to confirm whether a player is an active member or a stand-in.
+    """
+    url = f"{HLTV_BASE}/team/{team_id}/{team_slug}"
+    html = _fetch(url)
+    if not html:
+        return []
+    return re.findall(r'/player/\d+/([\w-]+)', html)
+
+
 def get_matchup_adjustment(opponent_name: str) -> dict | None:
     """
     Public entry point: search for a team, then fetch its defensive profile.
