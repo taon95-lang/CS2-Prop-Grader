@@ -1878,6 +1878,86 @@ def build_result_embed(
         ps_label = f"📋 HLTV {ps.get('days', 90)}d Stats"
         embed.add_field(name=ps_label, value=ps_val, inline=False)
 
+    # ── Framework: HLTV Analytics (Firepower, Opening, etc.) ─────────────────
+    # These are HLTV attribute scores from the period stats page (0–100 scale)
+    _ps_fw = result.get("period_stats") or {}
+    _hltv_attrs: list[str] = []
+    _attr_map = [
+        ("firepower",  "🔥 Firepower"),
+        ("opening",    "🚪 Opening"),
+        ("entrying",   "⚡ Entrying"),
+        ("trading",    "🔄 Trading"),
+        ("sniping",    "🎯 Sniping"),
+        ("clutching",  "🧠 Clutching"),
+        ("utility",    "💡 Utility"),
+    ]
+    for _attr_key, _attr_label in _attr_map:
+        _v = _ps_fw.get(_attr_key)
+        if _v is not None:
+            _bar_val = min(100, max(0, float(_v)))
+            _bar_filled = round(_bar_val / 10)
+            _bar_empty  = 10 - _bar_filled
+            _bar_str    = "█" * _bar_filled + "░" * _bar_empty
+            _hltv_attrs.append(f"{_attr_label}: `{_bar_str}` `{round(_v)}`")
+    if _hltv_attrs:
+        embed.add_field(
+            name="📊 HLTV Analytics",
+            value="\n".join(_hltv_attrs),
+            inline=False,
+        )
+
+    # ── Framework: Round Swing + Multi-kill + Player Profile ─────────────────
+    _pkg_fw = result.get("grade_pkg") or {}
+    _rs     = _pkg_fw.get("round_swing")    or {}
+    _mk     = _pkg_fw.get("multikill")      or {}
+    _pp     = _pkg_fw.get("player_profile") or {}
+    _sc     = _pkg_fw.get("scenario")       or {}
+    _misp   = _pkg_fw.get("misprice")       or {}
+
+    if _rs.get("level") or _mk.get("level"):
+        rs_val = (
+            f"**{_rs.get('label', '—')}**\n"
+            f"_{_rs.get('rationale', '')}_ \n\n"
+            f"**{_mk.get('label', '—')}**\n"
+            f"_{_mk.get('rationale', '')}_"
+        )
+        if _pp.get("label"):
+            rs_val += f"\n\n**Player Profile: {_pp['label']}**\n_{_pp.get('description', '')}_"
+        embed.add_field(
+            name="⚙️ ROUND SWING  ·  MULTI-KILL  ·  PLAYER PROFILE",
+            value=rs_val[:1020],
+            inline=False,
+        )
+
+    # ── Framework: Scenario Projections ────────────────────────────────────────
+    if _sc.get("short_proj") is not None:
+        short_p  = _sc.get("short_proj",  "—")
+        normal_p = _sc.get("normal_proj", "—")
+        ceil_p   = _sc.get("ceiling",     "—")
+        sc_val = (
+            f"**Short-map Projection** (~{_sc.get('rounds_short', 19)} rds/map): "
+            f"`{short_p}` kills  →  {_sc.get('short_edge_str', '—')}\n"
+            f"**Normal-map Projection** (~{_sc.get('rounds_normal', 26)} rds/map): "
+            f"`{normal_p}` kills  →  {_sc.get('normal_edge_str', '—')}\n"
+            f"**Ceiling estimate:** `{ceil_p}` kills"
+        )
+        embed.add_field(
+            name="📐 MATCH-LENGTH SCENARIOS",
+            value=sc_val,
+            inline=False,
+        )
+
+    # ── Framework: Mispriced Prop Verdict ─────────────────────────────────────
+    if _misp.get("misprice_type") and _misp["misprice_type"] != "NONE":
+        misp_bullets = _misp.get("bullets") or []
+        misp_body    = "\n".join(misp_bullets[:8])
+        misp_val     = f"**{_misp.get('label', '')}**\n{misp_body}"
+        embed.add_field(
+            name="🔎 PROP ASSESSMENT",
+            value=misp_val[:1020],
+            inline=False,
+        )
+
     # ── Map Intelligence ──────────────────────────────────────────────────────
     mi_parts = []
     if map_intel.get("projected_labels"):

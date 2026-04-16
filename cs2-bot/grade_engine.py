@@ -663,6 +663,418 @@ def determine_role(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 11a. Round Swing (Opportunity Metric)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_round_swing(
+    period_stats: dict | None,
+    series_totals: list[float],
+    avg_kpr: float | None = None,
+) -> dict:
+    """
+    Round Swing = a player's ability to produce in compressed/short maps.
+
+    HIGH  → stable production regardless of map length (AWPers, opening fraggers,
+             high-KAST support with clutch ability)
+    MEDIUM → typical — scales reasonably with round count
+    LOW   → fragile — output collapses when maps are short
+
+    Signals used (in priority order):
+      1. HLTV period stats: kast, kpr, opening_ratio, survival
+      2. Series consistency: coefficient of variation (LOW CV = high swing stability)
+      3. Avg KPR passed from scraper
+
+    Returns a dict with:
+      level   – "HIGH" | "MEDIUM" | "LOW"
+      label   – display string
+      rationale – one-line explanation
+    """
+    score = 0  # accumulate signal points; ≥4 = HIGH, ≤-4 = LOW
+
+    kpr      = avg_kpr
+    kast     = None
+    survival = None
+    opening  = None
+
+    if period_stats:
+        kpr      = period_stats.get("kpr") or kpr
+        kast     = period_stats.get("kast")
+        survival = period_stats.get("survival")
+        opening  = period_stats.get("opening") or period_stats.get("opening_ratio") or period_stats.get("entrying")
+
+    # KPR: high output per round = survives compression
+    if kpr is not None:
+        if kpr >= 0.82:   score += 3
+        elif kpr >= 0.72: score += 1
+        elif kpr <= 0.58: score -= 2
+
+    # KAST: round participation / survival breadth
+    if kast is not None:
+        kast_val = float(kast) / 100 if float(kast) > 1 else float(kast)
+        if kast_val >= 0.75:  score += 2
+        elif kast_val >= 0.68: score += 1
+        elif kast_val <= 0.55: score -= 2
+
+    # Survival rate: high survival = still alive late in rounds = more kill opportunities
+    if survival is not None:
+        surv_val = float(survival) / 100 if float(survival) > 1 else float(survival)
+        if surv_val >= 0.55:  score += 2
+        elif surv_val >= 0.45: score += 0
+        elif surv_val <= 0.35: score -= 2
+
+    # Opening rate: opening fraggers guarantee early-round involvement even in short maps
+    if opening is not None:
+        op_val = float(opening)
+        if op_val >= 0.18:  score += 2
+        elif op_val >= 0.12: score += 1
+
+    # Series consistency (low CV = reliable production = stable round swing)
+    if len(series_totals) >= 4:
+        mu  = mean(series_totals)
+        std = stdev(series_totals)
+        cv  = std / mu if mu > 0 else 1.0
+        if cv <= 0.18:   score += 2
+        elif cv <= 0.24: score += 1
+        elif cv >= 0.32: score -= 1
+        elif cv >= 0.40: score -= 2
+
+    # Classify
+    if score >= 4:
+        level = "HIGH"
+        label = "🟢 HIGH Round Swing"
+        rationale = "Stable per-round production — survives compressed maps well"
+    elif score <= -3:
+        level = "LOW"
+        label = "🔴 LOW Round Swing"
+        rationale = "Output depends on map length — short maps compress this player's ceiling"
+    else:
+        level = "MEDIUM"
+        label = "🟡 MEDIUM Round Swing"
+        rationale = "Typical output scaling — moderate match-length sensitivity"
+
+    return {
+        "level":     level,
+        "label":     label,
+        "rationale": rationale,
+        "score":     score,
+        "_kpr":      kpr,
+        "_kast":     kast,
+        "_survival": survival,
+        "_opening":  opening,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11b. Multi-kill Ceiling (Conversion Metric)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def compute_multikill_ceiling(
+    series_totals: list[float],
+    period_stats: dict | None,
+    avg_kpr: float | None = None,
+) -> dict:
+    """
+    Multi-kill = ability to convert rounds into 2K/3K+ kills.
+
+    HIGH  → routinely posts big rounds (spikes well above average, high peak)
+    MEDIUM → occasional multi-kills but not dominant ceiling
+    LOW   → linear accumulator — rarely spikes, needs round volume
+
+    Signals:
+      1. Peak/mean ratio in series_totals  (high peak relative to avg = multi-kill)
+      2. Max series total vs line gap
+      3. Period stats: firepower, kpr
+      4. Variance tier (HIGH variance in a good direction = ceiling)
+    """
+    if not series_totals or len(series_totals) < 2:
+        return {
+            "level": "MEDIUM", "label": "🟡 MEDIUM Multi-kill",
+            "rationale": "Insufficient data to determine ceiling", "score": 0,
+        }
+
+    mu   = mean(series_totals)
+    peak = max(series_totals)
+    peak_ratio = peak / mu if mu > 0 else 1.0
+
+    score = 0
+
+    # Peak ratio: how much can this player exceed their average?
+    if peak_ratio >= 1.65:   score += 4
+    elif peak_ratio >= 1.40: score += 2
+    elif peak_ratio >= 1.22: score += 1
+    elif peak_ratio <= 1.10: score -= 2
+
+    # Top-quartile concentration: does performance cluster at the top?
+    sorted_totals = sorted(series_totals, reverse=True)
+    top_quarter   = sorted_totals[:max(1, len(sorted_totals)//4)]
+    top_avg       = mean(top_quarter)
+    top_vs_mean   = (top_avg - mu) / mu if mu > 0 else 0
+    if top_vs_mean >= 0.40:   score += 3
+    elif top_vs_mean >= 0.25: score += 1
+
+    # KPR: high rate = more multi-kill rounds
+    kpr = avg_kpr
+    if period_stats:
+        kpr = period_stats.get("kpr") or kpr
+    if kpr is not None:
+        if kpr >= 0.82:   score += 2
+        elif kpr >= 0.72: score += 1
+        elif kpr <= 0.58: score -= 1
+
+    # Firepower from period_stats (HLTV attribute score 0–100)
+    if period_stats:
+        fp = period_stats.get("firepower")
+        if fp is not None:
+            if float(fp) >= 75:   score += 2
+            elif float(fp) >= 60: score += 1
+            elif float(fp) <= 40: score -= 1
+
+    if score >= 5:
+        level = "HIGH"
+        label = "🟢 HIGH Multi-kill"
+        rationale = f"Ceiling play is real — peak {round(peak, 1)} vs avg {round(mu, 1)} ({round((peak_ratio-1)*100)}% above avg)"
+    elif score <= -2:
+        level = "LOW"
+        label = "🔴 LOW Multi-kill"
+        rationale = "Linear accumulator — rarely spikes; needs round volume to hit line"
+    else:
+        level = "MEDIUM"
+        label = "🟡 MEDIUM Multi-kill"
+        rationale = "Moderate ceiling — occasional big rounds but not consistently elite"
+
+    return {
+        "level":     level,
+        "label":     label,
+        "rationale": rationale,
+        "score":     score,
+        "peak":      round(peak, 1),
+        "peak_ratio": round(peak_ratio, 2),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11c. Player Profile Classification
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PROFILE_MATRIX = {
+    ("HIGH", "HIGH"):   ("STAR",     "⭐ Star Profile",     "Best OVER — excels in any map length, ceiling is real"),
+    ("HIGH", "MEDIUM"): ("STABLE",   "🔒 Stable Producer",  "Reliable OVER — consistent but capped upside"),
+    ("HIGH", "LOW"):    ("GRINDER",  "⚙️ Grinder",          "Safe floor — grinds volume but needs rounds to get there"),
+    ("MEDIUM","HIGH"):  ("VOLATILE", "⚡ Volatile Spike",   "High ceiling but needs the right map to hit it"),
+    ("MEDIUM","MEDIUM"):("BALANCED", "⚖️ Balanced",         "Middle of the road — small edges only at right line"),
+    ("MEDIUM","LOW"):   ("SOFT",     "🔵 Soft Accumulator", "Needs round volume — short maps hurt this profile"),
+    ("LOW",  "HIGH"):   ("BOOM_BUST","💣 Boom/Bust",        "High ceiling but boom/bust — short maps = Under risk"),
+    ("LOW",  "MEDIUM"): ("FRAGILE",  "⚠️ Fragile",          "Depends on long maps — compressed maps = clear Under"),
+    ("LOW",  "LOW"):    ("FADE",     "❌ Fade",             "Clear Under profile — weak round swing AND ceiling"),
+}
+
+def classify_player_profile(round_swing: dict, multikill: dict) -> dict:
+    """
+    Matrix:
+      High Swing + High Multi → STAR (best Over)
+      High Swing + Low Multi  → STABLE (safe but capped)
+      Low Swing  + High Multi → BOOM_BUST (volatile)
+      Low Swing  + Low Multi  → FADE (clear Under)
+    """
+    rs_level = round_swing.get("level", "MEDIUM")
+    mk_level = multikill.get("level",    "MEDIUM")
+    key      = (rs_level, mk_level)
+    code, label, desc = _PROFILE_MATRIX.get(key, ("BALANCED", "⚖️ Balanced", "Mixed signals"))
+    return {"code": code, "label": label, "description": desc, "swing": rs_level, "multi": mk_level}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11d. Scenario Projections (Short-map vs Normal-map)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Typical round counts per map by scenario
+_ROUNDS_SHORT  = 19   # stomp/blowout scenario (rank gap > 15)
+_ROUNDS_NORMAL = 26   # standard competitive map
+_ROUNDS_LONG   = 30   # close match / OT risk
+
+def compute_scenario_projections(
+    kpr:           float | None,
+    hist_avg:      float,
+    line:          float,
+    round_swing:   dict,
+    multikill:     dict,
+    stomp_via_rank: bool = False,
+    close_via_rank: bool = False,
+    n_maps:        int   = 2,
+) -> dict:
+    """
+    Build short-map and normal-map projected series totals.
+
+    Formula: kpr × rounds_per_map × n_maps
+    If KPR unavailable, fallback to hist_avg ratio scaling.
+
+    Round Swing modifies short-map projection:
+      HIGH swing  → short_proj not further penalized (player survives compression)
+      LOW swing   → short_proj capped at 90% of kpr-based value
+
+    Multi-kill modifies the upper ceiling estimate:
+      HIGH multi  → ceiling = normal_proj × 1.20
+      LOW multi   → ceiling = normal_proj × 1.05
+    """
+    rounds_short  = _ROUNDS_SHORT
+    rounds_normal = _ROUNDS_NORMAL
+
+    # If stomp risk is known, short scenario is more likely
+    if stomp_via_rank:
+        rounds_short  = 18
+        rounds_normal = 23   # even normal maps trend shorter vs weak opponents
+
+    if close_via_rank:
+        rounds_normal = 28   # close matches go longer
+        rounds_short  = 23
+
+    rs_level = round_swing.get("level", "MEDIUM")
+    mk_level = multikill.get("level",   "MEDIUM")
+
+    if kpr and kpr > 0:
+        short_proj_raw  = round(kpr * rounds_short  * n_maps, 1)
+        normal_proj_raw = round(kpr * rounds_normal * n_maps, 1)
+    else:
+        # Fallback: scale from hist_avg using round ratio
+        ratio = rounds_short / rounds_normal
+        short_proj_raw  = round(hist_avg * ratio, 1)
+        normal_proj_raw = round(hist_avg, 1)
+
+    # Round Swing adjustment
+    short_proj = short_proj_raw
+    if rs_level == "LOW":
+        short_proj = round(short_proj_raw * 0.88, 1)   # compression penalty
+    elif rs_level == "HIGH":
+        short_proj = round(short_proj_raw * 1.04, 1)   # stable bonus
+
+    normal_proj = normal_proj_raw
+
+    # Multi-kill ceiling
+    if mk_level == "HIGH":
+        ceiling = round(normal_proj * 1.22, 1)
+    elif mk_level == "LOW":
+        ceiling = round(normal_proj * 1.05, 1)
+    else:
+        ceiling = round(normal_proj * 1.12, 1)
+
+    def _edge(proj: float) -> str:
+        if line <= 0:
+            return "—"
+        pct = round((proj - line) / line * 100, 1)
+        sign = "+" if pct >= 0 else ""
+        clears = "✅ CLEARS" if proj > line else "❌ FALLS SHORT"
+        return f"{clears} ({sign}{pct}%)"
+
+    return {
+        "short_proj":       short_proj,
+        "short_clears":     short_proj > line,
+        "short_edge_str":   _edge(short_proj),
+        "normal_proj":      normal_proj,
+        "normal_clears":    normal_proj > line,
+        "normal_edge_str":  _edge(normal_proj),
+        "ceiling":          ceiling,
+        "rounds_short":     rounds_short,
+        "rounds_normal":    rounds_normal,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11e. Mispriced Prop Classification (Guide Framework)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def classify_misprice(
+    hist_avg:      float,
+    hist_median:   float,
+    hit_rate:      float,
+    line:          float,
+    round_swing:   dict,
+    multikill:     dict,
+    scenario:      dict,
+    decision:      str,
+) -> dict:
+    """
+    Apply the guide's Mispriced Prop Identification framework.
+
+    Returns:
+      misprice_type – "OVER_VALUE" | "UNDER_VALUE" | "CLEAR_ERROR" | "LEAN" | "NONE"
+      label         – display string
+      bullets       – list of reasons
+    """
+    avg_above  = hist_avg    > line
+    med_above  = hist_median > line
+    hit_over   = hit_rate / 100
+    rs         = round_swing.get("level", "MEDIUM")
+    mk         = multikill.get("level",   "MEDIUM")
+    short_ok   = scenario.get("short_clears", False)
+    normal_ok  = scenario.get("normal_clears", False)
+    bullets: list[str] = []
+
+    if decision == "OVER":
+        # OVER VALUE conditions from guide
+        strong_avg = avg_above and med_above
+        strong_hr  = hit_over >= 0.60
+        ok_swing   = rs in ("HIGH", "MEDIUM")
+        real_ceil  = mk in ("HIGH", "MEDIUM")
+        short_pass = short_ok
+
+        met = sum([strong_avg, strong_hr, ok_swing, real_ceil, short_pass])
+
+        if strong_avg:   bullets.append(f"✅ Avg ({hist_avg}) AND Median ({hist_median}) both above line ({line})")
+        if strong_hr:    bullets.append(f"✅ Hit rate {hit_over*100:.0f}% — strong historical conversion")
+        if ok_swing:     bullets.append(f"✅ Round Swing: {rs} — opportunity is real")
+        if real_ceil:    bullets.append(f"✅ Multi-kill: {mk} — ceiling supports the line")
+        if short_pass:   bullets.append(f"✅ Clears short-map projection ({scenario['short_proj']} kills @ {scenario['rounds_short']} rds/map)")
+        else:            bullets.append(f"⚠️ Short-map risk — only {scenario['short_proj']} projected in compressed maps")
+
+        if not avg_above: bullets.append(f"❌ Avg {hist_avg} below line {line}")
+        if not med_above: bullets.append(f"❌ Median {hist_median} below line {line}")
+
+        gap = round(abs(hist_avg - line), 1)
+        if gap >= line * 0.12 and (not avg_above or not med_above):
+            return {
+                "misprice_type": "UNDER_VALUE",
+                "label":         "❌ Line favors UNDER — avg/median distant from line",
+                "bullets":       bullets,
+            }
+
+        if met >= 4:
+            return {"misprice_type": "OVER_VALUE",  "label": "🟢 OVER VALUE — Multiple layers confirm edge", "bullets": bullets}
+        if met == 3:
+            return {"misprice_type": "LEAN",        "label": "🔵 LEAN OVER — Partial alignment", "bullets": bullets}
+        if gap >= line * 0.15 and avg_above and med_above:
+            return {"misprice_type": "CLEAR_ERROR", "label": "🚨 CLEAR ERROR — Line far below avg + median", "bullets": bullets}
+        return {"misprice_type": "NONE", "label": "⚪ No clear edge", "bullets": bullets}
+
+    elif decision == "UNDER":
+        avg_weak   = not avg_above
+        med_weak   = not med_above
+        low_hr     = hit_over <= 0.45
+        weak_swing = rs == "LOW"
+        weak_ceil  = mk == "LOW"
+        short_fail = not short_ok
+
+        met = sum([avg_weak, med_weak, low_hr, weak_swing, short_fail])
+
+        if avg_weak:     bullets.append(f"✅ Avg ({hist_avg}) below line ({line})")
+        if med_weak:     bullets.append(f"✅ Median ({hist_median}) below line ({line})")
+        if low_hr:       bullets.append(f"✅ Only {hit_over*100:.0f}% cleared this line historically")
+        if weak_swing:   bullets.append("✅ Low Round Swing — output collapses in compressed maps")
+        if weak_ceil:    bullets.append("✅ Low Multi-kill — needs round volume to accumulate")
+        if short_fail:   bullets.append(f"✅ Fails short-map ({scenario['short_proj']} < {line})")
+
+        gap = round(abs(hist_avg - line), 1)
+        if gap >= line * 0.15 and avg_weak and med_weak:
+            return {"misprice_type": "CLEAR_ERROR", "label": "🚨 CLEAR ERROR — Line far above avg + median", "bullets": bullets}
+        if met >= 3:
+            return {"misprice_type": "UNDER_VALUE", "label": "🔴 UNDER VALUE — Multiple layers confirm edge", "bullets": bullets}
+        if met == 2:
+            return {"misprice_type": "LEAN",        "label": "🔵 LEAN UNDER — Partial alignment", "bullets": bullets}
+        return {"misprice_type": "NONE", "label": "⚪ No clear edge", "bullets": bullets}
+
+    return {"misprice_type": "NONE", "label": "⚪ PASS — No directional alignment", "bullets": []}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 11. Full Grade Package — convenience wrapper called by bot.py
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -674,13 +1086,25 @@ def compute_grade_package(
 ) -> dict:
     """
     Top-level entry point. Wraps all analysis functions into one dict.
+    Now includes the full CS2 prop grading framework:
+      - Round Swing (opportunity metric)
+      - Multi-kill (conversion metric / ceiling)
+      - Player Profile matrix (Swing × Multi)
+      - Scenario projections (short-map vs normal-map)
+      - Mispriced prop classification (Over Value / Under Value / Clear Error)
+
     Attach as sim_result['grade_pkg'] in bot.py for embed access.
     """
-    line      = sim_result.get("line", 0) or 0
-    decision  = sim_result.get("decision", "PASS")
-    over_prob = sim_result.get("over_prob", 50.0) or 50.0
+    line       = sim_result.get("line", 0) or 0
+    decision   = sim_result.get("decision", "PASS")
+    over_prob  = sim_result.get("over_prob", 50.0) or 50.0
+    hist_avg   = sim_result.get("hist_avg",   0) or 0
+    hist_med   = sim_result.get("hist_median", 0) or 0
+    hit_rate   = sim_result.get("hit_rate",   50) or 50
+    stomp      = sim_result.get("stomp_via_rank", False)
+    close      = sim_result.get("close_via_rank", False)
 
-    # --- Core computations --------------------------------------------------
+    # ── Core computations ────────────────────────────────────────────────────
     series_totals = _extract_series_totals(map_stats)
     form          = compute_form_streak(map_stats, line)
     variance      = compute_variance_tier(series_totals)
@@ -689,29 +1113,100 @@ def compute_grade_package(
         mp = deep.get("map_pool", {})
         likely_maps = mp.get("most_played", [])
 
-    map_intel = compute_map_intel(map_stats, likely_maps, line)
-    flags     = compute_risk_flags(sim_result, variance, form, deep, line)
-    confidence = compute_confidence_score(
-        sim_result=sim_result,
-        map_stats=map_stats,
-        form=form,
-        variance=variance,
-        deep=deep,
-        period_stats=period_stats,
-        decision=decision,
+    map_intel  = compute_map_intel(map_stats, likely_maps, line)
+
+    # ── Framework metrics (guide) ─────────────────────────────────────────────
+    # Pull KPR from period_stats or sim_result
+    avg_kpr = None
+    if period_stats:
+        avg_kpr = period_stats.get("kpr")
+    if avg_kpr is None:
+        avg_kpr = sim_result.get("avg_kpr")
+
+    round_swing = compute_round_swing(
+        period_stats  = period_stats,
+        series_totals = series_totals,
+        avg_kpr       = avg_kpr,
     )
+    multikill = compute_multikill_ceiling(
+        series_totals = series_totals,
+        period_stats  = period_stats,
+        avg_kpr       = avg_kpr,
+    )
+    player_profile = classify_player_profile(round_swing, multikill)
+    scenario       = compute_scenario_projections(
+        kpr            = avg_kpr,
+        hist_avg       = float(hist_avg),
+        line           = float(line),
+        round_swing    = round_swing,
+        multikill      = multikill,
+        stomp_via_rank = bool(stomp),
+        close_via_rank = bool(close),
+        n_maps         = 2,
+    )
+    misprice = classify_misprice(
+        hist_avg    = float(hist_avg),
+        hist_median = float(hist_med),
+        hit_rate    = float(hit_rate),
+        line        = float(line),
+        round_swing = round_swing,
+        multikill   = multikill,
+        scenario    = scenario,
+        decision    = decision,
+    )
+
+    # ── Risk flags, confidence, edge ─────────────────────────────────────────
+    flags = compute_risk_flags(sim_result, variance, form, deep, line)
+
+    # Augment flags from framework
+    rs_level = round_swing.get("level", "MEDIUM")
+    mk_level = multikill.get("level",   "MEDIUM")
+    if rs_level == "LOW" and not scenario.get("short_clears") and decision == "OVER":
+        flags.insert(0, f"⚠️ Match-length risk — fails short-map projection ({scenario['short_proj']} < {line})")
+    if mk_level == "LOW" and decision == "OVER":
+        flags.append("⚠️ Low Multi-kill ceiling — linear accumulator needs round volume")
+    if player_profile.get("code") in ("FADE", "FRAGILE") and decision == "OVER":
+        flags.insert(0, f"🚨 Player profile mismatch — {player_profile['label']} profile taking an OVER")
+
+    confidence = compute_confidence_score(
+        sim_result   = sim_result,
+        map_stats    = map_stats,
+        form         = form,
+        variance     = variance,
+        deep         = deep,
+        period_stats = period_stats,
+        decision     = decision,
+    )
+
+    # Framework confidence adjustments
+    if rs_level == "HIGH" and mk_level == "HIGH" and decision == "OVER":
+        confidence = min(95, confidence + 6)
+    elif rs_level == "LOW" and mk_level == "LOW" and decision == "OVER":
+        confidence = max(5, confidence - 8)
+    elif rs_level == "LOW" and decision == "OVER" and not scenario.get("short_clears"):
+        confidence = max(5, confidence - 5)
+    if misprice.get("misprice_type") == "CLEAR_ERROR":
+        confidence = min(95, confidence + 5)
+
     edge_pct = compute_edge_pct(over_prob, decision)
     reason   = build_verdict_reason(decision, form, variance, deep, sim_result, flags)
 
     return {
-        "form":       form,
-        "variance":   variance,
-        "map_intel":  map_intel,
-        "flags":      flags,
-        "confidence": confidence,
-        "edge_pct":   edge_pct,
-        "reason":     reason,
-        "series_totals": series_totals,
+        "form":           form,
+        "variance":       variance,
+        "map_intel":      map_intel,
+        "flags":          flags,
+        "confidence":     confidence,
+        "edge_pct":       edge_pct,
+        "reason":         reason,
+        "series_totals":  series_totals,
+        # ── New framework metrics ──
+        "round_swing":    round_swing,
+        "multikill":      multikill,
+        "player_profile": player_profile,
+        "scenario":       scenario,
+        "misprice":       misprice,
+        "avg_kpr":        avg_kpr,
     }
 
 

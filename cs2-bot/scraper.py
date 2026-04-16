@@ -1880,6 +1880,43 @@ def _store_stat_val(result: dict, label: str, value_text: str) -> None:
         v = _flt(vt, 0.1, 5.0)
         if v:
             result['dpr'] = v
+    # HLTV Analytics Attributes (0–100 scale)
+    elif label in ('firepower',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['firepower'] = v
+    elif label in ('opening',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['opening'] = v
+    elif label in ('entrying',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['entrying'] = v
+    elif label in ('trading',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['trading'] = v
+    elif label in ('sniping',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['sniping'] = v
+    elif label in ('clutching',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['clutching'] = v
+    elif label in ('utility',):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['utility'] = v
+    elif any(x in label for x in ('survival', 'survival rate')):
+        v = _flt(vt.replace('%', ''), 0, 100)
+        if v is not None:
+            result['survival'] = v
+    elif any(x in label for x in ('opening kill ratio', 'opening ratio')):
+        v = _flt(vt, 0, 5.0)
+        if v is not None:
+            result['opening_ratio'] = v
 
 
 def _parse_stats_page(html: str, slug: str) -> dict:
@@ -1933,6 +1970,83 @@ def _parse_stats_page(html: str, slug: str) -> dict:
                     result[field] = float(m.group(1))
                 except ValueError:
                     pass
+
+    # Strategy 4: HLTV Analytics Attributes
+    # These appear as progress bars on the player stats page:
+    #   Firepower, Opening, Entrying, Trading, Sniping, Clutching, Utility
+    # HTML pattern: <div class="summary-boxes">…<span class="label">Firepower</span>…<span class="...">72</span>
+    # Also as: style="width:72%" within player-attribute-fill, or data-tip attributes
+    _ANALYTICS_ATTRS = {
+        "firepower": ["firepower"],
+        "opening":   ["opening"],
+        "entrying":  ["entrying"],
+        "trading":   ["trading"],
+        "sniping":   ["sniping"],
+        "clutching": ["clutching"],
+        "utility":   ["utility"],
+    }
+
+    # Try structured: any element where text == attribute name and a nearby numeric sibling
+    _page_text = soup.get_text(separator="\n")
+    for _attr_key, _synonyms in _ANALYTICS_ATTRS.items():
+        if _attr_key in result:
+            continue
+        for _syn in _synonyms:
+            # Look for span/div with the attribute name, then find the next numeric value
+            for _tag in soup.find_all(True, string=re.compile(rf'(?i)^{re.escape(_syn)}$')):
+                _parent = _tag.parent
+                # Try to find a numeric sibling or nearby span
+                for _candidate in (_parent, _tag):
+                    for _sib in (_candidate.find_next_siblings() + _candidate.find_all(['span', 'div'])):
+                        _st = _sib.get_text(strip=True).rstrip('%')
+                        try:
+                            _fv = float(_st)
+                            if 0 <= _fv <= 100:
+                                result[_attr_key] = _fv
+                                break
+                        except ValueError:
+                            continue
+                    if _attr_key in result:
+                        break
+                if _attr_key in result:
+                    break
+
+            # Also try: style="width: XX%" on fill bars near a label with this attribute name
+            if _attr_key not in result:
+                for _fill in soup.find_all(class_=re.compile(r'fill|bar|attr', re.I)):
+                    _st = _fill.get('style', '')
+                    _label_scope = _fill.find_parent()
+                    if not _label_scope:
+                        continue
+                    _scope_text = _label_scope.get_text().lower()
+                    if _syn in _scope_text:
+                        _m = re.search(r'width\s*:\s*(\d+(?:\.\d+)?)\s*%', _st)
+                        if _m:
+                            result[_attr_key] = float(_m.group(1))
+                            break
+
+            # Regex raw fallback on page text
+            if _attr_key not in result:
+                _m = re.search(
+                    rf'(?i){re.escape(_syn)}[^0-9]{{0,40}}?(\d{{1,3}})(?:\s*%|\s*\/\s*100)',
+                    _page_text,
+                )
+                if _m:
+                    _fv = float(_m.group(1))
+                    if 0 <= _fv <= 100:
+                        result[_attr_key] = _fv
+
+    # Strategy 5: survival rate (% of rounds survived) — from raw text
+    if 'survival' not in result:
+        _m = re.search(r'(?i)survival[^0-9]{0,40}?(\d{1,2}(?:\.\d+)?)\s*%', _page_text)
+        if _m:
+            result['survival'] = float(_m.group(1))
+
+    # Strategy 6: opening ratio / opening kill rate
+    if 'opening' not in result:
+        _m = re.search(r'(?i)opening\s+(?:kill\s+)?(?:ratio|rate)[^0-9]{0,40}?(\d\.\d{2})', _page_text)
+        if _m:
+            result['opening'] = float(_m.group(1))
 
     logger.info(f"[period_stats] parsed slug={slug}: {result}")
     return result
