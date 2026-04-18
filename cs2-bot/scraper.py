@@ -407,6 +407,55 @@ def _warm_stats_session(match_url: str) -> bool:
     return False
 
 
+def _fetch_via_scraperapi(url: str, referer: str = "") -> str | None:
+    """
+    Fetch a URL through ScraperAPI (https://www.scraperapi.com).
+    Free tier = 1,000 req/month. Handles Cloudflare/JS rendering automatically.
+    Returns HTML on success, None on failure.
+    """
+    import os
+    import requests as _requests
+
+    if url in _MAPSTATS_HTML_CACHE:
+        return _MAPSTATS_HTML_CACHE[url]
+
+    key = os.environ.get("SCRAPERAPI_KEY", "").strip()
+    if not key:
+        return None
+
+    api_url = "https://api.scraperapi.com/"
+    params = {
+        "api_key":         key,
+        "url":             url,
+        "keep_headers":    "true",
+        # render=false is enough for HLTV (no JS-gated content) and saves credits
+    }
+    headers = {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer":         referer or "https://www.hltv.org/",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    try:
+        logger.info(f"[scraperapi] Fetching: {url[-70:]}")
+        resp = _requests.get(api_url, params=params, headers=headers, timeout=70)
+        if resp.status_code == 200 and len(resp.text) > 3000 and "Just a moment" not in resp.text:
+            logger.info(f"[scraperapi] Success — {len(resp.text):,} chars")
+            _MAPSTATS_HTML_CACHE[url] = resp.text
+            return resp.text
+        if resp.status_code == 401:
+            logger.warning("[scraperapi] 401 — invalid SCRAPERAPI_KEY")
+        elif resp.status_code == 403:
+            logger.warning("[scraperapi] 403 — out of credits or plan limit")
+        else:
+            logger.warning(f"[scraperapi] status={resp.status_code} len={len(resp.text)}")
+        return None
+    except Exception as e:
+        logger.warning(f"[scraperapi] {type(e).__name__}: {str(e)[:140]}")
+        return None
+
+
 def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
     """
     Fetch a URL through the Apify residential proxy network.
@@ -497,17 +546,29 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
         logger.info(f"[stats_fetch] /stats/ circuit open — skipping {stats_url[-60:]}")
         return None
 
-    # ── mapstatsid URLs: skip profile cycling, go straight to Apify ───────────
+    # ── mapstatsid URLs: skip profile cycling, go straight to proxy ───────────
     if _is_mapstats_url(stats_url):
+        # Try ScraperAPI first (Cloudflare-aware, free tier 1k req/mo)
+        html = _fetch_via_scraperapi(stats_url, referer=match_url)
+        if html:
+            logger.info("[stats_fetch] ScraperAPI mapstats fetch succeeded.")
+            return html
+        # Fallback to Apify proxy (requires paid plan)
         html = _fetch_via_apify_proxy(stats_url, referer=match_url)
         if html:
             logger.info("[stats_fetch] Apify mapstats fetch succeeded.")
             return html
         # No circuit trip — let each URL try independently
-        logger.info(f"[stats_fetch] Apify failed for {stats_url[-60:]} — using HS% fallback")
+        logger.info(f"[stats_fetch] All proxies failed for {stats_url[-60:]} — using HS% fallback")
         return None
 
-    # ── non-mapstats /stats/ URLs: profile-cycling with circuit-breaker ───────
+    # ── non-mapstats /stats/ URLs: try ScraperAPI first ───────────────────────
+    html = _fetch_via_scraperapi(stats_url, referer=match_url)
+    if html:
+        logger.info("[stats_fetch] ScraperAPI player-stats fetch succeeded.")
+        return html
+
+    # ── then fall back to profile-cycling with circuit-breaker ────────────────
     global _STATS_SESSION_WARMED
 
     all_profiles = list(_PROFILES)
@@ -2067,12 +2128,14 @@ def get_player_period_stats(player_id: str, player_slug: str, days: int = 90) ->
         f"{HLTV_BASE}/stats/players/{player_id}/{player_slug}"
         f"?startDate={start_dt.isoformat()}&endDate={end_dt.isoformat()}"
     )
-    # Fast-path: skip immediately if /stats/ subdomain is known-blocked
-    if _is_stats_blocked(url):
-        logger.info(f"[period_stats] /stats/ circuit open — skipping player stats for {player_slug}")
-        return None
     logger.info(f"[period_stats] GET player stats: {url}")
-    html = _fetch(url)
+    # Try ScraperAPI first (Cloudflare-aware); only fall back to direct fetch if no key.
+    html = _fetch_via_scraperapi(url, referer="https://www.hltv.org/")
+    if not html:
+        if _is_stats_blocked(url):
+            logger.info(f"[period_stats] /stats/ circuit open — skipping player stats for {player_slug}")
+            return None
+        html = _fetch(url)
     if not html:
         logger.warning(f"[period_stats] Could not fetch player stats for {player_slug}")
         return None
