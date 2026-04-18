@@ -1,6 +1,5 @@
 import numpy as np
-from scipy.stats import nbinom
-from scipy.special import gammaln
+# NB / scipy.stats removed — empirical model only (per user request)
 from statistics import median, mean
 import statistics
 import math
@@ -8,7 +7,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-N_SIMULATIONS = 100_000
+# N_SIMULATIONS removed — empirical model has no Monte Carlo runs.
+# Field is kept in the output dict as 0 for backward-compat with grades_db.
+N_SIMULATIONS = 0
 
 # Standard sportsbook vig (-110 both sides = 52.38% implied probability)
 BOOK_IMPLIED_PROB = 0.5238
@@ -97,30 +98,7 @@ def _weighted_mean_var(values: list, weights: list) -> tuple[float, float]:
     return w_mean, max(w_var, w_mean * 0.5)  # floor variance to avoid degenerate NB
 
 
-def fit_negative_binomial(values: list):
-    """
-    Fit a Negative Binomial distribution to a list of kill counts.
-    Returns (r, p) parameters for scipy.stats.nbinom.
-    """
-    if not values or len(values) < 2:
-        return 5.0, 0.3
-
-    mu = mean(values)
-    var = np.var(values, ddof=1) if len(values) > 1 else mu * 1.5
-
-    if var <= mu or mu <= 0:
-        # Fallback: use Poisson-like (r large, p ≈ mu/(mu+r))
-        r = max(mu * 2, 1.0)
-        p = r / (r + mu)
-        return r, p
-
-    # Method of moments for NB: mu = r*(1-p)/p, var = r*(1-p)/p^2
-    # => r = mu^2 / (var - mu), p = mu / var
-    r = (mu ** 2) / (var - mu)
-    p = mu / var
-    r = max(r, 0.1)
-    p = max(min(p, 0.9999), 0.0001)
-    return r, p
+# fit_negative_binomial removed (NB model deprecated — empirical only)
 
 
 def run_simulation(
@@ -387,59 +365,60 @@ def run_simulation(
                     f"(IQR {q25}-{q75})"
                 )
 
-    # --- NB Fit + Simulation ---
-    # If opponent quality weighting is active, use weighted mean/variance
-    # to fit the NB distribution so similar-quality historical maps dominate.
+    # ──────────────────────────────────────────────────────────────────────
+    # EMPIRICAL PROJECTION (NB model removed per user request)
+    # Probabilities and percentiles come straight from observed series totals.
+    # No Monte Carlo, no NB sampling. Trimmed mean drives center, MAD-σ drives
+    # dispersion, historical hit-rate (with shrink) drives over/under prob.
+    # ──────────────────────────────────────────────────────────────────────
+
+    # If opponent-quality weighting is active, blend the weighted map mean
+    # into expected_total so today's matchup quality still moves the projection.
     if _any_weighted:
         _w_mean, _w_var = _weighted_mean_var(per_map_values, _opp_weights)
-        # Fit NB from weighted moments (method of moments: mu=r(1-p)/p, var=r(1-p)/p^2)
-        if _w_var > _w_mean > 0:
-            _r_w = (_w_mean ** 2) / (_w_var - _w_mean)
-            _p_w = _w_mean / _w_var
-            r_param = max(_r_w, 0.1)
-            p_param = max(min(_p_w, 0.9999), 0.0001)
-        else:
-            r_param, p_param = fit_negative_binomial(per_map_values)
+        # weighted per-map mean → series total (×2 maps)
+        _w_total_proj = _w_mean * 2
+        # 60% empirical anchor / 40% opp-weighted projection
+        expected_total = 0.6 * expected_total + 0.4 * _w_total_proj
         logger.info(
-            f"[sim] Weighted NB fit — w_mean={_w_mean:.2f} w_var={_w_var:.2f} "
-            f"→ r={r_param:.2f} p={p_param:.4f}"
+            f"[sim] Empirical+weighted blend — anchor={expected_total:.2f} "
+            f"w_mean={_w_mean:.2f} w_total={_w_total_proj:.2f}"
         )
+
+    # Sim-mean / sim-std / sim-median now come from empirical stats.
+    # We keep the field names (`sim_*`) for downstream backward-compat.
+    sim_mean   = float(expected_total)
+    sim_std    = float(sigma_mad_val) if sigma_mad_val > 0 else (
+        float(np.std(series_totals)) if len(series_totals) > 1 else 0.0
+    )
+    sim_median = float(median(series_totals)) if series_totals else float(expected_total)
+
+    # ── Empirical Over / Under / Push from historical series totals ────────
+    # Push is only possible when line is an integer (and a series total
+    # equals it exactly). For half-lines, push is mathematically impossible.
+    if series_totals:
+        n_st = len(series_totals)
+        _overs_emp  = sum(1 for v in series_totals if v >  line)
+        _unders_emp = sum(1 for v in series_totals if v <  line)
+        if float(line).is_integer():
+            _pushes_emp = sum(1 for v in series_totals if v == line)
+        else:
+            _pushes_emp = 0
+        raw_over_prob = _overs_emp  / n_st
+        under_prob    = _unders_emp / n_st
+        push_prob     = _pushes_emp / n_st
     else:
-        r_param, p_param = fit_negative_binomial(per_map_values)
-    r_total = r_param * 2
-    mean_nb = r_total * (1 - p_param) / p_param
-    target_mean = expected_total
-    r_total_adj = r_total
-    p_adj = r_total_adj / (r_total_adj + target_mean) if target_mean > 0 else 0.5
-    p_adj = max(min(p_adj, 0.9999), 0.0001)
+        # No series data — fall back to book-implied prior
+        raw_over_prob = book_implied_prob
+        under_prob    = 1.0 - book_implied_prob
+        push_prob     = 0.0
 
-    np.random.seed(42)
-    samples = nbinom.rvs(r_total_adj, p_adj, size=N_SIMULATIONS)
-
-    sim_mean   = float(np.mean(samples))
-    sim_std    = float(np.std(samples))
-    sim_median = float(np.median(samples))
-
-    # Over / Under / Push
-    # Push is only physically possible when the line is an integer; for
-    # half-lines (e.g. 29.5) push must be 0. Old code did `int(line)` which
-    # truncated 29.5→29, so any 29-kill outcomes were miscounted as pushes
-    # and inflated push_prob (deflating UNDER).
-    raw_over_prob = float(np.mean(samples >  line))
-    under_prob    = float(np.mean(samples <  line))
-    if float(line).is_integer():
-        push_prob = float(np.mean(samples == int(line)))
-    else:
-        push_prob = 0.0
-
-    # ── R5 (translated): small-sample shrink toward book-implied probability ─
-    # Pulls the simulated OVER% toward 0.5238 when N_series < 8, full strength
-    # at 8+ series. Stops the model from issuing 70%-confidence calls off
-    # 3 BO3 series of data.
+    # ── R5: small-sample shrink toward book-implied probability ────────────
+    # Pulls the empirical OVER% toward 52.38% when N_series < 8 (full strength
+    # at 8+). Prevents 100%-confidence calls off 3 series.
     n_series_for_shrink = len(series_totals)
     shrink_factor       = min(1.0, n_series_for_shrink / 8.0)
     over_prob = shrink_factor * raw_over_prob + (1.0 - shrink_factor) * book_implied_prob
-    # Recompute under/push from the shrunk over_prob so they sum to 1.
     under_prob = max(0.0, 1.0 - over_prob - push_prob)
     # Defensive renormalize so (over, under, push) sums to exactly 1.0
     _total = over_prob + under_prob + push_prob
@@ -447,9 +426,18 @@ def run_simulation(
         over_prob  /= _total
         under_prob /= _total
         push_prob  /= _total
-    # Percentile: what % of simulated totals fall AT OR BELOW the line
-    # < 50 → model says lean OVER (line is below median projection)
-    line_percentile = round(float(np.mean(samples <= line)) * 100, 1)
+
+    # Percentile of line within historical series totals
+    if series_totals:
+        line_percentile = round(
+            sum(1 for v in series_totals if v <= line) / len(series_totals) * 100, 1
+        )
+    else:
+        line_percentile = 50.0
+
+    # NB-era params kept as 0 for output-shape backward compat
+    r_total_adj = 0.0
+    p_adj       = 0.0
 
     # --- Fair Line & Misprice Classification ---
     # Documents define:
@@ -491,11 +479,20 @@ def run_simulation(
     ev_over  = round(over_prob * (100 / 110) - under_prob, 4)
     ev_under = round(under_prob * (100 / 110) - over_prob, 4)
 
-    # --- Percentile ceiling / floor from simulation ---
-    sim_p10 = float(np.percentile(samples, 10))
-    sim_p25 = float(np.percentile(samples, 25))
-    sim_p75 = float(np.percentile(samples, 75))
-    sim_p90 = float(np.percentile(samples, 90))
+    # --- Percentile ceiling / floor from EMPIRICAL series totals ----------
+    # Replaces NB-sample percentiles. With <4 series, fall back to MAD-σ
+    # bands around the trimmed mean so embeds still get sensible numbers.
+    if len(series_totals) >= 4:
+        sim_p10 = float(np.percentile(series_totals, 10))
+        sim_p25 = float(np.percentile(series_totals, 25))
+        sim_p75 = float(np.percentile(series_totals, 75))
+        sim_p90 = float(np.percentile(series_totals, 90))
+    else:
+        _spread = max(sim_std, 1.0)
+        sim_p10 = max(0.0, sim_mean - 1.28 * _spread)
+        sim_p25 = max(0.0, sim_mean - 0.67 * _spread)
+        sim_p75 = sim_mean + 0.67 * _spread
+        sim_p90 = sim_mean + 1.28 * _spread
 
     # --- Historical stats (R6: push half-credit) ──────────────────────────
     # Lines exactly at a player's median used to bias UNDER because pushes

@@ -28,7 +28,7 @@ from grade_engine import (
     detect_dog_line,
     score_correlated_parlay,
 )
-from scraper import check_standin, get_recent_team_roster
+from scraper import check_standin, get_recent_team_roster, search_team
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1862,7 +1862,7 @@ def build_result_embed(
         f"• **Edge vs. Line:** `{edge_sign}{edge_pct}%`  ·  **Fair Line:** `{fair_ln}`"
         f"{ev_str}{range_str}{hist_range_str}{dpr_str}{misprice_badge}{outlier_str}"
     )
-    embed.add_field(name=f"📊 SIMULATION ({n_sims:,} RUNS)", value=sim_val, inline=False)
+    embed.add_field(name="📊 PROJECTION (EMPIRICAL)", value=sim_val, inline=False)
 
     # ── Robustness panel (anti-overestimation discipline) ───────────────────
     _trim_avg = result.get("trimmed_avg")
@@ -2947,6 +2947,234 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
         )
         await ctx.send(embed=ev_embed)
 
+
+
+# ---------------------------------------------------------------------------
+# !teamscan — grade every player on a team's roster vs their live PP line
+# ---------------------------------------------------------------------------
+
+@bot.command(name="teamscan", aliases=["ts", "tscan"])
+async def cmd_teamscan(ctx, *, team_arg: str = ""):
+    """
+    !teamscan <team>          — grade every roster player vs their live PP line
+    !teamscan <team> hs       — headshots props only
+    !teamscan <team> kills    — kills props only
+
+    Pulls the team's HLTV roster, looks up each player's live PrizePicks line,
+    grades them, and posts a leaderboard ranked by best OVER chance.
+    """
+    arg = team_arg.strip()
+    if not arg:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❓ Usage",
+                description=(
+                    "**`!teamscan <team>`** — grade the team's full roster\n"
+                    "**`!teamscan <team> kills`** — kills props only\n"
+                    "**`!teamscan <team> hs`** — headshots props only"
+                ),
+                color=0x7289DA,
+            )
+        )
+        return
+
+    # Parse trailing stat filter
+    parts = arg.rsplit(" ", 1)
+    stat_filter: str | None = None
+    if len(parts) == 2 and parts[1].lower() in ("kills", "hs", "headshots"):
+        stat_filter = "HS" if parts[1].lower() in ("hs", "headshots") else "Kills"
+        team_name = parts[0].strip()
+    else:
+        team_name = arg
+
+    status_msg = await ctx.send(
+        embed=discord.Embed(
+            title=f"🔎 Scanning **{team_name}** roster…",
+            description=(
+                "Resolving team → fetching roster → pulling live PrizePicks lines.\n"
+                "This typically takes 60–120s."
+            ),
+            color=0x7289DA,
+        )
+    )
+
+    # Step 1: Resolve team
+    try:
+        team_info = await asyncio.to_thread(search_team, team_name)
+    except Exception as exc:
+        logger.exception(f"[teamscan] search_team failed: {exc}")
+        team_info = None
+    if not team_info:
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ Team Not Found",
+                description=f"Couldn't resolve **{team_name}** on HLTV. Check spelling.",
+                color=0xFF4136,
+            )
+        )
+        return
+    team_id, team_slug, team_display = team_info
+
+    # Step 2: Roster
+    try:
+        roster = await asyncio.to_thread(get_recent_team_roster, team_id, team_slug)
+    except Exception as exc:
+        logger.exception(f"[teamscan] roster fetch failed: {exc}")
+        roster = []
+    # Dedupe while preserving order
+    roster = list(dict.fromkeys(roster))[:6]
+    if not roster:
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ Roster Empty",
+                description=f"HLTV returned no roster for **{team_display}**.",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    await status_msg.edit(
+        embed=discord.Embed(
+            title=f"🔎 Scanning **{team_display}** ({len(roster)} players)…",
+            description="Pulling live PrizePicks lines for each player and grading…",
+            color=0x7289DA,
+        )
+    )
+
+    # Step 3: For each player, find PP line and grade
+    graded: list[dict] = []   # has line + result
+    no_line: list[str] = []   # no PP line found
+
+    for player_slug in roster:
+        # In default mode (no stat filter), probe Kills first, then HS fallback
+        # so we don't miss HS-only listings.
+        _probe_order = [stat_filter] if stat_filter else ["Kills", "HS"]
+        pp_item = None
+        for _probe in _probe_order:
+            try:
+                pp_item = await asyncio.to_thread(get_player_line, player_slug, _probe)
+            except Exception as exc:
+                logger.warning(f"[teamscan] PP lookup failed for {player_slug} ({_probe}): {exc}")
+                pp_item = None
+            if pp_item:
+                break
+
+        if not pp_item:
+            no_line.append(player_slug)
+            continue
+
+        line = pp_item.get("line")
+        stat_raw = (pp_item.get("stat") or "").lower()
+        stat_type = "HS" if "headshot" in stat_raw else "Kills"
+        try:
+            line_f = float(line)
+        except (TypeError, ValueError):
+            no_line.append(player_slug)
+            continue
+
+        try:
+            result = await asyncio.to_thread(
+                _analyze_player, player_slug, line_f, stat_type, None, team_display,
+            )
+        except Exception as exc:
+            logger.warning(f"[teamscan] grade failed for {player_slug}: {exc}")
+            no_line.append(f"{player_slug} (grade error)")
+            continue
+
+        if not result or "error" in result:
+            no_line.append(f"{player_slug} (no data)")
+            continue
+
+        graded.append({
+            "player":    player_slug,
+            "line":      line_f,
+            "stat":      stat_type,
+            "over_p":    result.get("over_prob", 0.0),
+            "under_p":   result.get("under_prob", 0.0),
+            "decision":  result.get("decision", "PASS"),
+            "grade":     result.get("grade", "—"),
+            "edge":      result.get("edge", 0.0),
+            "ev_over":   result.get("ev_over", 0.0),
+            "ev_under":  result.get("ev_under", 0.0),
+            "n_series":  result.get("n_series", 0),
+        })
+
+    if not graded:
+        await status_msg.edit(
+            embed=discord.Embed(
+                title=f"📭 No Lines Found — {team_display}",
+                description=(
+                    f"None of the {len(roster)} roster players have live PrizePicks props right now.\n"
+                    f"Players checked: {', '.join(roster)}"
+                ),
+                color=0xFFDC00,
+            )
+        )
+        return
+
+    # Step 4: Sort by best OVER probability (descending)
+    graded.sort(key=lambda r: r["over_p"], reverse=True)
+
+    # Build leaderboard embed
+    embed = discord.Embed(
+        title=f"🏆 Team Line Scan — {team_display}",
+        description=(
+            f"Ranked by **OVER probability** "
+            f"({stat_filter or 'Kills + HS'} props · {len(graded)} lines found)"
+        ),
+        color=0x2ECC40,
+    )
+
+    # Best play callout
+    top = graded[0]
+    sign = "+" if top["edge"] >= 0 else ""
+    embed.add_field(
+        name="⭐ TOP OVER CANDIDATE",
+        value=(
+            f"**{top['player']}** · {top['stat']} `{top['line']}`\n"
+            f"OVER **{top['over_p']}%**  ·  Edge `{sign}{top['edge']}%`  "
+            f"·  {_decision_icon(top['decision'])} {top['decision']}  ·  Grade {top['grade']}"
+        ),
+        inline=False,
+    )
+
+    # Leaderboard
+    rows = []
+    for i, r in enumerate(graded, start=1):
+        icon = _decision_icon(r["decision"])
+        sign = "+" if r["edge"] >= 0 else ""
+        rows.append(
+            f"`{i:>2}.` **{r['player']:<12}** · {r['stat'][:5]:<5} `{r['line']:>4}`  "
+            f"OVER `{r['over_p']:>5}%`  edge `{sign}{r['edge']:>4}%`  {icon} {r['decision']}"
+        )
+    embed.add_field(
+        name=f"📊 LEADERBOARD ({len(graded)})",
+        value="\n".join(rows)[:1024] or "—",
+        inline=False,
+    )
+
+    # Best UNDER (lowest over% = highest under%)
+    bottom = graded[-1]
+    if bottom["under_p"] > bottom["over_p"]:
+        sign = "+" if bottom["edge"] >= 0 else ""
+        embed.add_field(
+            name="🔻 TOP UNDER CANDIDATE",
+            value=(
+                f"**{bottom['player']}** · {bottom['stat']} `{bottom['line']}`  "
+                f"·  UNDER **{bottom['under_p']}%**  ·  {_decision_icon(bottom['decision'])} {bottom['decision']}"
+            ),
+            inline=False,
+        )
+
+    if no_line:
+        embed.add_field(
+            name="⚪ NO LINE / NO DATA",
+            value=", ".join(no_line)[:1024],
+            inline=False,
+        )
+
+    embed.set_footer(text="Empirical model · push half-credit · sample-shrink applied")
+    await status_msg.edit(embed=embed)
 
 
 # ---------------------------------------------------------------------------
