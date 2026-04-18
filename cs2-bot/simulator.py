@@ -380,6 +380,18 @@ def run_simulation(
         _w_total_proj = _w_mean * 2
         # 60% empirical anchor / 40% opp-weighted projection
         expected_total = 0.6 * expected_total + 0.4 * _w_total_proj
+        # Re-clamp to IQR after the blend so the opp-weighted adjustment can't
+        # push expected_total back outside the historical IQR band (R2 must be
+        # the final guardrail).
+        if iqr_band is not None:
+            _pre_reclip = expected_total
+            expected_total = max(iqr_band[0], min(iqr_band[1], expected_total))
+            if expected_total != _pre_reclip:
+                iqr_clipped = True
+                logger.debug(
+                    f"[sim] Post-blend IQR re-clip {_pre_reclip:.1f} → "
+                    f"{expected_total:.1f} (IQR {iqr_band[0]}-{iqr_band[1]})"
+                )
         logger.info(
             f"[sim] Empirical+weighted blend — anchor={expected_total:.2f} "
             f"w_mean={_w_mean:.2f} w_total={_w_total_proj:.2f}"
