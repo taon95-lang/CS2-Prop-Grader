@@ -748,6 +748,10 @@ def calculate_grade(
     elif decision == "UNDER" and under_votes <= over_votes:
         pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
         decision = "PASS"
+    # If we landed at PASS via base threshold AND signals are split, surface
+    # that to the user too so the embed always explains why it's a PASS.
+    if decision == "PASS" and pass_reason is None and over_votes == under_votes:
+        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
 
     vote_tally = {
         "s1": s1, "s2": s2, "s3": s3, "s4": s4,
