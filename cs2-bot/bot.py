@@ -3648,8 +3648,49 @@ def _build_valorant_embed(
         inline=False,
     )
 
+    # ── Confidence score (universal 0-100, sortable across players) ─────────
+    decision = sim.get("decision", "PASS")
+    edge_signed = (sim.get("over_prob", 50) - 50) / 100  # signed edge: + means OVER bias
+    series_totals = []
+    series_map: dict = {}
+    for m in info["map_stats"]:
+        series_map.setdefault(m["match_id"], []).append(m["stat_value"])
+    series_totals = [sum(v) for v in series_map.values()]
+    s_avg = sum(series_totals) / len(series_totals) if series_totals else 0
+    import statistics as _stats
+    s_std = _stats.stdev(series_totals) if len(series_totals) > 1 else 0.0
+    r_avg, o_avg, trend_pct = _vlr.split_recent_vs_older(info["map_stats"], recent_n_series=3)
+    conf = _vlr.confidence_score(
+        edge=edge_signed,
+        hit_rate=(sim.get("hit_rate", 0) or 0) / 100,
+        n_series=len(series_totals),
+        stability_std=s_std,
+        sample_avg=s_avg,
+        trend_pct=trend_pct,
+        decision=decision,
+    )
+    conf_letter, conf_label = _vlr.confidence_grade(conf)
+    bar_len = 14
+    filled = int(round(conf / 100 * bar_len))
+    conf_bar = "█" * filled + "░" * (bar_len - filled)
+
+    # Recency trend label
+    if trend_pct >= 8:
+        trend_str = f"🔥 Heating up (+{trend_pct:.1f}% recent vs older)"
+    elif trend_pct <= -8:
+        trend_str = f"🧊 Cooling off ({trend_pct:.1f}% recent vs older)"
+    else:
+        trend_str = f"➖ Steady ({trend_pct:+.1f}%)"
+
+    embed.add_field(
+        name=f"🎯 Confidence — {conf}/100 · Grade {conf_letter}",
+        value=f"`{conf_bar}`  {conf_label}\n**Recency:** {trend_str}  ·  Recent3: **{r_avg:.1f}**  ·  Older7: **{o_avg:.1f}**",
+        inline=False,
+    )
+
     # ── Player analytics (vlr per-map aggregates) ────────────────────────────
     agg = _vlr.aggregate_stats(info["map_stats"])
+    role_str = _vlr.infer_role(agg) if agg else None
     if agg:
         rating_str = f"{agg['rating']:.2f}" if agg.get("rating") is not None else "—"
         kd_str     = f"{agg['kd']:.2f}"      if agg.get("kd")     is not None else "—"
@@ -3664,9 +3705,11 @@ def _build_valorant_embed(
         fd_str     = f"{agg['fd_rate']:.3f}" if agg.get("fd_rate") is not None else "—"
         share_str  = f"{agg['fk_share']:.0f}%" if agg.get("fk_share") is not None else "—"
 
+        role_line = f"**Role (inferred):** {role_str}\n" if role_str else ""
         embed.add_field(
             name="🎮 Player Analytics (last 10 series)",
             value=(
+                f"{role_line}"
                 f"**Rating** {rating_str}  ·  "
                 f"**ACS** {acs_str}  ·  "
                 f"**K/D** {kd_str}  ·  "
@@ -3685,8 +3728,203 @@ def _build_valorant_embed(
             inline=False,
         )
 
+    # ── Per-map breakdown — spot map-veto edges ─────────────────────────────
+    per_map = _vlr.per_map_breakdown(info["map_stats"])
+    if per_map:
+        # Show top 6 maps by avg, with sample sizes ≥ 1
+        rows = []
+        for entry in per_map[:6]:
+            kpr = f"  ·  KPR `{entry['kpr']:.2f}`" if entry.get("kpr") is not None else ""
+            rows.append(
+                f"`{entry['map_name']:<10s}` n={entry['n']}  ·  "
+                f"avg **{entry['avg']:.1f}**  ·  range {entry['min']}–{entry['max']}{kpr}"
+            )
+        embed.add_field(
+            name="🗺️ Per-Map Breakdown (kills per map)",
+            value="\n".join(rows) + "\n_Higher avg/KPR = better map for OVER. Cross-check with the upcoming map veto._",
+            inline=False,
+        )
+
     embed.set_footer(text="Valorant · vlr.gg · Last 10 BO3 · Maps 1 & 2 only · 100K sims")
     return embed
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# !vteam — Valorant team-wide grader: ranks all players on a team by
+#         best edge × confidence so you can pick the strongest play.
+# ───────────────────────────────────────────────────────────────────────────
+
+@bot.command(name="vteam", aliases=["vt"])
+async def cmd_vteam(ctx, *, team_arg: str = ""):
+    """
+    !vteam <Team>  — Grade every player on a Valorant team at their projected
+    line and rank by Edge × Confidence. Surfaces the single best OVER/UNDER
+    play across the squad.
+    """
+    name = team_arg.strip()
+    if not name:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Usage",
+            description="`!vteam <team name>`\nExample: `!vteam Sentinels`",
+            color=0xFF4136,
+        ))
+        return
+
+    msg = await ctx.send(embed=discord.Embed(
+        title=f"🔎 Searching vlr.gg for team `{name}`…",
+        color=0x9146FF,
+    ))
+
+    team = await asyncio.to_thread(_vlr.search_team, name)
+    if not team:
+        await msg.edit(embed=discord.Embed(
+            title="❌ Team Not Found",
+            description=f"Couldn't find Valorant team `{name}` on vlr.gg.",
+            color=0xFF4136,
+        ))
+        return
+    team_id, team_slug = team
+    roster = await asyncio.to_thread(_vlr.get_team_roster, team_id, team_slug)
+    if not roster:
+        await msg.edit(embed=discord.Embed(
+            title="❌ Empty Roster",
+            description=f"vlr.gg team `{team_slug}` returned no players.",
+            color=0xFF4136,
+        ))
+        return
+
+    await msg.edit(embed=discord.Embed(
+        title=f"🎯 Grading {team_slug.upper()} — {len(roster)} players",
+        description=(
+            f"Pulling last-10-BO3 data for each player and grading at their median series line. "
+            f"This usually takes ~20-40s per player."
+        ),
+        color=0x9146FF,
+    ))
+
+    import statistics as _stats
+    graded: list[dict] = []
+    for p in roster:
+        try:
+            info = await asyncio.to_thread(
+                _vlr.get_player_info, p["display_name"] or p["slug"], 10
+            )
+        except Exception as exc:
+            logger.warning(f"[vteam] {p['slug']} fetch failed: {exc}")
+            continue
+        if not info or not info.get("map_stats"):
+            continue
+
+        # Build series totals → pick a credible line at median - 0.5
+        series_map: dict = {}
+        for m in info["map_stats"]:
+            series_map.setdefault(m["match_id"], []).append(m["stat_value"])
+        totals = sorted(sum(v) for v in series_map.values())
+        if len(totals) < 4:
+            continue
+        med = totals[len(totals) // 2]
+        line_f = float(med) - 0.5
+
+        map_stats = []
+        for m in info["map_stats"]:
+            mm = dict(m); mm.setdefault("rounds", 24)
+            map_stats.append(mm)
+
+        try:
+            sim = simulator.run_simulation(
+                map_stats=map_stats,
+                line=line_f,
+                stat_type="Kills",
+                favorite_prob=0.55,
+                book_implied_prob=0.5238,
+            )
+        except Exception as exc:
+            logger.warning(f"[vteam] {p['slug']} sim failed: {exc}")
+            continue
+        if sim.get("error"):
+            continue
+
+        decision = sim.get("decision", "PASS")
+        edge_signed = (sim.get("over_prob", 50) - 50) / 100
+        s_avg = sum(totals) / len(totals)
+        s_std = _stats.stdev(totals) if len(totals) > 1 else 0.0
+        _, _, trend_pct = _vlr.split_recent_vs_older(info["map_stats"], 3)
+        conf = _vlr.confidence_score(
+            edge=edge_signed,
+            hit_rate=(sim.get("hit_rate", 0) or 0) / 100,
+            n_series=len(totals),
+            stability_std=s_std,
+            sample_avg=s_avg,
+            trend_pct=trend_pct,
+            decision=decision,
+        )
+        agg = _vlr.aggregate_stats(info["map_stats"])
+        graded.append({
+            "name":      info.get("display_name") or p["slug"],
+            "line":      line_f,
+            "decision":  decision,
+            "edge_pct":  abs(sim.get("over_prob", 50) - 50),
+            "conf":      conf,
+            "score":     conf * (1 + abs(sim.get("over_prob", 50) - 50) / 100),
+            "hit_rate":  sim.get("hit_rate", 0),
+            "hist_avg":  sim.get("hist_avg", 0),
+            "trend":     trend_pct,
+            "role":      _vlr.infer_role(agg),
+            "ev_over":   sim.get("ev_over", 0),
+            "ev_under":  sim.get("ev_under", 0),
+        })
+
+    if not graded:
+        await msg.edit(embed=discord.Embed(
+            title="❌ No Gradeable Players",
+            description=f"Couldn't gather enough data on **{team_slug}**'s roster to grade.",
+            color=0xFF4136,
+        ))
+        return
+
+    # Rank: confidence × (1 + edge), filter PASS to bottom
+    actionable = [g for g in graded if g["decision"] in ("OVER", "UNDER")]
+    actionable.sort(key=lambda g: g["score"], reverse=True)
+    passes = [g for g in graded if g["decision"] == "PASS"]
+    passes.sort(key=lambda g: g["conf"], reverse=True)
+    ranked = actionable + passes
+
+    # Build leaderboard
+    lines: list[str] = []
+    for i, g in enumerate(ranked, 1):
+        if g["decision"] == "OVER":
+            icon, dec_str, ev = "✅", f"OVER {g['line']:.1f}", g["ev_over"]
+        elif g["decision"] == "UNDER":
+            icon, dec_str, ev = "❌", f"UNDER {g['line']:.1f}", g["ev_under"]
+        else:
+            icon, dec_str, ev = "⏸️", "PASS", 0
+        ev_str = f"{'+' if (ev or 0) >= 0 else ''}{(ev or 0):.3f}u"
+        trend_arrow = "🔥" if g["trend"] >= 8 else ("🧊" if g["trend"] <= -8 else "➖")
+        lines.append(
+            f"`#{i}` {icon} **{g['name']}** {g['role']}\n"
+            f"   → `{dec_str}`  ·  Conf **{g['conf']}/100**  ·  Edge **{g['edge_pct']:.1f}%**  "
+            f"·  Hit `{g['hit_rate']:.0f}%`  ·  Avg `{g['hist_avg']:.1f}`  ·  EV `{ev_str}`  {trend_arrow}"
+        )
+
+    best = ranked[0]
+    if best["decision"] in ("OVER", "UNDER"):
+        headline = (
+            f"🏆 **Best Play:** {best['name']} `{best['decision']} {best['line']:.1f}` "
+            f"— Confidence **{best['conf']}/100**, Edge **{best['edge_pct']:.1f}%**"
+        )
+    else:
+        headline = "⚖️ No high-edge plays on this team — all legs grade PASS."
+
+    embed = discord.Embed(
+        title=f"🎯 Team Grade — {team_slug.upper()} ({len(ranked)} players)",
+        description=headline + "\n\n" + "\n\n".join(lines),
+        color=0x9146FF,
+    )
+    embed.set_footer(text=(
+        f"Valorant · vlr.gg · Lines = each player's median series total − 0.5  ·  "
+        f"Ranked by Confidence × (1+Edge)  ·  100K sims each"
+    ))
+    await msg.edit(embed=embed)
 
 
 @bot.command(name="vgrade", aliases=["vg"])

@@ -389,6 +389,180 @@ def get_player_recent_kills(name: str, n: int = 10) -> Optional[dict]:
 
 # ─────────────────────────── analytics aggregator ───────────────────────────
 
+def split_recent_vs_older(map_stats: list[dict], recent_n_series: int = 3) -> tuple[float, float, float]:
+    """
+    Split per-map kill list into 'recent' (last N series → 2N maps) vs 'older' buckets
+    and compute trend % = (recent_avg − older_avg) / older_avg × 100.
+    Returns (recent_avg, older_avg, trend_pct). Trend = 0 if either bucket is empty.
+    """
+    if not map_stats:
+        return 0.0, 0.0, 0.0
+    recent_maps = recent_n_series * 2  # M1+M2 each
+    recent = [m["stat_value"] for m in map_stats[:recent_maps]]
+    older  = [m["stat_value"] for m in map_stats[recent_maps:]]
+    r_avg = sum(recent) / len(recent) if recent else 0.0
+    o_avg = sum(older)  / len(older)  if older  else 0.0
+    if not recent or not older or o_avg == 0:
+        return round(r_avg, 2), round(o_avg, 2), 0.0
+    trend_pct = round((r_avg - o_avg) / o_avg * 100, 1)
+    return round(r_avg, 2), round(o_avg, 2), trend_pct
+
+
+def per_map_breakdown(map_stats: list[dict]) -> list[dict]:
+    """
+    Group per-map kill samples by map name and compute avg / sample / hit-rate-ready stats.
+    Returns list of dicts sorted by avg kills DESC. Useful for spotting map-veto edges.
+    """
+    by_map: dict[str, list[dict]] = {}
+    for m in map_stats:
+        nm = (m.get("map_name") or "Unknown").strip() or "Unknown"
+        by_map.setdefault(nm, []).append(m)
+    out = []
+    for nm, rows in by_map.items():
+        kills = [r["stat_value"] for r in rows]
+        rounds = [r.get("rounds", 0) or 0 for r in rows]
+        out.append({
+            "map_name": nm,
+            "n":        len(rows),
+            "avg":      round(sum(kills) / len(kills), 2),
+            "max":      max(kills),
+            "min":      min(kills),
+            "kpr":      round(sum(kills) / sum(rounds), 3) if sum(rounds) > 0 else None,
+        })
+    return sorted(out, key=lambda x: x["avg"], reverse=True)
+
+
+def infer_role(agg: dict) -> str:
+    """
+    Cheap role inference from aggregate FK rate + KAST. Not perfect, but useful context.
+        Duelist     — high FK rate (>= 0.13) and avg/+ ACS
+        Sentinel    — low FK rate (<= 0.07) and high KAST (>= 75)
+        Initiator   — mid FK rate, high KAST
+        Controller  — mid FK rate, lower KAST
+        Flex        — fallback
+    """
+    fk = (agg or {}).get("fk_rate") or 0
+    kast = (agg or {}).get("kast") or 0
+    acs  = (agg or {}).get("acs")  or 0
+    if fk >= 0.13:
+        return "🗡️ Duelist"
+    if fk <= 0.07 and kast >= 75:
+        return "🛡️ Sentinel"
+    if 0.07 < fk < 0.13 and kast >= 73:
+        return "🎯 Initiator"
+    if 0.07 < fk < 0.13 and acs >= 200:
+        return "🧠 Controller"
+    return "🔀 Flex"
+
+
+def confidence_score(
+    *,
+    edge: float,            # signed: over_prob − 0.5  (e.g. +0.18 = 18% edge to OVER)
+    hit_rate: float,        # 0.0..1.0
+    n_series: int,
+    stability_std: float,   # std-dev of per-series totals
+    sample_avg: float,      # series average kills (for CV calc)
+    trend_pct: float,
+    decision: str,          # "OVER" / "UNDER" / "PASS"
+) -> int:
+    """
+    Universal 0–100 confidence in the recommended direction.
+    Combines edge magnitude, hit-rate alignment, sample size, stability, and trend.
+    """
+    # 1. Edge magnitude — capped at ±30% → 60 pts max
+    score = min(60.0, abs(edge) * 200)
+
+    # 2. Hit-rate alignment with decision
+    hr_align = (hit_rate - 0.5) if decision == "OVER" else (0.5 - hit_rate) if decision == "UNDER" else 0
+    score += max(-10, min(15, hr_align * 30))
+
+    # 3. Sample bonus (capped at 10 pts → fully rewarded at 10 series)
+    score += min(10.0, n_series * 1.0)
+
+    # 4. Stability (CV-based) — penalty up to 15 pts if highly volatile
+    if sample_avg > 0:
+        cv = stability_std / sample_avg
+        score -= min(15.0, cv * 30)
+
+    # 5. Trend alignment — bonus if trend supports decision, penalty if opposed
+    if decision == "OVER":
+        score += max(-10, min(10, trend_pct * 0.4))
+    elif decision == "UNDER":
+        score += max(-10, min(10, -trend_pct * 0.4))
+
+    if decision == "PASS":
+        score = min(score, 50)
+    return max(0, min(100, int(round(score))))
+
+
+def confidence_grade(score: int) -> tuple[str, str]:
+    """Map 0–100 → letter grade + label."""
+    if score >= 80: return "A", "🏆 High Confidence"
+    if score >= 65: return "B", "💪 Solid Confidence"
+    if score >= 50: return "C", "⚖️ Fair Confidence"
+    if score >= 35: return "D", "⚠️ Low Confidence"
+    return "F", "🚫 Unreliable"
+
+
+# ─────────────────────────── team / roster scraping ─────────────────────────
+
+def search_team(name: str) -> Optional[tuple[str, str]]:
+    """
+    Search vlr.gg for a team. Returns (team_id, slug) or None.
+    vlr.gg search HTML embeds team URLs as `/team/<id>/idx`; we resolve idx →
+    the canonical slug via a HEAD/GET to the team page.
+    """
+    q = name.strip().replace(" ", "+")
+    if not q:
+        return None
+    html = _fetch(f"https://www.vlr.gg/search/?q={q}", allow_redirects=True)
+    if not html:
+        return None
+    matches = re.findall(r"/team/(\d+)/([a-z0-9_-]+)", html)
+    if not matches:
+        return None
+    # Prefer the first non-"idx" slug if present, else resolve idx → slug
+    for tid, slug in matches:
+        if slug != "idx":
+            return tid, slug
+    tid = matches[0][0]
+    page = _fetch(f"https://www.vlr.gg/team/{tid}/idx", allow_redirects=True)
+    if page:
+        m = re.search(rf'/team/{tid}/([a-z0-9_-]+)', page)
+        if m and m.group(1) != "idx":
+            return tid, m.group(1)
+    return tid, "idx"
+
+
+def get_team_roster(team_id: str, slug: str = "idx") -> list[dict]:
+    """
+    Fetch a team's player roster from vlr.gg. Returns list of dicts:
+      [{ "player_id": "...", "slug": "...", "display_name": "..." }, ...]
+    Excludes coaches/managers when role is detectable. Returns empty list on error.
+    """
+    html = _fetch(f"https://www.vlr.gg/team/{team_id}/{slug}", allow_redirects=True)
+    if not html:
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'href="/player/(\d+)/([a-z0-9_-]+)"', html):
+        pid, pslug = m.group(1), m.group(2)
+        if pid in seen:
+            continue
+        # Look at surrounding context to filter staff
+        ctx = html[max(0, m.start()-300): m.end()+400].lower()
+        if any(role in ctx for role in ["manager", "head coach", "assistant coach", '"coach"']):
+            continue
+        # Try to extract display name
+        nm = pslug
+        nm_m = re.search(r'team-roster-item-name-alias[^>]*>([^<]+)<', ctx)
+        if nm_m:
+            nm = nm_m.group(1).strip()
+        seen.add(pid)
+        out.append({"player_id": pid, "slug": pslug, "display_name": nm})
+    return out
+
+
 def aggregate_stats(map_stats: list[dict]) -> dict:
     """
     Aggregate the per-map stats dicts into player-level analytics.
