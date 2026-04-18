@@ -633,3 +633,88 @@ if __name__ == "__main__":
             total = sum(m["stat_value"] for m in maps)
             per = " + ".join(f"{m['stat_value']} ({m['map_name']})" for m in maps)
             print(f"  {i:2d}. match {mid}: {total} kills  ·  {per}")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Empirical grader (no Monte Carlo) — grades directly off historical series
+# ─────────────────────────────────────────────────────────────────────────
+def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> dict:
+    """
+    Grade a Valorant prop using the historical series distribution alone.
+    Returns the same shape as simulator.run_simulation() so callers don't change.
+    """
+    import statistics as _st
+    from statistics import mean as _mean, median as _median
+
+    if not map_stats:
+        return {"error": "No map data"}
+
+    # Series totals (sum kills across Maps 1+2 per match)
+    by_match: dict = {}
+    for m in map_stats:
+        by_match.setdefault(m["match_id"], []).append(m["stat_value"])
+    series_totals = [sum(v) for v in by_match.values()]
+    n_series = len(series_totals)
+    if n_series == 0:
+        return {"error": "No series data"}
+
+    hist_avg    = _mean(series_totals)
+    hist_median = _median(series_totals)
+    hist_std    = _st.stdev(series_totals) if n_series > 1 else 0.0
+    ceiling     = max(series_totals)
+    floor       = min(series_totals)
+
+    # Empirical hit rate (fraction of past series strictly above the line)
+    overs  = sum(1 for v in series_totals if v >  line)
+    unders = sum(1 for v in series_totals if v <  line)
+    pushes = sum(1 for v in series_totals if v == line)
+    over_prob  = overs  / n_series
+    under_prob = unders / n_series
+    push_prob  = pushes / n_series
+    hit_rate   = over_prob  # convention: hit rate = OVER hit rate
+
+    # Edge vs −110 implied (52.38%)
+    edge = over_prob - 0.5238
+
+    # EV at standard −110: profit on win = 100/110, loss = −1
+    ev_over  = round(over_prob  * (100/110) - (1 - over_prob),  4)
+    ev_under = round(under_prob * (100/110) - (1 - under_prob), 4)
+
+    # Stability bucket
+    if   hist_std > 8: stability_label = "⚡ High Volatility"
+    elif hist_std > 5: stability_label = "🌊 Moderate Volatility"
+    else:              stability_label = "🎯 Consistent"
+
+    # Decision: combine hit rate, median gap, and sample size.
+    median_gap = hist_median - line
+    strong_n   = n_series >= 5
+    decision = "PASS"
+    if strong_n:
+        if   over_prob  >= 0.65 and median_gap >  0:  decision = "OVER"
+        elif under_prob >= 0.65 and median_gap <  0:  decision = "UNDER"
+        elif over_prob  >= 0.70:                       decision = "OVER"
+        elif under_prob >= 0.70:                       decision = "UNDER"
+
+    return {
+        "stat_type":       stat_type,
+        "n_samples":       len(map_stats),
+        "n_series":        n_series,
+        "hist_avg":        round(hist_avg, 2),
+        "hist_median":     round(hist_median, 2),
+        "hit_rate":        round(hit_rate * 100, 1),
+        "over_prob":       round(over_prob  * 100, 1),
+        "under_prob":      round(under_prob * 100, 1),
+        "push_prob":       round(push_prob  * 100, 1),
+        "edge":            round(edge * 100, 1),
+        "decision":        decision,
+        "ceiling":         ceiling,
+        "floor":           floor,
+        "stability_std":   round(hist_std, 2),
+        "stability_label": stability_label,
+        "ev_over":         ev_over,
+        "ev_under":        ev_under,
+        # Compatibility shims for the existing embed (no Monte Carlo, so we
+        # echo the empirical distribution back through the same field names).
+        "sim_median":      round(hist_median, 2),
+        "sim_std":         round(hist_std, 2),
+    }

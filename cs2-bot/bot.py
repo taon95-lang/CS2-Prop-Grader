@@ -3612,13 +3612,13 @@ def _build_valorant_embed(
 
     # Probability box
     embed.add_field(
-        name="📊 Simulation (100K Monte Carlo)",
+        name="📊 Empirical Grade (last-10 series)",
         value=(
             f"**OVER {line:g}:**  {sim['over_prob']:.1f}%\n"
             f"**UNDER {line:g}:** {sim['under_prob']:.1f}%\n"
             f"**Edge vs −110:** {sim['edge']:+.1f}%\n"
-            f"**Sim median:** {sim['sim_median']:.1f} kills  "
-            f"(σ {sim['sim_std']:.1f})"
+            f"**Median:** {sim['hist_median']:.1f} kills  "
+            f"(σ {sim.get('stability_std', 0):.1f})"
         ),
         inline=False,
     )
@@ -3869,15 +3869,9 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
             map_stats.append(mm)
 
         try:
-            sim = simulator.run_simulation(
-                map_stats=map_stats,
-                line=line_f,
-                stat_type="Kills",
-                favorite_prob=0.55,
-                book_implied_prob=0.5238,
-            )
+            sim = _vlr.empirical_grade(map_stats, line_f, "Kills")
         except Exception as exc:
-            logger.warning(f"[vteam] {p['slug']} sim failed: {exc}")
+            logger.warning(f"[vteam] {p['slug']} grade failed: {exc}")
             continue
         if sim.get("error"):
             continue
@@ -3980,7 +3974,7 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
                 "`!vgrade tenz 32.5`\n"
                 "`!vgrade aspas 35.5 -110`\n\n"
                 "Pulls last 10 BO3 series (Maps 1 & 2 only) from vlr.gg, "
-                "runs 100K Monte Carlo, returns OVER/UNDER/PASS with confidence."
+                "grades empirically off the historical series distribution, returns OVER/UNDER/PASS with confidence."
             ),
             color=0xFF4136,
         ))
@@ -4038,15 +4032,9 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
         mm.setdefault("rounds", 24)
         map_stats.append(mm)
 
-    sim = simulator.run_simulation(
-        map_stats=map_stats,
-        line=line_f,
-        stat_type="Kills",
-        favorite_prob=0.55,
-        book_implied_prob=book_implied,
-    )
+    sim = _vlr.empirical_grade(map_stats, line_f, "Kills")
     if sim.get("error"):
-        await msg.edit(content=f"❌ Simulation error: {sim['error']}")
+        await msg.edit(content=f"❌ Grading error: {sim['error']}")
         return
 
     embed = _build_valorant_embed(player_name, line_f, info, sim, book_implied)
@@ -4115,7 +4103,7 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
 
     await msg.edit(embed=discord.Embed(
         title=f"🎯 Grading {len(props)} Valorant Props",
-        description=f"Running 100K Monte Carlo on each player. ETA ~{len(props)*15}s.",
+        description=f"Empirically grading each player off last-10 series. ETA ~{len(props)*15}s.",
         color=0x9146FF,
     ))
 
@@ -4140,8 +4128,7 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
         for m in info["map_stats"]:
             mm = dict(m); mm.setdefault("rounds", 24); ms.append(mm)
         try:
-            sim = simulator.run_simulation(map_stats=ms, line=line_f, stat_type="Kills",
-                                           favorite_prob=0.55, book_implied_prob=0.5238)
+            sim = _vlr.empirical_grade(ms, line_f, "Kills")
         except Exception:
             continue
         if sim.get("error"):
@@ -4212,7 +4199,7 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
         ),
         color=0x9146FF,
     )
-    embed.set_footer(text="Valorant · Live PrizePicks lines · Ranked by Conf × (1+Edge) · 100K sims")
+    embed.set_footer(text="Valorant · Live PrizePicks lines · Ranked by Conf × (1+Edge) · empirical grading")
     await msg.edit(embed=embed)
 
 
