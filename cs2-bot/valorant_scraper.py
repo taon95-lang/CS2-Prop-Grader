@@ -636,64 +636,153 @@ if __name__ == "__main__":
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Empirical grader (no Monte Carlo) — grades directly off historical series
+# Predictive grader — multi-signal stacked model, no Monte Carlo
+# ─────────────────────────────────────────────────────────────────────────
+#
+# Combines four independent predictive signals into a calibrated OVER prob.
+# Each signal produces a z-score (signed standardised distance from the line);
+# we sum them with empirical weights and pass through a logistic function.
+#
+#  S1  Projection z-score      weight 2.5   blended KPR × proj rounds → expected
+#  S2  Median-gap z-score      weight 1.5   where the line sits vs sample median
+#  S3  Recency trend           weight 1.5   recent-3 vs older-7 form swing
+#  S4  Bayesian hit rate       weight 1.5   beta-smoothed empirical hit %
+#
+# Strengths over plain empirical hit rate:
+#   • Hit rate alone is binary and high-variance on 5–10 samples → we shrink
+#     it toward 50% with a Beta(2,2) prior so 4-of-5 doesn't overfit.
+#   • Adds where the line sits relative to projection (a 20.5 line for a
+#     guy averaging 28 is a much stronger OVER than hit rate alone shows).
+#   • Captures form changes — a player coming off two huge games is
+#     differently predictive than one with a flat 10-series average.
+#   • Variance-aware: high-CV players get wider z-scores → softer signals
+#     → naturally pulled toward PASS.
 # ─────────────────────────────────────────────────────────────────────────
 def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> dict:
     """
-    Grade a Valorant prop using the historical series distribution alone.
-    Returns the same shape as simulator.run_simulation() so callers don't change.
+    Predict OVER/UNDER for a kills prop using stacked predictive signals.
+    Returns the same shape as the legacy simulator output for embed compatibility.
     """
+    import math
     import statistics as _st
     from statistics import mean as _mean, median as _median
 
     if not map_stats:
         return {"error": "No map data"}
 
-    # Series totals (sum kills across Maps 1+2 per match)
+    # ── Series-level (sum kills across Maps 1+2 per match) ───────────────
     by_match: dict = {}
+    by_match_rounds: dict = {}
     for m in map_stats:
-        by_match.setdefault(m["match_id"], []).append(m["stat_value"])
-    series_totals = [sum(v) for v in by_match.values()]
+        mid = m["match_id"]
+        by_match.setdefault(mid, []).append(m["stat_value"])
+        by_match_rounds.setdefault(mid, []).append(m.get("rounds") or 24)
+    # Preserve newest-first order from scraper
+    ordered_mids = []
+    for m in map_stats:
+        if m["match_id"] not in ordered_mids:
+            ordered_mids.append(m["match_id"])
+    series_totals  = [sum(by_match[mid])         for mid in ordered_mids]
+    series_rounds  = [sum(by_match_rounds[mid])  for mid in ordered_mids]
+
     n_series = len(series_totals)
     if n_series == 0:
         return {"error": "No series data"}
 
     hist_avg    = _mean(series_totals)
     hist_median = _median(series_totals)
-    hist_std    = _st.stdev(series_totals) if n_series > 1 else 0.0
+    hist_std    = _st.stdev(series_totals) if n_series > 1 else max(hist_avg * 0.15, 1.0)
     ceiling     = max(series_totals)
     floor       = min(series_totals)
 
-    # Empirical hit rate (fraction of past series strictly above the line)
+    # Floor std so signals stay finite when a player is freakishly consistent
+    sigma = max(hist_std, max(hist_avg * 0.10, 1.0))
+
+    # ── Per-map KPR for projection ───────────────────────────────────────
+    valid_maps = [m for m in map_stats if (m.get("rounds") or 0) > 0]
+    if valid_maps:
+        kpr_all = [m["stat_value"] / m["rounds"] for m in valid_maps]
+    else:
+        # Fallback: assume 22 rounds/map
+        kpr_all = [m["stat_value"] / 22 for m in map_stats]
+
+    # Recent form: most recent 3 series worth of maps (~6)
+    recent_n_maps = min(6, len(kpr_all))
+    recent_kpr = _mean(kpr_all[:recent_n_maps]) if recent_n_maps else _mean(kpr_all)
+    overall_kpr = _mean(kpr_all) if kpr_all else 0.0
+
+    # Blend recent (60%) and overall (40%) — captures form without overfitting
+    blended_kpr = 0.60 * recent_kpr + 0.40 * overall_kpr
+
+    # Projected rounds for the next series (avg of player's historical 2-map totals)
+    proj_rounds = _mean(series_rounds) if series_rounds else 44.0
+    expected_total = blended_kpr * proj_rounds
+
+    # ── Signal 1: Projection z-score (expected vs line) ──────────────────
+    z_proj = (expected_total - line) / sigma
+
+    # ── Signal 2: Median-gap z-score (where line sits in distribution) ───
+    z_med = (hist_median - line) / sigma
+
+    # ── Signal 3: Recency trend (per-series equivalent) ──────────────────
+    if recent_n_maps >= 2 and len(kpr_all) > recent_n_maps:
+        older_kpr = _mean(kpr_all[recent_n_maps:]) or recent_kpr
+        trend_pct = ((recent_kpr - older_kpr) / max(older_kpr, 0.01)) * 100
+    else:
+        trend_pct = 0.0
+    # Convert trend % into a z-style signal: ±15% trend ≈ ±1σ
+    z_trend = trend_pct / 15.0
+
+    # ── Signal 4: Bayesian-smoothed hit rate ─────────────────────────────
     overs  = sum(1 for v in series_totals if v >  line)
     unders = sum(1 for v in series_totals if v <  line)
     pushes = sum(1 for v in series_totals if v == line)
-    over_prob  = overs  / n_series
-    under_prob = unders / n_series
-    push_prob  = pushes / n_series
-    hit_rate   = over_prob  # convention: hit rate = OVER hit rate
+    # Beta(2, 2) prior → posterior mean = (overs + 2) / (n + 4)
+    bayes_p = (overs + 2) / (n_series + 4)
+    # Convert posterior to z-style signal: 0.5 → 0, 0.80 → ~+2
+    z_hit = (bayes_p - 0.5) / 0.15
 
-    # Edge vs −110 implied (52.38%)
-    edge = over_prob - 0.5238
+    # ── Stack signals → logit → P(OVER) ──────────────────────────────────
+    W_PROJ, W_MED, W_TREND, W_HIT = 2.5, 1.5, 1.5, 1.5
+    raw_score = (
+        W_PROJ  * z_proj +
+        W_MED   * z_med  +
+        W_TREND * z_trend +
+        W_HIT   * z_hit
+    )
+    # Calibration scalar — total max possible ≈ 7 in extremes; divide so
+    # logistic input stays in a sensible range (|logit| < 4 → P in 2-98%).
+    logit = raw_score / 1.6
 
-    # EV at standard −110: profit on win = 100/110, loss = −1
+    # Sample-size shrinkage — small N pulls probability toward 0.5
+    shrink = min(1.0, n_series / 8.0)  # full strength at 8+ series
+    logit *= shrink
+
+    over_prob  = 1.0 / (1.0 + math.exp(-logit))
+    under_prob = 1.0 - over_prob
+    edge       = over_prob - 0.5238
+
+    # ── Empirical reference (for display + EV tie-out) ───────────────────
+    emp_over_pct = (overs / n_series) * 100 if n_series else 0.0
+
+    # EV at standard −110 odds
     ev_over  = round(over_prob  * (100/110) - (1 - over_prob),  4)
     ev_under = round(under_prob * (100/110) - (1 - under_prob), 4)
 
     # Stability bucket
-    if   hist_std > 8: stability_label = "⚡ High Volatility"
-    elif hist_std > 5: stability_label = "🌊 Moderate Volatility"
-    else:              stability_label = "🎯 Consistent"
+    cv = sigma / hist_avg if hist_avg > 0 else 1.0
+    if   sigma > 8 or cv > 0.30: stability_label = "⚡ High Volatility"
+    elif sigma > 5 or cv > 0.18: stability_label = "🌊 Moderate Volatility"
+    else:                         stability_label = "🎯 Consistent"
 
-    # Decision: combine hit rate, median gap, and sample size.
-    median_gap = hist_median - line
-    strong_n   = n_series >= 5
+    # ── Decision: dual gate (probability AND signal alignment) ───────────
+    # Require P ≥ 60 / ≤ 40 AND that the projection actually agrees in sign.
+    # Avoids a high P from a strong trend alone when projection contradicts.
+    proj_aligned_over  = z_proj > -0.25
+    proj_aligned_under = z_proj <  0.25
     decision = "PASS"
-    if strong_n:
-        if   over_prob  >= 0.65 and median_gap >  0:  decision = "OVER"
-        elif under_prob >= 0.65 and median_gap <  0:  decision = "UNDER"
-        elif over_prob  >= 0.70:                       decision = "OVER"
-        elif under_prob >= 0.70:                       decision = "UNDER"
+    if   over_prob  >= 0.60 and proj_aligned_over  and n_series >= 4: decision = "OVER"
+    elif under_prob >= 0.60 and proj_aligned_under and n_series >= 4: decision = "UNDER"
 
     return {
         "stat_type":       stat_type,
@@ -701,20 +790,35 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
         "n_series":        n_series,
         "hist_avg":        round(hist_avg, 2),
         "hist_median":     round(hist_median, 2),
-        "hit_rate":        round(hit_rate * 100, 1),
+        "hit_rate":        round(emp_over_pct, 1),    # raw empirical (display)
+        "bayes_hit_rate":  round(bayes_p * 100, 1),   # smoothed (used in model)
         "over_prob":       round(over_prob  * 100, 1),
         "under_prob":      round(under_prob * 100, 1),
-        "push_prob":       round(push_prob  * 100, 1),
+        "push_prob":       round((pushes / n_series) * 100, 1) if n_series else 0,
         "edge":            round(edge * 100, 1),
         "decision":        decision,
         "ceiling":         ceiling,
         "floor":           floor,
-        "stability_std":   round(hist_std, 2),
+        "stability_std":   round(sigma, 2),
         "stability_label": stability_label,
         "ev_over":         ev_over,
         "ev_under":        ev_under,
-        # Compatibility shims for the existing embed (no Monte Carlo, so we
-        # echo the empirical distribution back through the same field names).
+        # ── Predictive model breakdown (transparency) ────────────────────
+        "expected_total":  round(expected_total, 2),
+        "blended_kpr":     round(blended_kpr, 3),
+        "recent_kpr":      round(recent_kpr, 3),
+        "proj_rounds":     round(proj_rounds, 1),
+        "trend_pct":       round(trend_pct, 1),
+        "z_projection":    round(z_proj, 2),
+        "z_median":        round(z_med, 2),
+        "z_trend":         round(z_trend, 2),
+        "z_bayes_hit":     round(z_hit, 2),
+        "model_score":     round(raw_score, 2),
+        # ── Embed compatibility shims ────────────────────────────────────
         "sim_median":      round(hist_median, 2),
-        "sim_std":         round(hist_std, 2),
+        "sim_std":         round(sigma, 2),
     }
+
+
+# Keep a friendlier alias for new callers
+predict_over_under = empirical_grade

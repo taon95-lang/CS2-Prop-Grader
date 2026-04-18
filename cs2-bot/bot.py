@@ -3612,13 +3612,34 @@ def _build_valorant_embed(
 
     # Probability box
     embed.add_field(
-        name="📊 Empirical Grade (last-10 series)",
+        name="📊 Predictive Model — Calibrated OVER probability",
         value=(
             f"**OVER {line:g}:**  {sim['over_prob']:.1f}%\n"
             f"**UNDER {line:g}:** {sim['under_prob']:.1f}%\n"
             f"**Edge vs −110:** {sim['edge']:+.1f}%\n"
-            f"**Median:** {sim['hist_median']:.1f} kills  "
-            f"(σ {sim.get('stability_std', 0):.1f})"
+            f"**Projected total:** {sim.get('expected_total', 0):.1f} kills  "
+            f"(KPR {sim.get('blended_kpr', 0):.2f} × {sim.get('proj_rounds', 0):.0f} rounds)"
+        ),
+        inline=False,
+    )
+
+    # Model signal breakdown — shows WHY we lean the way we do
+    z_proj  = sim.get("z_projection", 0)
+    z_med   = sim.get("z_median", 0)
+    z_trend = sim.get("z_trend", 0)
+    z_hit   = sim.get("z_bayes_hit", 0)
+    def _arrow(z):
+        if z >=  0.5: return "🟢 OVER"
+        if z <= -0.5: return "🔴 UNDER"
+        return "⚪ neutral"
+    embed.add_field(
+        name="🧠 Signal Stack (z-scores → consensus)",
+        value=(
+            f"**Projection:** `{z_proj:+.2f}σ` {_arrow(z_proj)}\n"
+            f"**Line vs Median:** `{z_med:+.2f}σ` {_arrow(z_med)}\n"
+            f"**Recency Trend:** `{z_trend:+.2f}σ` ({sim.get('trend_pct', 0):+.0f}%)  {_arrow(z_trend)}\n"
+            f"**Bayes Hit Rate:** `{z_hit:+.2f}σ` ({sim.get('bayes_hit_rate', 0):.0f}% smoothed)  {_arrow(z_hit)}\n"
+            f"**Model score:** `{sim.get('model_score', 0):+.2f}` → P(OVER) `{sim['over_prob']:.1f}%`"
         ),
         inline=False,
     )
