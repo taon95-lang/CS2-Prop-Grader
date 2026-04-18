@@ -14,6 +14,28 @@ N_SIMULATIONS = 100_000
 BOOK_IMPLIED_PROB = 0.5238
 
 
+def _trimmed_mean(values: list, pct: float = 0.10) -> float:
+    """Mean after trimming `pct` from each tail (default 10/10). Robust to outliers."""
+    if not values:
+        return 0.0
+    n = len(values)
+    k = int(n * pct)
+    if n - 2 * k < 1:
+        return sum(values) / n
+    s = sorted(values)
+    trimmed = s[k:n - k]
+    return sum(trimmed) / len(trimmed)
+
+
+def _mad(values: list) -> float:
+    """Median Absolute Deviation — robust σ alternative (scaled to normal-σ)."""
+    if not values:
+        return 0.0
+    med = median(values)
+    abs_dev = [abs(v - med) for v in values]
+    return median(abs_dev) * 1.4826
+
+
 def calculate_kpr(map_stats: list) -> float:
     """Kills Per Round average across all map samples."""
     valid = [m for m in map_stats if m["rounds"] > 0]
@@ -151,6 +173,12 @@ def run_simulation(
     stability_std = statistics.stdev(series_totals) if len(series_totals) > 1 else 0.0
     ceiling_val   = max(series_totals) if series_totals else 0
     floor_val     = min(series_totals) if series_totals else 0
+
+    # --- Robust stats (R1): trimmed mean + MAD-σ ---
+    # Used for projection clipping; raw mean/median still drive the embed
+    # display so users see what they're used to.
+    trimmed_avg_val = _trimmed_mean(series_totals, 0.10) if series_totals else 0.0
+    sigma_mad_val   = _mad(series_totals) if series_totals else 0.0
 
     # --- DPR (Deaths Per Round) ---
     _dpr_valid = [m for m in map_stats if m.get("rounds", 0) > 0 and m.get("deaths") is not None]
@@ -327,19 +355,37 @@ def run_simulation(
 
     expected_total = blended_kpr * total_projected_rounds
 
-    # Fix 1 (tighter anchor): KPR-based projection can overshoot when stomp maps
-    # inflate per-round efficiency AND when projected rounds exceed historical avg.
-    # Anchor to observed hist_median: allow +8% upside (genuine hot form) and
-    # -10% downside (cold form / stomp risk).  Never let the sim median drift
-    # far above the actual observed median — that's what caused sim_median=39
-    # when hist_median=31 and actual result was 29.
+    # ── Robust anchor (R1+R2): trimmed-mean band + IQR clipping ─────────────
+    # A single freak game can pull both the median and the mean noticeably.
+    # We anchor projection to the trimmed mean (R1) and then clamp it inside
+    # the player's interquartile range of historical 2-map totals (R2) so we
+    # can never project a number above what the player has actually delivered
+    # in the upper-half of their sample.
+    iqr_clipped = False
+    iqr_band: tuple | None = None
     if series_totals:
-        _hist_med_anchor = median(series_totals)
-        if _hist_med_anchor > 0:
-            expected_total = max(
-                _hist_med_anchor * 0.90,
-                min(_hist_med_anchor * 1.08, expected_total),
-            )
+        _anchor = trimmed_avg_val if trimmed_avg_val > 0 else median(series_totals)
+        # ±8% / ±10% trimmed-mean band — same intent as the old median anchor
+        # but driven by the robust center.
+        expected_total = max(
+            _anchor * 0.90,
+            min(_anchor * 1.08, expected_total),
+        )
+        # R2: hard IQR clamp (only when we have enough series to define one)
+        if len(series_totals) >= 4:
+            _s = sorted(series_totals)
+            n = len(_s)
+            q25 = _s[n // 4]
+            q75 = _s[(3 * n) // 4]
+            iqr_band = (q25, q75)
+            _pre_clip = expected_total
+            expected_total = max(q25, min(q75, expected_total))
+            if expected_total != _pre_clip:
+                iqr_clipped = True
+                logger.debug(
+                    f"[sim] IQR clip {_pre_clip:.1f} → {expected_total:.1f} "
+                    f"(IQR {q25}-{q75})"
+                )
 
     # --- NB Fit + Simulation ---
     # If opponent quality weighting is active, use weighted mean/variance
@@ -375,9 +421,32 @@ def run_simulation(
     sim_median = float(np.median(samples))
 
     # Over / Under / Push
-    over_prob  = float(np.mean(samples > line))
-    under_prob = float(np.mean(samples < line))
-    push_prob  = float(np.mean(samples == int(line)))
+    # Push is only physically possible when the line is an integer; for
+    # half-lines (e.g. 29.5) push must be 0. Old code did `int(line)` which
+    # truncated 29.5→29, so any 29-kill outcomes were miscounted as pushes
+    # and inflated push_prob (deflating UNDER).
+    raw_over_prob = float(np.mean(samples >  line))
+    under_prob    = float(np.mean(samples <  line))
+    if float(line).is_integer():
+        push_prob = float(np.mean(samples == int(line)))
+    else:
+        push_prob = 0.0
+
+    # ── R5 (translated): small-sample shrink toward book-implied probability ─
+    # Pulls the simulated OVER% toward 0.5238 when N_series < 8, full strength
+    # at 8+ series. Stops the model from issuing 70%-confidence calls off
+    # 3 BO3 series of data.
+    n_series_for_shrink = len(series_totals)
+    shrink_factor       = min(1.0, n_series_for_shrink / 8.0)
+    over_prob = shrink_factor * raw_over_prob + (1.0 - shrink_factor) * book_implied_prob
+    # Recompute under/push from the shrunk over_prob so they sum to 1.
+    under_prob = max(0.0, 1.0 - over_prob - push_prob)
+    # Defensive renormalize so (over, under, push) sums to exactly 1.0
+    _total = over_prob + under_prob + push_prob
+    if _total > 0:
+        over_prob  /= _total
+        under_prob /= _total
+        push_prob  /= _total
     # Percentile: what % of simulated totals fall AT OR BELOW the line
     # < 50 → model says lean OVER (line is below median projection)
     line_percentile = round(float(np.mean(samples <= line)) * 100, 1)
@@ -428,18 +497,22 @@ def run_simulation(
     sim_p75 = float(np.percentile(samples, 75))
     sim_p90 = float(np.percentile(samples, 90))
 
-    # --- Historical stats ---
-    hit_rate   = (
-        sum(1 for v in series_totals if v > line) / len(series_totals)
-        if series_totals else over_prob
-    )
+    # --- Historical stats (R6: push half-credit) ──────────────────────────
+    # Lines exactly at a player's median used to bias UNDER because pushes
+    # were dropped from the numerator. Counting them as 0.5 OVER fixes that.
+    if series_totals:
+        _overs  = sum(1 for v in series_totals if v >  line)
+        _pushes = sum(1 for v in series_totals if v == line)
+        hit_rate = (_overs + 0.5 * _pushes) / len(series_totals)
+    else:
+        hit_rate = over_prob
     hist_avg    = mean(series_totals) if series_totals else mean(stat_values) * 2
     hist_median = median(series_totals) if series_totals else median(stat_values) * 2
 
     # --- Grading ---
     edge = over_prob - 0.5
 
-    grade, recommendation, decision = calculate_grade(
+    grade, recommendation, decision, vote_tally = calculate_grade(
         edge=edge,
         over_prob=over_prob,
         hist_avg=hist_avg,
@@ -453,6 +526,7 @@ def run_simulation(
         stomp_via_rank=stomp_via_rank,
         book_implied_prob=book_implied_prob,
         series_totals=series_totals,
+        n_series=len(series_totals),
     )
 
     return {
@@ -517,6 +591,14 @@ def run_simulation(
         "outlier_series":         outlier_series,
         "avg_without_outlier":    avg_without,
         "med_without_outlier":    med_without,
+        # --- Anti-overestimation fields (R1, R2, R5, R7) ──
+        "trimmed_avg":            round(trimmed_avg_val, 2),
+        "sigma_mad":              round(sigma_mad_val, 2),
+        "raw_over_prob":          round(raw_over_prob * 100, 1),
+        "shrink_factor":          round(shrink_factor, 2),
+        "iqr_clipped":            iqr_clipped,
+        "iqr_band":               (round(iqr_band[0], 1), round(iqr_band[1], 1)) if iqr_band else None,
+        "vote_tally":             vote_tally,
     }
 
 
@@ -534,6 +616,7 @@ def calculate_grade(
     stomp_via_rank: bool = False,
     book_implied_prob: float = BOOK_IMPLIED_PROB,
     series_totals: list = None,
+    n_series: int = 0,
 ) -> tuple:
     """
     Evidence-stacking grade engine — v2.
@@ -636,6 +719,43 @@ def calculate_grade(
     else:
         decision = "PASS"
 
+    # ── R7: Strict gate + signal alignment ──────────────────────────────────
+    # Vote tally from the four sub-signals (s1=hit-rate, s2=median-gap,
+    # s3=trend, s4=sim-prob). +1 = OVER vote, -1 = UNDER vote, 0 = neutral.
+    over_votes  = sum(1 for s in (s1, s2, s3, s4) if s >  0)
+    under_votes = sum(1 for s in (s1, s2, s3, s4) if s <  0)
+    pass_reason: str | None = None
+
+    # 1. Sample size: need at least 5 series for any non-PASS verdict
+    if decision != "PASS" and n_series < 5:
+        pass_reason = f"sample-size gate (N={n_series}<5)"
+        decision = "PASS"
+
+    # 2. Edge size: need ≥ 7% directional edge vs book-implied
+    if decision != "PASS":
+        if decision == "OVER":
+            _dir_edge_check = (over_prob - book_implied_prob)
+        else:
+            _dir_edge_check = ((1.0 - over_prob) - book_implied_prob)
+        if _dir_edge_check < 0.07:
+            pass_reason = f"edge gate (|edge|={_dir_edge_check*100:.1f}%<7%)"
+            decision = "PASS"
+
+    # 3. Signal alignment: majority of sub-signals must point the same way
+    if decision == "OVER" and over_votes <= under_votes:
+        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
+        decision = "PASS"
+    elif decision == "UNDER" and under_votes <= over_votes:
+        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
+        decision = "PASS"
+
+    vote_tally = {
+        "s1": s1, "s2": s2, "s3": s3, "s4": s4,
+        "over_votes":  over_votes,
+        "under_votes": under_votes,
+        "pass_reason": pass_reason,
+    }
+
     # ── Grade scale — edge % vs -110 (52.38% implied) ────────────────────────
     # Documents define grade by edge vs book, NOT by raw evidence stack score.
     # Evidence stack drives DECISION only; grade number reflects betting value.
@@ -679,4 +799,4 @@ def calculate_grade(
         sign = "✅" if decision == "OVER" else "❌"
         rec  = f"{sign} {decision} — {grade_str}"
 
-    return grade_str, rec, decision
+    return grade_str, rec, decision, vote_tally

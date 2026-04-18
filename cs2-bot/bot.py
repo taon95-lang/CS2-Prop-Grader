@@ -1864,6 +1864,36 @@ def build_result_embed(
     )
     embed.add_field(name=f"📊 SIMULATION ({n_sims:,} RUNS)", value=sim_val, inline=False)
 
+    # ── Robustness panel (anti-overestimation discipline) ───────────────────
+    _trim_avg = result.get("trimmed_avg")
+    _sig_mad  = result.get("sigma_mad")
+    _shrink   = result.get("shrink_factor")
+    _raw_op   = result.get("raw_over_prob")
+    _iqr_clip = result.get("iqr_clipped", False)
+    _iqr_band = result.get("iqr_band")
+    _votes    = result.get("vote_tally") or {}
+    if _trim_avg is not None and _sig_mad is not None and _votes:
+        _ov, _uv = _votes.get("over_votes", 0), _votes.get("under_votes", 0)
+        _pass_reason = _votes.get("pass_reason")
+        _shrink_pct = int(round((1.0 if _shrink is None else _shrink) * 100))
+        _shrink_note = f"`{_shrink_pct}%`"
+        if _shrink and _shrink < 1.0 and _raw_op is not None:
+            _shrink_note += f"  (raw {_raw_op}% → {over_p}%)"
+        _iqr_str = "—"
+        if _iqr_band:
+            _clip_tag = " ⚓ clipped" if _iqr_clip else ""
+            _iqr_str = f"`{_iqr_band[0]}–{_iqr_band[1]}`{_clip_tag}"
+        _vote_arrow = "🟢 OVER" if _ov > _uv else ("🔴 UNDER" if _uv > _ov else "⚖️ split")
+        _vote_line  = f"`{_ov}🟢/{_uv}🔴` → {_vote_arrow}"
+        if _pass_reason:
+            _vote_line += f"  ·  ⏸️ {_pass_reason}"
+        robust_val = (
+            f"• **Trimmed Avg:** `{_trim_avg:.1f}`  ·  **MAD-σ:** `{_sig_mad:.1f}`  ·  **IQR:** {_iqr_str}\n"
+            f"• **Sample-shrink:** {_shrink_note}\n"
+            f"• **Sub-signals:** {_vote_line}"
+        )
+        embed.add_field(name="🛡️ ROBUSTNESS", value=robust_val, inline=False)
+
     # ── HLTV 90-Day Stats (compact inline) ────────────────────────────────────
     ps = result.get("period_stats") or {}
     if ps and any(ps.get(k) is not None for k in ("kpr", "rating", "kast", "adr")):
