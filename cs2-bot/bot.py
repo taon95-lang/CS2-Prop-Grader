@@ -3553,6 +3553,240 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         pass
 
 
+# ===========================================================================
+# VALORANT COMMANDS (vlr.gg data, kills only, last 10 BO3 series Maps 1+2)
+# ===========================================================================
+
+import valorant_scraper as _vlr  # noqa: E402
+
+VAL_DECISION_COLORS = {
+    "OVER":   0x2ECC71,
+    "UNDER":  0xE74C3C,
+    "PASS":   0x95A5A6,
+}
+
+
+def _build_valorant_embed(
+    player_name: str,
+    line: float,
+    info: dict,
+    sim: dict,
+    book_implied: float,
+) -> discord.Embed:
+    """Compact Valorant prop-grading embed (kills only)."""
+    decision = sim.get("decision", "PASS")
+    color    = VAL_DECISION_COLORS.get(decision, 0x7289DA)
+
+    # Group map_stats into series for display
+    series: dict = {}
+    for m in info["map_stats"]:
+        series.setdefault(m["match_id"], []).append(m)
+    series_list = list(series.values())  # newest-first
+
+    # Header projection words
+    if   decision == "OVER":  proj_word, proj_icon = "MORE", "✅"
+    elif decision == "UNDER": proj_word, proj_icon = "LESS", "❌"
+    else:                     proj_word, proj_icon = "NO BET", "⏸️"
+
+    # Confidence grade
+    over_p = sim.get("over_prob", 50.0)
+    edge   = sim.get("edge", 0)
+    confidence = min(99, max(1, int(50 + abs(edge) * 1.4)))
+    if   confidence >= 80: conf_chr = "A"
+    elif confidence >= 65: conf_chr = "B"
+    elif confidence >= 50: conf_chr = "C"
+    elif confidence >= 35: conf_chr = "D"
+    else:                  conf_chr = "F"
+
+    embed = discord.Embed(
+        title=f"{proj_icon}  {info['display_name']}  ·  {line:g} {sim['stat_type']}  ·  {decision}",
+        description=(
+            f"**Projection:** {proj_word} {line:g}  ·  "
+            f"**Confidence:** {conf_chr} ({confidence}/100)\n"
+            f"**Game:** Valorant  ·  **Source:** vlr.gg  ·  "
+            f"**Series:** {sim['n_series']}  ·  **Maps:** {sim['n_samples']}"
+        ),
+        color=color,
+    )
+
+    # Probability box
+    embed.add_field(
+        name="📊 Simulation (100K Monte Carlo)",
+        value=(
+            f"**OVER {line:g}:**  {sim['over_prob']:.1f}%\n"
+            f"**UNDER {line:g}:** {sim['under_prob']:.1f}%\n"
+            f"**Edge vs −110:** {sim['edge']:+.1f}%\n"
+            f"**Sim median:** {sim['sim_median']:.1f} kills  "
+            f"(σ {sim['sim_std']:.1f})"
+        ),
+        inline=False,
+    )
+
+    # Recent form
+    form_lines = []
+    for i, maps in enumerate(series_list[:10], 1):
+        total = sum(m["stat_value"] for m in maps)
+        per   = " + ".join(f"{m['stat_value']}" for m in maps)
+        form_lines.append(f"`{i:2d}.` **{total}** kills  ·  {per}")
+    embed.add_field(
+        name=f"🎯 Last {len(series_list)} BO3 Series (Maps 1 + 2)",
+        value="\n".join(form_lines) or "_no data_",
+        inline=False,
+    )
+
+    # Stats summary
+    embed.add_field(
+        name="📈 Historical (M1+M2 per series)",
+        value=(
+            f"**Avg:** {sim['hist_avg']:.1f}  ·  "
+            f"**Median:** {sim['hist_median']:.1f}  ·  "
+            f"**Hit-rate vs line:** {sim['hit_rate']:.0f}%\n"
+            f"**Ceiling:** {sim['ceiling']}  ·  "
+            f"**Floor:** {sim['floor']}  ·  "
+            f"**Stability:** {sim.get('stability_label', 'N/A')}"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(text="Valorant · vlr.gg · Last 10 BO3 · Maps 1 & 2 only · 100K sims")
+    return embed
+
+
+@bot.command(name="vgrade", aliases=["vg"])
+async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
+    """Grade a Valorant kills prop. Usage: !vgrade <player> <line>"""
+    if not player_name or not line:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Usage",
+            description=(
+                "**`!vgrade <player> <line> [odds?]`**\n\n"
+                "**Examples:**\n"
+                "`!vgrade tenz 32.5`\n"
+                "`!vgrade aspas 35.5 -110`\n\n"
+                "Pulls last 10 BO3 series (Maps 1 & 2 only) from vlr.gg, "
+                "runs 100K Monte Carlo, returns OVER/UNDER/PASS with confidence."
+            ),
+            color=0xFF4136,
+        ))
+        return
+
+    try:
+        line_f = float(line)
+    except ValueError:
+        await ctx.send(f"❌ `{line}` is not a valid line number.")
+        return
+
+    # Optional book odds
+    book_implied = 0.5238
+    for a in args:
+        m = re.match(r'^([+-])(\d{2,4})$', a)
+        if m:
+            v = int(a)
+            book_implied = (100 / (v + 100)) if v > 0 else (abs(v) / (abs(v) + 100))
+            break
+
+    msg = await ctx.send(f"🔎 Looking up `{player_name}` on vlr.gg…")
+    info = _vlr.get_player_info(player_name, n_series=10)
+    if not info or not info.get("map_stats"):
+        await msg.edit(content=f"❌ No Valorant data found for `{player_name}`.")
+        return
+
+    # Inject default rounds (Valorant: first to 13 → ~24 rounds typical)
+    map_stats = []
+    for m in info["map_stats"]:
+        mm = dict(m)
+        mm.setdefault("rounds", 24)
+        map_stats.append(mm)
+
+    sim = simulator.run_simulation(
+        map_stats=map_stats,
+        line=line_f,
+        stat_type="Kills",
+        favorite_prob=0.55,
+        book_implied_prob=book_implied,
+    )
+    if sim.get("error"):
+        await msg.edit(content=f"❌ Simulation error: {sim['error']}")
+        return
+
+    embed = _build_valorant_embed(player_name, line_f, info, sim, book_implied)
+    await msg.edit(content=None, embed=embed)
+
+
+@bot.command(name="vscout", aliases=["vs"])
+async def cmd_vscout(ctx, *, player_arg: str = ""):
+    """Show a Valorant player's last 10 BO3 series without grading."""
+    name = player_arg.strip()
+    if not name:
+        await ctx.send("Usage: `!vscout <player>`")
+        return
+    msg = await ctx.send(f"🔎 Scouting `{name}` on vlr.gg…")
+    info = _vlr.get_player_info(name, n_series=10)
+    if not info or not info.get("map_stats"):
+        await msg.edit(content=f"❌ No Valorant data found for `{name}`.")
+        return
+    series: dict = {}
+    for m in info["map_stats"]:
+        series.setdefault(m["match_id"], []).append(m)
+    totals = [sum(mm["stat_value"] for mm in maps) for maps in series.values()]
+    lines = []
+    for i, maps in enumerate(series.values(), 1):
+        total = sum(mm["stat_value"] for mm in maps)
+        per = " + ".join(f"{mm['stat_value']} ({mm['map_name']})" for mm in maps)
+        lines.append(f"`{i:2d}.` **{total}**  ·  {per}")
+    avg    = sum(totals) / len(totals)
+    median = sorted(totals)[len(totals) // 2]
+    embed = discord.Embed(
+        title=f"🎯 {info['display_name']} — Valorant Scout",
+        description=(
+            f"**Last {len(totals)} BO3 series (Maps 1 + 2)**\n"
+            f"Avg: **{avg:.1f}**  ·  Median: **{median}**  ·  "
+            f"High: **{max(totals)}**  ·  Low: **{min(totals)}**"
+        ),
+        color=0x9146FF,
+    )
+    embed.add_field(name="Series", value="\n".join(lines), inline=False)
+    embed.set_footer(text="Valorant · vlr.gg · Last 10 BO3 · Maps 1 & 2 only")
+    await msg.edit(content=None, embed=embed)
+
+
+@bot.command(name="vlines", aliases=["vl"])
+async def cmd_vlines(ctx, *, player_arg: str = ""):
+    """Suggest a few candidate kill lines for a Valorant player based on history."""
+    name = player_arg.strip()
+    if not name:
+        await ctx.send("Usage: `!vlines <player>`")
+        return
+    msg = await ctx.send(f"🔎 Computing lines for `{name}`…")
+    info = _vlr.get_player_info(name, n_series=10)
+    if not info or not info.get("map_stats"):
+        await msg.edit(content=f"❌ No Valorant data found for `{name}`.")
+        return
+    series: dict = {}
+    for m in info["map_stats"]:
+        series.setdefault(m["match_id"], []).append(m)
+    totals = sorted(sum(mm["stat_value"] for mm in s) for s in series.values())
+    n = len(totals)
+    if n == 0:
+        await msg.edit(content=f"❌ No data.")
+        return
+    p25 = totals[n // 4]
+    p50 = totals[n // 2]
+    p75 = totals[(3 * n) // 4]
+    embed = discord.Embed(
+        title=f"📐 {info['display_name']} — Suggested Lines (Valorant)",
+        description=(
+            f"Based on last {n} BO3 series (Maps 1 + 2):\n\n"
+            f"**Conservative line (p25):** `{p25 - 0.5:.1f}`\n"
+            f"**Median line (p50):**       `{p50 - 0.5:.1f}`\n"
+            f"**Aggressive line (p75):**   `{p75 - 0.5:.1f}`\n"
+        ),
+        color=0x9146FF,
+    )
+    embed.set_footer(text="Valorant · vlr.gg · Suggested PrizePicks-style lines")
+    await msg.edit(content=None, embed=embed)
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
