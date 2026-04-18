@@ -162,12 +162,21 @@ def _extract_game_blocks(html: str) -> list[tuple[str, str]]:
     return blocks
 
 
-def _player_kills_in_block(block: str, slug: str) -> Optional[int]:
+def _first_num(cell_html: str, *, allow_neg: bool = False) -> Optional[float]:
+    """Extract the first numeric value (int or %) from a vlr stat cell."""
+    txt = re.sub(r"<[^>]+>", " ", cell_html)
+    pattern = r"-?\d+\.?\d*" if allow_neg else r"\d+\.?\d*"
+    m = re.search(pattern, txt)
+    return float(m.group(0)) if m else None
+
+
+def _player_stats_in_block(block: str, slug: str) -> Optional[dict]:
     """
     Find the player's row in the first overview table of `block` and return
-    total kills (column index 4 → 'K' header).
+    a dict of all available per-map stats.
 
-    Cell format in vlr is "<both> <attack> <defense>" — we want the first int.
+    Column layout (after name/agent): R, ACS, K, D, A, +/–, KAST, ADR, HS%, FK, FD, +/–
+    Cell format = "<both> <attack> <defense>" — we use the "both" value.
     """
     table_m = re.search(
         r'<table[^>]+class="[^"]*wf-table-inset[^"]*"[^>]*>(.*?)</table>',
@@ -175,27 +184,67 @@ def _player_kills_in_block(block: str, slug: str) -> Optional[int]:
     )
     if not table_m:
         return None
-    table_html = table_m.group(1)
-    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_html, re.S)
+    rows = re.findall(r"<tr[^>]*>(.*?)</tr>", table_m.group(1), re.S)
     if len(rows) < 2:
         return None
 
     target_slug = slug.lower()
     for row in rows[1:]:
         href_m = re.search(r'href="/player/(\d+)/([^"]+)"', row)
-        if not href_m:
-            continue
-        if href_m.group(2).lower() != target_slug:
+        if not href_m or href_m.group(2).lower() != target_slug:
             continue
         tds = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
-        if len(tds) < 5:
+        if len(tds) < 13:
             return None
-        k_cell = re.sub(r"<[^>]+>", " ", tds[4])
-        nums = re.findall(r"\d+", k_cell)
-        if not nums:
-            return None
-        return int(nums[0])
+        return {
+            "rating":  _first_num(tds[2]),
+            "acs":     _first_num(tds[3]),
+            "kills":   _first_num(tds[4]),
+            "deaths":  _first_num(tds[5]),
+            "assists": _first_num(tds[6]),
+            "plus_minus": _first_num(tds[7], allow_neg=True),
+            "kast":    _first_num(tds[8]),
+            "adr":     _first_num(tds[9]),
+            "hs_pct":  _first_num(tds[10]),
+            "fk":      _first_num(tds[11]),
+            "fd":      _first_num(tds[12]),
+        }
     return None
+
+
+def _player_kills_in_block(block: str, slug: str) -> Optional[int]:
+    """Backwards-compat shim — returns just kills."""
+    s = _player_stats_in_block(block, slug)
+    if s is None or s.get("kills") is None:
+        return None
+    return int(s["kills"])
+
+
+def _map_rounds_in_block(block: str) -> int:
+    """
+    Return total rounds played on this map (e.g. "13-7" → 20).
+    Falls back to 24 if the score can't be parsed.
+    """
+    # vlr structure inside a vm-stats-game block:
+    #   ...team-name... <div class="score">13</div> ... <div class="score">7</div> ...
+    scores = re.findall(r'class="score"[^>]*>\s*(\d+)\s*<', block)
+    if len(scores) >= 2:
+        # Take the two largest — these are the team final scores
+        nums = sorted((int(s) for s in scores), reverse=True)[:2]
+        total = sum(nums)
+        if 12 <= total <= 60:  # sanity bound (Valorant: min 13-0=13, OT can stretch)
+            return total
+    # Fallback: scan first 600 chars after the data-game-id line for two integers
+    head = block[:1500]
+    head_text = re.sub(r"<[^>]+>", " ", head)
+    nums = [int(n) for n in re.findall(r"\b(\d{1,2})\b", head_text)]
+    cand = [n for n in nums if 0 <= n <= 25]
+    if len(cand) >= 2:
+        # First two are usually team final scores
+        total = cand[0] + cand[1]
+        if 12 <= total <= 60:
+            return total
+    return 24  # safe default for a non-OT Valorant map
 
 
 def _map_name_in_block(block: str) -> str:
@@ -293,31 +342,34 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
         if len(blocks) < 2:
             continue
         # Map 1 + Map 2 only
+        candidate_rows: list[dict] = []
+        skip_series = False
         for i, (gid, block) in enumerate(blocks[:2]):
-            kills = _player_kills_in_block(block, slug)
-            if kills is None:
-                # player wasn't in this match (e.g. roster change) — skip whole series
+            stats = _player_stats_in_block(block, slug)
+            if stats is None or stats.get("kills") is None:
                 logger.info(f"[vlr] {display} not in match {mid} — skipping series")
-                map_stats = [m for m in map_stats if m["match_id"] != mid]
+                skip_series = True
                 break
-            map_stats.append({
+            candidate_rows.append({
                 "match_id":   mid,
                 "map_num":    i + 1,
                 "map_name":   _map_name_in_block(block),
-                "stat_value": kills,
+                "rounds":     _map_rounds_in_block(block),
+                "stat_value": int(stats["kills"]),
+                # Full per-map stat dict (kept under "stats" for downstream aggregation)
+                "stats":      stats,
             })
-        else:
-            bo3_seen += 1
-            logger.info(
-                f"[vlr] series {bo3_seen} (match {mid}): "
-                + " + ".join(
-                    f"{m['stat_value']}({m['map_name']})"
-                    for m in map_stats[-2:]
-                )
-            )
+        if skip_series:
             continue
-        # if loop broke (player missing), don't count as a series
-        continue
+        map_stats.extend(candidate_rows)
+        bo3_seen += 1
+        logger.info(
+            f"[vlr] series {bo3_seen} (match {mid}): "
+            + " + ".join(
+                f"{m['stat_value']}K/{m['rounds']}r ({m['map_name']})"
+                for m in candidate_rows
+            )
+        )
 
     return {
         "player_id":    pid,
@@ -333,6 +385,62 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
 def get_player_recent_kills(name: str, n: int = 10) -> Optional[dict]:
     """Convenience alias matching CS2 scraper naming."""
     return get_player_info(name, stat_type="Kills", n_series=n)
+
+
+# ─────────────────────────── analytics aggregator ───────────────────────────
+
+def aggregate_stats(map_stats: list[dict]) -> dict:
+    """
+    Aggregate the per-map stats dicts into player-level analytics.
+
+    Returns dict with keys:
+        kpr   – kills per round       (rate)
+        dpr   – deaths per round
+        apr   – assists per round
+        kd    – kills / deaths ratio
+        acs   – avg ACS                (per map)
+        adr   – avg ADR
+        kast  – avg KAST %
+        hs_pct – avg HS%
+        rating – avg vlr rating
+        fk_rate / fd_rate – first-kill / first-death per round
+        fk_share – % of player's first-duel attempts won
+        n_maps, n_rounds
+    """
+    rows = [m for m in map_stats if m.get("stats")]
+    if not rows:
+        return {}
+
+    total_rounds = sum(m.get("rounds", 0) or 0 for m in rows)
+    total_kills  = sum((m["stats"].get("kills")  or 0) for m in rows)
+    total_deaths = sum((m["stats"].get("deaths") or 0) for m in rows)
+    total_assist = sum((m["stats"].get("assists") or 0) for m in rows)
+    total_fk     = sum((m["stats"].get("fk")     or 0) for m in rows)
+    total_fd     = sum((m["stats"].get("fd")     or 0) for m in rows)
+
+    def _avg(key: str) -> Optional[float]:
+        vals = [m["stats"].get(key) for m in rows if m["stats"].get(key) is not None]
+        return round(sum(vals) / len(vals), 2) if vals else None
+
+    fk_attempts = total_fk + total_fd
+    return {
+        "n_maps":   len(rows),
+        "n_rounds": total_rounds,
+        "kpr":      round(total_kills / total_rounds, 3) if total_rounds else None,
+        "dpr":      round(total_deaths / total_rounds, 3) if total_rounds else None,
+        "apr":      round(total_assist / total_rounds, 3) if total_rounds else None,
+        "kd":       round(total_kills / total_deaths, 2) if total_deaths else None,
+        "acs":      _avg("acs"),
+        "adr":      _avg("adr"),
+        "kast":     _avg("kast"),
+        "hs_pct":   _avg("hs_pct"),
+        "rating":   _avg("rating"),
+        "fk_rate":  round(total_fk / total_rounds, 3) if total_rounds else None,
+        "fd_rate":  round(total_fd / total_rounds, 3) if total_rounds else None,
+        "fk_share": round(100 * total_fk / fk_attempts, 1) if fk_attempts else None,
+        "total_kills":  total_kills,
+        "total_deaths": total_deaths,
+    }
 
 
 # ─────────────────────────── self-test ──────────────────────────────────────

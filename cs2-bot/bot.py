@@ -3648,6 +3648,43 @@ def _build_valorant_embed(
         inline=False,
     )
 
+    # ── Player analytics (vlr per-map aggregates) ────────────────────────────
+    agg = _vlr.aggregate_stats(info["map_stats"])
+    if agg:
+        rating_str = f"{agg['rating']:.2f}" if agg.get("rating") is not None else "—"
+        kd_str     = f"{agg['kd']:.2f}"      if agg.get("kd")     is not None else "—"
+        kpr_str    = f"{agg['kpr']:.2f}"     if agg.get("kpr")    is not None else "—"
+        dpr_str    = f"{agg['dpr']:.2f}"     if agg.get("dpr")    is not None else "—"
+        apr_str    = f"{agg['apr']:.2f}"     if agg.get("apr")    is not None else "—"
+        acs_str    = f"{agg['acs']:.0f}"     if agg.get("acs")    is not None else "—"
+        adr_str    = f"{agg['adr']:.0f}"     if agg.get("adr")    is not None else "—"
+        kast_str   = f"{agg['kast']:.0f}%"   if agg.get("kast")   is not None else "—"
+        hs_str     = f"{agg['hs_pct']:.0f}%" if agg.get("hs_pct") is not None else "—"
+        fk_str     = f"{agg['fk_rate']:.3f}" if agg.get("fk_rate") is not None else "—"
+        fd_str     = f"{agg['fd_rate']:.3f}" if agg.get("fd_rate") is not None else "—"
+        share_str  = f"{agg['fk_share']:.0f}%" if agg.get("fk_share") is not None else "—"
+
+        embed.add_field(
+            name="🎮 Player Analytics (last 10 series)",
+            value=(
+                f"**Rating** {rating_str}  ·  "
+                f"**ACS** {acs_str}  ·  "
+                f"**K/D** {kd_str}  ·  "
+                f"**ADR** {adr_str}  ·  "
+                f"**KAST** {kast_str}  ·  "
+                f"**HS%** {hs_str}\n"
+                f"**KPR** {kpr_str}  ·  "
+                f"**DPR** {dpr_str}  ·  "
+                f"**APR** {apr_str}  ·  "
+                f"**FK/r** {fk_str}  ·  "
+                f"**FD/r** {fd_str}  ·  "
+                f"**FK win%** {share_str}\n"
+                f"_Sample: {agg['n_maps']} maps · {agg['n_rounds']} rounds · "
+                f"{agg['total_kills']}K / {agg['total_deaths']}D total_"
+            ),
+            inline=False,
+        )
+
     embed.set_footer(text="Valorant · vlr.gg · Last 10 BO3 · Maps 1 & 2 only · 100K sims")
     return embed
 
