@@ -3558,6 +3558,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 # ===========================================================================
 
 import valorant_scraper as _vlr  # noqa: E402
+import prizepicks_valorant as _ppv  # noqa: E402
 
 VAL_DECISION_COLORS = {
     "OVER":   0x2ECC71,
@@ -3793,10 +3794,38 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
         ))
         return
 
+    # ── Pull live PrizePicks lines for this team ──────────────────────────
+    try:
+        team_lines = await asyncio.to_thread(_ppv.get_valorant_lines_for_team, team_slug)
+    except Exception as exc:
+        logger.warning(f"[vteam] PP fetch failed: {exc}")
+        team_lines = []
+
+    # Filter to MAPS 1-2 Kills (matches our scraper scope) and dedupe by player
+    pp_by_player: dict[str, dict] = {}
+    for it in team_lines:
+        if "kill" not in (it.get("stat_type") or "").lower():
+            continue
+        if "maps 1-2" not in (it.get("stat_type") or "").lower():
+            continue
+        if (it.get("line") is None) or it.get("stat_type", "").lower().endswith("(combo)"):
+            continue
+        nm = (it.get("player_name") or "").lower()
+        if nm and nm not in pp_by_player:
+            pp_by_player[nm] = it
+
+    using_real_lines = len(pp_by_player) > 0
+    line_source_label = (
+        f"📊 **Real PrizePicks lines** loaded for {len(pp_by_player)}/{len(roster)} players"
+        if using_real_lines
+        else "⚠️ No live PrizePicks lines for this team — falling back to synthetic median lines"
+    )
+
     await msg.edit(embed=discord.Embed(
         title=f"🎯 Grading {team_slug.upper()} — {len(roster)} players",
         description=(
-            f"Pulling last-10-BO3 data for each player and grading at their median series line. "
+            f"{line_source_label}\n\n"
+            f"Pulling last-10-BO3 data for each player and grading. "
             f"This usually takes ~20-40s per player."
         ),
         color=0x9146FF,
@@ -3815,15 +3844,24 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
         if not info or not info.get("map_stats"):
             continue
 
-        # Build series totals → pick a credible line at median - 0.5
+        # Build series totals
         series_map: dict = {}
         for m in info["map_stats"]:
             series_map.setdefault(m["match_id"], []).append(m["stat_value"])
         totals = sorted(sum(v) for v in series_map.values())
         if len(totals) < 4:
             continue
-        med = totals[len(totals) // 2]
-        line_f = float(med) - 0.5
+
+        # ── Choose the LINE: real PrizePicks line if available, else synthetic
+        resolved_name = (info.get("display_name") or p["slug"]).lower()
+        pp_match = pp_by_player.get(resolved_name) or pp_by_player.get(p["slug"].lower())
+        if pp_match:
+            line_f = float(pp_match["line"])
+            line_src = "PP"
+        else:
+            med = totals[len(totals) // 2]
+            line_f = float(med) - 0.5
+            line_src = "synthetic"
 
         map_stats = []
         for m in info["map_stats"]:
@@ -3862,6 +3900,7 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
         graded.append({
             "name":      info.get("display_name") or p["slug"],
             "line":      line_f,
+            "line_src":  line_src,
             "decision":  decision,
             "edge_pct":  abs(sim.get("over_prob", 50) - 50),
             "conf":      conf,
@@ -3900,8 +3939,9 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
             icon, dec_str, ev = "⏸️", "PASS", 0
         ev_str = f"{'+' if (ev or 0) >= 0 else ''}{(ev or 0):.3f}u"
         trend_arrow = "🔥" if g["trend"] >= 8 else ("🧊" if g["trend"] <= -8 else "➖")
+        line_badge = " 📊PP" if g.get("line_src") == "PP" else " ⚙️syn"
         lines.append(
-            f"`#{i}` {icon} **{g['name']}** {g['role']}\n"
+            f"`#{i}` {icon} **{g['name']}** {g['role']}{line_badge}\n"
             f"   → `{dec_str}`  ·  Conf **{g['conf']}/100**  ·  Edge **{g['edge_pct']:.1f}%**  "
             f"·  Hit `{g['hit_rate']:.0f}%`  ·  Avg `{g['hist_avg']:.1f}`  ·  EV `{ev_str}`  {trend_arrow}"
         )
@@ -3929,13 +3969,14 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
 
 @bot.command(name="vgrade", aliases=["vg"])
 async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
-    """Grade a Valorant kills prop. Usage: !vgrade <player> <line>"""
-    if not player_name or not line:
+    """Grade a Valorant kills prop. Usage: !vgrade <player> [line]"""
+    if not player_name:
         await ctx.send(embed=discord.Embed(
             title="❌ Usage",
             description=(
-                "**`!vgrade <player> <line> [odds?]`**\n\n"
+                "**`!vgrade <player> [line] [odds?]`**\n\n"
                 "**Examples:**\n"
+                "`!vgrade tenz`         ← auto-fetches live PrizePicks line\n"
                 "`!vgrade tenz 32.5`\n"
                 "`!vgrade aspas 35.5 -110`\n\n"
                 "Pulls last 10 BO3 series (Maps 1 & 2 only) from vlr.gg, "
@@ -3945,11 +3986,35 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
         ))
         return
 
-    try:
-        line_f = float(line)
-    except ValueError:
-        await ctx.send(f"❌ `{line}` is not a valid line number.")
-        return
+    pp_auto = False
+    line_f: float | None = None
+    if line is not None:
+        try:
+            line_f = float(line)
+        except ValueError:
+            # Maybe user passed odds in the line slot — try as odds, fall through to auto-line
+            args = (line, *args)
+            line_f = None
+    if line_f is None:
+        # Auto-fetch live PrizePicks line for MAPS 1-2 Kills
+        try:
+            pp = await asyncio.to_thread(_ppv.get_valorant_player_line, player_name, "MAPS 1-2 Kills")
+        except Exception as exc:
+            logger.warning(f"[vgrade] PP auto-fetch failed: {exc}")
+            pp = None
+        if pp and pp.get("line") is not None:
+            line_f = float(pp["line"])
+            pp_auto = True
+        else:
+            await ctx.send(embed=discord.Embed(
+                title="❌ No Line Provided",
+                description=(
+                    f"No live PrizePicks `MAPS 1-2 Kills` line found for **{player_name}**.\n"
+                    f"Please provide a line: `!vgrade {player_name} 28.5`"
+                ),
+                color=0xFF4136,
+            ))
+            return
 
     # Optional book odds
     book_implied = 0.5238
@@ -3985,7 +4050,170 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
         return
 
     embed = _build_valorant_embed(player_name, line_f, info, sim, book_implied)
+    if pp_auto:
+        existing_footer = embed.footer.text or ""
+        embed.set_footer(text=f"📊 Live PrizePicks line auto-fetched · {existing_footer}")
     await msg.edit(content=None, embed=embed)
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# !vpp — grade the entire live Valorant PrizePicks slate
+# ───────────────────────────────────────────────────────────────────────────
+
+@bot.command(name="vpp")
+async def cmd_vpp(ctx, *, filter_arg: str = ""):
+    """
+    !vpp                  — list/grade ALL live Valorant PrizePicks props (top 15 by edge)
+    !vpp <Team>           — only props for a given team
+    !vpp refresh          — bust the cache and pull fresh
+    """
+    if filter_arg.strip().lower() == "refresh":
+        _ppv.invalidate_cache()
+        await ctx.send(embed=discord.Embed(
+            title="🔄 Cache Cleared",
+            description="Next `!vpp` pulls fresh PrizePicks Valorant data.",
+            color=0x9146FF,
+        ))
+        return
+
+    msg = await ctx.send(embed=discord.Embed(
+        title="📡 Fetching Valorant PrizePicks Slate…",
+        description="Scraping live PrizePicks board through proxy (~10-20s)…",
+        color=0x9146FF,
+    ))
+
+    try:
+        all_props = await asyncio.to_thread(_ppv.get_valorant_lines)
+    except Exception as exc:
+        await msg.edit(embed=discord.Embed(
+            title="❌ Slate Fetch Failed",
+            description=f"`{str(exc)[:200]}`",
+            color=0xFF4136,
+        )); return
+
+    # Keep MAPS 1-2 Kills only (matches our scraper scope)
+    props = [
+        p for p in all_props
+        if "kill" in (p.get("stat_type") or "").lower()
+        and "maps 1-2" in (p.get("stat_type") or "").lower()
+        and not (p.get("stat_type") or "").lower().endswith("(combo)")
+    ]
+    if filter_arg.strip():
+        nm = filter_arg.strip().lower().replace(" ", "")
+        props = [
+            p for p in props
+            if nm in (p.get("player_team") or "").lower().replace(" ", "")
+            or nm in (p.get("player_name") or "").lower()
+        ]
+    if not props:
+        await msg.edit(embed=discord.Embed(
+            title="📭 No Props Found",
+            description="No live Valorant `MAPS 1-2 Kills` props match." +
+                        (f" Filter: `{filter_arg}`" if filter_arg else ""),
+            color=0xFFDC00,
+        )); return
+
+    await msg.edit(embed=discord.Embed(
+        title=f"🎯 Grading {len(props)} Valorant Props",
+        description=f"Running 100K Monte Carlo on each player. ETA ~{len(props)*15}s.",
+        color=0x9146FF,
+    ))
+
+    import statistics as _stats
+    graded: list[dict] = []
+    for prop in props:
+        pname = prop["player_name"]
+        line_f = float(prop["line"])
+        try:
+            info = await asyncio.to_thread(_vlr.get_player_info, pname, 10)
+        except Exception:
+            continue
+        if not info or not info.get("map_stats"):
+            continue
+        series_map: dict = {}
+        for m in info["map_stats"]:
+            series_map.setdefault(m["match_id"], []).append(m["stat_value"])
+        totals = [sum(v) for v in series_map.values()]
+        if len(totals) < 4:
+            continue
+        ms = []
+        for m in info["map_stats"]:
+            mm = dict(m); mm.setdefault("rounds", 24); ms.append(mm)
+        try:
+            sim = simulator.run_simulation(map_stats=ms, line=line_f, stat_type="Kills",
+                                           favorite_prob=0.55, book_implied_prob=0.5238)
+        except Exception:
+            continue
+        if sim.get("error"):
+            continue
+        decision = sim.get("decision", "PASS")
+        edge_signed = (sim.get("over_prob", 50) - 50) / 100
+        s_avg = sum(totals)/len(totals)
+        s_std = _stats.stdev(totals) if len(totals) > 1 else 0.0
+        _, _, trend_pct = _vlr.split_recent_vs_older(info["map_stats"], 3)
+        conf = _vlr.confidence_score(
+            edge=edge_signed, hit_rate=(sim.get("hit_rate", 0) or 0)/100,
+            n_series=len(totals), stability_std=s_std, sample_avg=s_avg,
+            trend_pct=trend_pct, decision=decision)
+        graded.append({
+            "name":     info.get("display_name") or pname,
+            "team":     prop.get("player_team", ""),
+            "line":     line_f,
+            "decision": decision,
+            "edge_pct": abs(sim.get("over_prob", 50) - 50),
+            "conf":     conf,
+            "score":    conf * (1 + abs(sim.get("over_prob", 50) - 50)/100),
+            "hit_rate": sim.get("hit_rate", 0),
+            "hist_avg": sim.get("hist_avg", 0),
+            "ev_over":  sim.get("ev_over", 0),
+            "ev_under": sim.get("ev_under", 0),
+            "trend":    trend_pct,
+        })
+
+    if not graded:
+        await msg.edit(embed=discord.Embed(
+            title="❌ No Gradeable Props",
+            description="None of the props could be graded (vlr.gg lookups failed).",
+            color=0xFF4136,
+        )); return
+
+    actionable = [g for g in graded if g["decision"] in ("OVER", "UNDER")]
+    actionable.sort(key=lambda g: g["score"], reverse=True)
+    top = actionable[:15]
+
+    if not top:
+        await msg.edit(embed=discord.Embed(
+            title="⏸️ No Actionable Plays",
+            description=f"All {len(graded)} props graded PASS. Sit this slate out.",
+            color=0xFFDC00,
+        )); return
+
+    rows = []
+    for i, g in enumerate(top, 1):
+        if g["decision"] == "OVER":
+            icon, dec_str, ev = "✅", f"OVER {g['line']:.1f}", g["ev_over"]
+        else:
+            icon, dec_str, ev = "❌", f"UNDER {g['line']:.1f}", g["ev_under"]
+        ev_str = f"{'+' if (ev or 0) >= 0 else ''}{(ev or 0):.3f}u"
+        trend = "🔥" if g["trend"] >= 8 else ("🧊" if g["trend"] <= -8 else "➖")
+        rows.append(
+            f"`#{i}` {icon} **{g['name']}** ({g['team']})\n"
+            f"   → `{dec_str}`  Conf **{g['conf']}/100**  Edge **{g['edge_pct']:.1f}%**  "
+            f"Hit `{g['hit_rate']:.0f}%`  Avg `{g['hist_avg']:.1f}`  EV `{ev_str}` {trend}"
+        )
+
+    embed = discord.Embed(
+        title=f"🎯 Valorant PrizePicks Slate — Top {len(top)} Plays",
+        description=(
+            f"📊 Graded **{len(graded)}** live props · "
+            f"🏆 **{len(actionable)} actionable** (OVER/UNDER) · "
+            f"⏸️ {len(graded)-len(actionable)} PASS\n\n"
+            + "\n\n".join(rows)
+        ),
+        color=0x9146FF,
+    )
+    embed.set_footer(text="Valorant · Live PrizePicks lines · Ranked by Conf × (1+Edge) · 100K sims")
+    await msg.edit(embed=embed)
 
 
 @bot.command(name="vscout", aliases=["vs"])
