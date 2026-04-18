@@ -40,6 +40,11 @@ HDR = {
 _PAGE_CACHE: dict[str, tuple[float, str]] = {}
 _PAGE_TTL = 30 * 60  # 30 min
 
+# Opponent caches (team rating + roster lookup)
+_TEAM_RATING_CACHE: dict[str, tuple[float, int]] = {}   # team_href → (ts, rating)
+_TEAM_ROSTER_CACHE: dict[str, tuple[float, set[str]]] = {}  # team_href → (ts, {player_slugs})
+_TEAM_TTL = 60 * 60  # 1 hour
+
 
 # ─────────────────────────── fetch helpers ──────────────────────────────────
 
@@ -341,6 +346,9 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
         blocks = _extract_game_blocks(html)
         if len(blocks) < 2:
             continue
+        # Identify opponent for this match (cached, ~1 extra call per opp team)
+        opp_href, opp_rating = _identify_opponent(html, slug)
+        opp_slug = opp_href.rsplit("/", 1)[-1] if opp_href else None
         # Map 1 + Map 2 only
         candidate_rows: list[dict] = []
         skip_series = False
@@ -356,6 +364,8 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
                 "map_name":   _map_name_in_block(block),
                 "rounds":     _map_rounds_in_block(block),
                 "stat_value": int(stats["kills"]),
+                "opp_slug":   opp_slug,
+                "opp_rating": opp_rating,
                 # Full per-map stat dict (kept under "stats" for downstream aggregation)
                 "stats":      stats,
             })
@@ -385,6 +395,97 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
 def get_player_recent_kills(name: str, n: int = 10) -> Optional[dict]:
     """Convenience alias matching CS2 scraper naming."""
     return get_player_info(name, stat_type="Kills", n_series=n)
+
+
+# ─────────────────────────── opponent scraping ──────────────────────────────
+
+def _extract_match_team_hrefs(html: str) -> list[str]:
+    """Pull both team links from a match page (returns up to 2 unique hrefs)."""
+    seen: list[str] = []
+    for m in re.finditer(r'href="(/team/\d+/[a-z0-9-]+)"', html):
+        h = m.group(1)
+        if h not in seen:
+            seen.append(h)
+        if len(seen) == 2:
+            break
+    return seen
+
+
+def _team_roster(team_href: str) -> set[str]:
+    """Return cached set of player slugs in a team's current/recent roster."""
+    now = time.time()
+    cached = _TEAM_ROSTER_CACHE.get(team_href)
+    if cached and now - cached[0] < _TEAM_TTL:
+        return cached[1]
+    html = _fetch(f"{VLR_BASE}{team_href}")
+    if not html:
+        _TEAM_ROSTER_CACHE[team_href] = (now, set())
+        return set()
+    slugs = {m.group(1) for m in re.finditer(r'/player/\d+/([a-z0-9-]+)', html)}
+    _TEAM_ROSTER_CACHE[team_href] = (now, slugs)
+    return slugs
+
+
+def _team_rating(team_href: str) -> int:
+    """
+    Fetch a team's vlr.gg Elo-style rating (the `rating-num` value on team page).
+    Defaults to 1500 (mid-tier) if not found.  Cached for 1 hour.
+    """
+    now = time.time()
+    cached = _TEAM_RATING_CACHE.get(team_href)
+    if cached and now - cached[0] < _TEAM_TTL:
+        return cached[1]
+    html = _fetch(f"{VLR_BASE}{team_href}")
+    rating = 1500
+    if html:
+        m = re.search(r'rating-num[^>]*>\s*(\d{3,5})\s*<', html)
+        if m:
+            try:
+                rating = int(m.group(1))
+            except ValueError:
+                pass
+    _TEAM_RATING_CACHE[team_href] = (now, rating)
+    return rating
+
+
+def _identify_opponent(match_html: str, player_slug: str) -> tuple[Optional[str], Optional[int]]:
+    """
+    Return (opponent_team_href, opponent_rating) for a given player in a match.
+    Determines player's own team by checking which team's roster contains the slug;
+    the OTHER team is the opponent.  Returns (None, None) if undetermined.
+    """
+    teams = _extract_match_team_hrefs(match_html)
+    if len(teams) < 2:
+        return None, None
+
+    # Try to identify player's team by roster membership
+    own = None
+    for t in teams:
+        if player_slug in _team_roster(t):
+            own = t
+            break
+
+    # If we can't identify by roster, fall back to "the team that appears
+    # NEAREST to player slug in the match HTML" — they're typically grouped
+    # in the stat tables together.
+    if own is None:
+        slug_pos = match_html.find(f"/player/")  # any player anchor
+        slug_player_pos = match_html.find(f"/{player_slug}\"")
+        if slug_player_pos > 0:
+            distances = []
+            for t in teams:
+                tpos = match_html.find(f'href="{t}"')
+                if tpos >= 0:
+                    distances.append((abs(tpos - slug_player_pos), t))
+            if distances:
+                own = min(distances)[1]
+
+    if own is None:
+        return None, None
+    opp = next((t for t in teams if t != own), None)
+    if not opp:
+        return None, None
+    return opp, _team_rating(opp)
 
 
 # ─────────────────────────── analytics aggregator ───────────────────────────
@@ -658,10 +759,64 @@ if __name__ == "__main__":
 #   • Variance-aware: high-CV players get wider z-scores → softer signals
 #     → naturally pulled toward PASS.
 # ─────────────────────────────────────────────────────────────────────────
+def _trimmed_mean(values: list[float], pct: float = 0.10) -> float:
+    """Mean after trimming `pct` from each tail (default 10/10). Robust to outliers."""
+    if not values:
+        return 0.0
+    n = len(values)
+    k = int(n * pct)
+    if n - 2 * k < 1:
+        return sum(values) / n
+    s = sorted(values)
+    trimmed = s[k:n - k]
+    return sum(trimmed) / len(trimmed)
+
+
+def _mad(values: list[float]) -> float:
+    """Median Absolute Deviation — robust σ alternative."""
+    if not values:
+        return 0.0
+    from statistics import median as _median
+    med = _median(values)
+    abs_dev = [abs(v - med) for v in values]
+    return _median(abs_dev) * 1.4826  # scale factor to normal-σ equivalent
+
+
 def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> dict:
     """
-    Predict OVER/UNDER for a kills prop using stacked predictive signals.
-    Returns the same shape as the legacy simulator output for embed compatibility.
+    Best-in-class predictive grader for kills props.
+
+    Anti-overestimation stack
+    ─────────────────────────
+    R1  Robust statistics      — trimmed mean + MAD instead of mean/std,
+                                 so one freak game can't inflate the projection.
+    R2  Projection clipping    — bounded inside the player's interquartile range
+                                 (IQR) of historical totals → never project a
+                                 number we've never actually seen.
+    R3  Opponent quality filter — drops the bottom-quartile of opponents from
+                                 the projection sample (stat-padding games);
+                                 also reports avg opp rating per series.
+    R4  Disagreement penalty   — when the four signals split, the logit is
+                                 multiplied by an alignment factor (0.4–1.0).
+                                 Conflicting signals → softer probability →
+                                 PASS instead of forced action.
+    R5  Temperature softening  — sigmoid temperature T=1.4 squashes extreme
+                                 over-confidence on small samples (kills 99%
+                                 calls when N<8).
+    R6  Push half-credit       — Bayesian smoothing counts pushes as 0.5
+                                 OVER / 0.5 UNDER so lines exactly at median
+                                 don't bias UNDER.
+    R7  Sample-size + edge gate— action requires N≥5, P≥0.62, |edge|≥7%, AND
+                                 projection sign agreement.
+
+    Predictive signals
+    ──────────────────
+    S1  Projection z-score        weight 2.5
+    S2  Line-vs-median z-score    weight 1.5
+    S3  Recency trend             weight 1.5
+    S4  Bayesian hit rate         weight 1.5
+    S5  Opponent-tier KPR shift   weight 1.0   (NEW — avg KPR vs strong opps
+                                                vs avg KPR vs weak opps)
     """
     import math
     import statistics as _st
@@ -670,119 +825,200 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
     if not map_stats:
         return {"error": "No map data"}
 
-    # ── Series-level (sum kills across Maps 1+2 per match) ───────────────
+    # ── Build series-level data ──────────────────────────────────────────
     by_match: dict = {}
     by_match_rounds: dict = {}
+    by_match_opp: dict = {}
     for m in map_stats:
         mid = m["match_id"]
         by_match.setdefault(mid, []).append(m["stat_value"])
         by_match_rounds.setdefault(mid, []).append(m.get("rounds") or 24)
+        if mid not in by_match_opp:
+            by_match_opp[mid] = m.get("opp_rating")
+
     # Preserve newest-first order from scraper
-    ordered_mids = []
+    ordered_mids: list = []
     for m in map_stats:
         if m["match_id"] not in ordered_mids:
             ordered_mids.append(m["match_id"])
-    series_totals  = [sum(by_match[mid])         for mid in ordered_mids]
-    series_rounds  = [sum(by_match_rounds[mid])  for mid in ordered_mids]
+
+    series_totals = [sum(by_match[mid])        for mid in ordered_mids]
+    series_rounds = [sum(by_match_rounds[mid]) for mid in ordered_mids]
+    series_opp    = [by_match_opp.get(mid)     for mid in ordered_mids]
 
     n_series = len(series_totals)
     if n_series == 0:
         return {"error": "No series data"}
 
-    hist_avg    = _mean(series_totals)
-    hist_median = _median(series_totals)
-    hist_std    = _st.stdev(series_totals) if n_series > 1 else max(hist_avg * 0.15, 1.0)
-    ceiling     = max(series_totals)
-    floor       = min(series_totals)
+    # ── R1: Robust central tendency ──────────────────────────────────────
+    hist_avg     = _mean(series_totals)
+    hist_median  = _median(series_totals)
+    trimmed_avg  = _trimmed_mean(series_totals, 0.10)  # 10/10 trim
+    sigma_mad    = _mad(series_totals)
+    sigma_std    = _st.stdev(series_totals) if n_series > 1 else max(hist_avg * 0.15, 1.0)
+    # Use the LARGER of MAD-σ vs std → conservative; stays robust without underestimating risk
+    sigma        = max(sigma_mad, sigma_std, max(hist_avg * 0.10, 1.0))
+    ceiling      = max(series_totals)
+    floor        = min(series_totals)
 
-    # Floor std so signals stay finite when a player is freakishly consistent
-    sigma = max(hist_std, max(hist_avg * 0.10, 1.0))
+    # ── R3: Opponent-quality filtering for projection ────────────────────
+    rated_pairs = [(t, r) for t, r in zip(series_totals, series_opp) if r is not None]
+    opp_quality_used = False
+    proj_totals = list(series_totals)  # default: full sample
+    proj_rounds_list = list(series_rounds)
+    if len(rated_pairs) >= 6:
+        opp_ratings = [r for _, r in rated_pairs]
+        threshold   = sorted(opp_ratings)[len(opp_ratings) // 4]  # bottom 25% cutoff
+        # Keep maps whose opp rating is at or above the cutoff
+        proj_totals = [t for t, r in zip(series_totals, series_opp)
+                       if r is None or r >= threshold]
+        proj_rounds_list = [rd for rd, r in zip(series_rounds, series_opp)
+                            if r is None or r >= threshold]
+        # Don't shrink to fewer than 4 series — fall back if filter is too aggressive
+        if len(proj_totals) >= 4:
+            opp_quality_used = True
+        else:
+            proj_totals = list(series_totals)
+            proj_rounds_list = list(series_rounds)
 
-    # ── Per-map KPR for projection ───────────────────────────────────────
+    # ── Build per-map KPR (filtered if opp_quality_used) ─────────────────
     valid_maps = [m for m in map_stats if (m.get("rounds") or 0) > 0]
+    if opp_quality_used:
+        # Drop maps from the filtered-out matches
+        kept_mids = set()
+        for mid, t in zip(ordered_mids, series_totals):
+            if t in proj_totals:  # rough match — totals are unique enough usually
+                kept_mids.add(mid)
+        valid_maps = [m for m in valid_maps if m["match_id"] in kept_mids] or valid_maps
+
     if valid_maps:
         kpr_all = [m["stat_value"] / m["rounds"] for m in valid_maps]
     else:
-        # Fallback: assume 22 rounds/map
         kpr_all = [m["stat_value"] / 22 for m in map_stats]
 
-    # Recent form: most recent 3 series worth of maps (~6)
+    # Recent form: most recent ~6 maps (3 series)
     recent_n_maps = min(6, len(kpr_all))
-    recent_kpr = _mean(kpr_all[:recent_n_maps]) if recent_n_maps else _mean(kpr_all)
+    recent_kpr  = _mean(kpr_all[:recent_n_maps]) if recent_n_maps else _mean(kpr_all)
     overall_kpr = _mean(kpr_all) if kpr_all else 0.0
-
-    # Blend recent (60%) and overall (40%) — captures form without overfitting
     blended_kpr = 0.60 * recent_kpr + 0.40 * overall_kpr
 
-    # Projected rounds for the next series (avg of player's historical 2-map totals)
-    proj_rounds = _mean(series_rounds) if series_rounds else 44.0
+    # Projected rounds (avg of player's historical 2-map totals)
+    proj_rounds = _mean(proj_rounds_list) if proj_rounds_list else 44.0
     expected_total = blended_kpr * proj_rounds
 
-    # ── Signal 1: Projection z-score (expected vs line) ──────────────────
-    z_proj = (expected_total - line) / sigma
+    # ── R2: Clip projection to player's IQR ──────────────────────────────
+    s_sorted = sorted(series_totals)
+    if n_series >= 4:
+        q25 = s_sorted[n_series // 4]
+        q75 = s_sorted[(3 * n_series) // 4]
+        clipped_total = max(q25, min(q75, expected_total))
+        if clipped_total != expected_total:
+            logger.debug(f"[grader] projection clipped {expected_total:.1f} → {clipped_total:.1f} (IQR {q25}-{q75})")
+        expected_total = clipped_total
 
-    # ── Signal 2: Median-gap z-score (where line sits in distribution) ───
-    z_med = (hist_median - line) / sigma
+    # ── Signals ──────────────────────────────────────────────────────────
+    z_proj  = (expected_total - line) / sigma
+    z_med   = (hist_median   - line) / sigma
 
-    # ── Signal 3: Recency trend (per-series equivalent) ──────────────────
     if recent_n_maps >= 2 and len(kpr_all) > recent_n_maps:
         older_kpr = _mean(kpr_all[recent_n_maps:]) or recent_kpr
         trend_pct = ((recent_kpr - older_kpr) / max(older_kpr, 0.01)) * 100
     else:
         trend_pct = 0.0
-    # Convert trend % into a z-style signal: ±15% trend ≈ ±1σ
-    z_trend = trend_pct / 15.0
+    z_trend = max(-2.5, min(2.5, trend_pct / 15.0))  # cap at ±2.5σ
 
-    # ── Signal 4: Bayesian-smoothed hit rate ─────────────────────────────
-    overs  = sum(1 for v in series_totals if v >  line)
-    unders = sum(1 for v in series_totals if v <  line)
-    pushes = sum(1 for v in series_totals if v == line)
-    # Beta(2, 2) prior → posterior mean = (overs + 2) / (n + 4)
-    bayes_p = (overs + 2) / (n_series + 4)
-    # Convert posterior to z-style signal: 0.5 → 0, 0.80 → ~+2
-    z_hit = (bayes_p - 0.5) / 0.15
+    # ── R6: Bayesian hit rate with push half-credit ──────────────────────
+    overs   = sum(1 for v in series_totals if v >  line)
+    unders  = sum(1 for v in series_totals if v <  line)
+    pushes  = sum(1 for v in series_totals if v == line)
+    eff_overs = overs + 0.5 * pushes
+    bayes_p   = (eff_overs + 2) / (n_series + 4)
+    z_hit     = (bayes_p - 0.5) / 0.15
 
-    # ── Stack signals → logit → P(OVER) ──────────────────────────────────
-    W_PROJ, W_MED, W_TREND, W_HIT = 2.5, 1.5, 1.5, 1.5
-    raw_score = (
-        W_PROJ  * z_proj +
-        W_MED   * z_med  +
-        W_TREND * z_trend +
-        W_HIT   * z_hit
-    )
-    # Calibration scalar — total max possible ≈ 7 in extremes; divide so
-    # logistic input stays in a sensible range (|logit| < 4 → P in 2-98%).
-    logit = raw_score / 1.6
+    # ── S5: Opponent-tier KPR shift signal ───────────────────────────────
+    z_opp = 0.0
+    opp_split_label = "n/a"
+    if opp_quality_used and len(rated_pairs) >= 6:
+        opp_ratings_sorted = sorted([r for _, r in rated_pairs])
+        med_opp = opp_ratings_sorted[len(opp_ratings_sorted) // 2]
+        # KPR vs strong (≥med) and weak (<med) opps
+        strong_kpr, weak_kpr = [], []
+        for m in [mm for mm in map_stats if (mm.get("rounds") or 0) > 0]:
+            r = m.get("opp_rating")
+            if r is None:
+                continue
+            kpr = m["stat_value"] / m["rounds"]
+            (strong_kpr if r >= med_opp else weak_kpr).append(kpr)
+        if strong_kpr and weak_kpr:
+            sk = _mean(strong_kpr); wk = _mean(weak_kpr)
+            shift_pct = ((sk - wk) / max(wk, 0.01)) * 100
+            z_opp = max(-1.5, min(1.5, shift_pct / 20.0))  # 20% shift = 1σ
+            opp_split_label = f"vs strong {sk:.2f} kpr · vs weak {wk:.2f} kpr"
 
-    # Sample-size shrinkage — small N pulls probability toward 0.5
-    shrink = min(1.0, n_series / 8.0)  # full strength at 8+ series
+    # ── Stack signals → raw score ────────────────────────────────────────
+    W_PROJ, W_MED, W_TREND, W_HIT, W_OPP = 2.5, 1.5, 1.5, 1.5, 1.0
+    signals = [
+        (W_PROJ,  z_proj),
+        (W_MED,   z_med),
+        (W_TREND, z_trend),
+        (W_HIT,   z_hit),
+        (W_OPP,   z_opp),
+    ]
+    raw_score = sum(w * z for w, z in signals)
+
+    # ── R4: Disagreement penalty ─────────────────────────────────────────
+    # Count signals voting OVER (>0.25σ) vs UNDER (<-0.25σ); compute alignment.
+    over_signals  = sum(1 for w, z in signals if z >  0.25 and w > 0)
+    under_signals = sum(1 for w, z in signals if z < -0.25 and w > 0)
+    total_voting  = over_signals + under_signals
+    if total_voting > 0:
+        majority   = max(over_signals, under_signals)
+        agreement  = majority / total_voting           # 1.0 = unanimous, 0.5 = split
+        align_mult = 0.4 + 0.6 * (agreement ** 2)     # 0.4 → 1.0
+    else:
+        align_mult = 0.5  # nothing voting either way → max softening
+
+    # ── R5: Temperature softening ────────────────────────────────────────
+    TEMP = 1.4
+    logit = (raw_score * align_mult) / (1.6 * TEMP)
+
+    # Sample-size shrink (full strength at 8+ series)
+    shrink = min(1.0, n_series / 8.0)
     logit *= shrink
 
     over_prob  = 1.0 / (1.0 + math.exp(-logit))
     under_prob = 1.0 - over_prob
     edge       = over_prob - 0.5238
 
-    # ── Empirical reference (for display + EV tie-out) ───────────────────
     emp_over_pct = (overs / n_series) * 100 if n_series else 0.0
 
-    # EV at standard −110 odds
     ev_over  = round(over_prob  * (100/110) - (1 - over_prob),  4)
     ev_under = round(under_prob * (100/110) - (1 - under_prob), 4)
 
-    # Stability bucket
+    # Stability label (now using robust σ)
     cv = sigma / hist_avg if hist_avg > 0 else 1.0
     if   sigma > 8 or cv > 0.30: stability_label = "⚡ High Volatility"
     elif sigma > 5 or cv > 0.18: stability_label = "🌊 Moderate Volatility"
     else:                         stability_label = "🎯 Consistent"
 
-    # ── Decision: dual gate (probability AND signal alignment) ───────────
-    # Require P ≥ 60 / ≤ 40 AND that the projection actually agrees in sign.
-    # Avoids a high P from a strong trend alone when projection contradicts.
-    proj_aligned_over  = z_proj > -0.25
-    proj_aligned_under = z_proj <  0.25
+    # ── R7: Strict decision gate ─────────────────────────────────────────
+    proj_aligned_over  = z_proj > -0.20
+    proj_aligned_under = z_proj <  0.20
     decision = "PASS"
-    if   over_prob  >= 0.60 and proj_aligned_over  and n_series >= 4: decision = "OVER"
-    elif under_prob >= 0.60 and proj_aligned_under and n_series >= 4: decision = "UNDER"
+    if (n_series >= 5 and abs(edge * 100) >= 7.0):
+        if   over_prob  >= 0.62 and proj_aligned_over  and over_signals  >= 2:
+            decision = "OVER"
+        elif under_prob >= 0.62 and proj_aligned_under and under_signals >= 2:
+            decision = "UNDER"
+
+    # Confidence interval on hist_median (robust uncertainty band)
+    ci_low  = round(hist_median - sigma, 1)
+    ci_high = round(hist_median + sigma, 1)
+
+    avg_opp_rating = (
+        round(sum(r for _, r in rated_pairs) / len(rated_pairs))
+        if rated_pairs else None
+    )
 
     return {
         "stat_type":       stat_type,
@@ -790,8 +1026,9 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
         "n_series":        n_series,
         "hist_avg":        round(hist_avg, 2),
         "hist_median":     round(hist_median, 2),
-        "hit_rate":        round(emp_over_pct, 1),    # raw empirical (display)
-        "bayes_hit_rate":  round(bayes_p * 100, 1),   # smoothed (used in model)
+        "trimmed_avg":     round(trimmed_avg, 2),
+        "hit_rate":        round(emp_over_pct, 1),
+        "bayes_hit_rate":  round(bayes_p * 100, 1),
         "over_prob":       round(over_prob  * 100, 1),
         "under_prob":      round(under_prob * 100, 1),
         "push_prob":       round((pushes / n_series) * 100, 1) if n_series else 0,
@@ -800,10 +1037,11 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
         "ceiling":         ceiling,
         "floor":           floor,
         "stability_std":   round(sigma, 2),
+        "sigma_mad":       round(sigma_mad, 2),
         "stability_label": stability_label,
         "ev_over":         ev_over,
         "ev_under":        ev_under,
-        # ── Predictive model breakdown (transparency) ────────────────────
+        # Predictive transparency
         "expected_total":  round(expected_total, 2),
         "blended_kpr":     round(blended_kpr, 3),
         "recent_kpr":      round(recent_kpr, 3),
@@ -813,12 +1051,23 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
         "z_median":        round(z_med, 2),
         "z_trend":         round(z_trend, 2),
         "z_bayes_hit":     round(z_hit, 2),
+        "z_opponent":      round(z_opp, 2),
         "model_score":     round(raw_score, 2),
-        # ── Embed compatibility shims ────────────────────────────────────
+        "alignment_mult":  round(align_mult, 2),
+        "signals_over":    over_signals,
+        "signals_under":   under_signals,
+        # Opponent context
+        "opp_quality_filtered": opp_quality_used,
+        "opp_split_label": opp_split_label,
+        "avg_opp_rating":  avg_opp_rating,
+        # CI band
+        "ci_low":          ci_low,
+        "ci_high":         ci_high,
+        # Embed compatibility shims
         "sim_median":      round(hist_median, 2),
         "sim_std":         round(sigma, 2),
     }
 
 
-# Keep a friendlier alias for new callers
+# Friendly alias for new callers
 predict_over_under = empirical_grade

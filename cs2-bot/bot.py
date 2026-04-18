@@ -3618,7 +3618,8 @@ def _build_valorant_embed(
             f"**UNDER {line:g}:** {sim['under_prob']:.1f}%\n"
             f"**Edge vs −110:** {sim['edge']:+.1f}%\n"
             f"**Projected total:** {sim.get('expected_total', 0):.1f} kills  "
-            f"(KPR {sim.get('blended_kpr', 0):.2f} × {sim.get('proj_rounds', 0):.0f} rounds)"
+            f"(KPR {sim.get('blended_kpr', 0):.2f} × {sim.get('proj_rounds', 0):.0f} rounds)\n"
+            f"**Confidence band:** {sim.get('ci_low', 0):.1f} — {sim.get('ci_high', 0):.1f} kills"
         ),
         inline=False,
     )
@@ -3628,10 +3629,14 @@ def _build_valorant_embed(
     z_med   = sim.get("z_median", 0)
     z_trend = sim.get("z_trend", 0)
     z_hit   = sim.get("z_bayes_hit", 0)
+    z_opp   = sim.get("z_opponent", 0)
     def _arrow(z):
         if z >=  0.5: return "🟢 OVER"
         if z <= -0.5: return "🔴 UNDER"
         return "⚪ neutral"
+    align_mult = sim.get("alignment_mult", 1.0)
+    so = sim.get("signals_over", 0); su = sim.get("signals_under", 0)
+    align_emoji = "✅" if align_mult >= 0.85 else ("⚖️" if align_mult >= 0.6 else "⚠️")
     embed.add_field(
         name="🧠 Signal Stack (z-scores → consensus)",
         value=(
@@ -3639,10 +3644,27 @@ def _build_valorant_embed(
             f"**Line vs Median:** `{z_med:+.2f}σ` {_arrow(z_med)}\n"
             f"**Recency Trend:** `{z_trend:+.2f}σ` ({sim.get('trend_pct', 0):+.0f}%)  {_arrow(z_trend)}\n"
             f"**Bayes Hit Rate:** `{z_hit:+.2f}σ` ({sim.get('bayes_hit_rate', 0):.0f}% smoothed)  {_arrow(z_hit)}\n"
+            f"**Opp-Tier Shift:** `{z_opp:+.2f}σ`  {_arrow(z_opp)}\n"
+            f"**Alignment:** {align_emoji} {so}🟢/{su}🔴  ×{align_mult:.2f} dampener\n"
             f"**Model score:** `{sim.get('model_score', 0):+.2f}` → P(OVER) `{sim['over_prob']:.1f}%`"
         ),
         inline=False,
     )
+
+    # Opponent context block (NEW)
+    avg_opp = sim.get("avg_opp_rating")
+    if avg_opp:
+        opp_filtered = "🛡️ filtered (dropped bottom-25% opp games)" if sim.get("opp_quality_filtered") else "📊 full sample"
+        embed.add_field(
+            name="🎯 Opponent Context",
+            value=(
+                f"**Avg opp rating:** {avg_opp}  ·  {opp_filtered}\n"
+                f"**KPR split:** {sim.get('opp_split_label', 'n/a')}\n"
+                f"**Robust avg (10/10 trim):** {sim.get('trimmed_avg', 0):.1f}  ·  "
+                f"**MAD-σ:** {sim.get('sigma_mad', 0):.1f}"
+            ),
+            inline=False,
+        )
 
     # Recent form
     form_lines = []
