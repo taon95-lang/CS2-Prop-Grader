@@ -4275,26 +4275,20 @@ def _build_valorant_embed(
     elif decision == "UNDER": proj_word, proj_icon = "LESS", "❌"
     else:                     proj_word, proj_icon = "NO BET", "⏸️"
 
-    # Confidence grade
     over_p = sim.get("over_prob", 50.0)
-    edge   = sim.get("edge", 0)
-    confidence = min(99, max(1, int(50 + abs(edge) * 1.4)))
-    if   confidence >= 80: conf_chr = "A"
-    elif confidence >= 65: conf_chr = "B"
-    elif confidence >= 50: conf_chr = "C"
-    elif confidence >= 35: conf_chr = "D"
-    else:                  conf_chr = "F"
 
     _vs_label = f" vs {opponent}" if opponent else ""
     _opp_rating_disp = sim.get("today_opp_rating")
     _opp_rating_line = (
         f"  ·  **Opp rating:** {_opp_rating_disp}" if _opp_rating_disp else ""
     )
+    # Confidence is shown in its dedicated field below (composite score:
+    # edge + hit-rate + sample-size + stability + recency). Keeping the
+    # header lean — projection only — avoids two competing numbers.
     embed = discord.Embed(
         title=f"{proj_icon}  {info['display_name']}{_vs_label}  ·  {line:g} {sim['stat_type']}  ·  {decision}",
         description=(
-            f"**Projection:** {proj_word} {line:g}  ·  "
-            f"**Confidence:** {conf_chr} ({confidence}/100)\n"
+            f"**Projection:** {proj_word} {line:g}\n"
             f"**Game:** Valorant  ·  **Source:** vlr.gg  ·  "
             f"**Series:** {sim['n_series']}  ·  **Maps:** {sim['n_samples']}"
             f"{_opp_rating_line}"

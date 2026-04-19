@@ -2737,6 +2737,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "748091c7-c272-4da2-8446-07c29a6b8d40",
+      "ts": 1776630590.73681,
+      "date": "2026-04-19",
+      "player": "zucar",
+      "display": "zucar",
+      "line": 32.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 64.5,
+      "under_pct": 35.5,
+      "grade": "9/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 38.0,
+      "hist_median": 38.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
