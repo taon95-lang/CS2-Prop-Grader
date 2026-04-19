@@ -11,6 +11,7 @@ from scraper import (
     get_player_hs_pct,
     get_player_period_stats,
     get_team_period_stats,
+    get_upcoming_match_context,
     _warm_hltv_session,
 )
 from deep_analysis import run_deep_analysis
@@ -845,6 +846,29 @@ def _analyze_player(
                 deep = None
         else:
             logger.warning("Cannot run deep analysis without player_id (fallback data in use)")
+
+    # --- Step 3.4: Auto-detect today's match context (LAN vs Online) ---
+    # If the user didn't pass an explicit `lan`/`online` token, look up the
+    # player's next scheduled match on HLTV and read its format string. The
+    # simulator uses this to weight same-context historical maps heavier.
+    if today_is_lan is None and not used_fallback:
+        _auto_pid = info.get("player_id")
+        if _auto_pid:
+            try:
+                _auto_lan = get_upcoming_match_context(_auto_pid)
+                if _auto_lan is not None:
+                    today_is_lan = _auto_lan
+                    logger.info(
+                        f"[grade] Auto-detected today_is_lan={today_is_lan} "
+                        f"for {player_name} (pid={_auto_pid})"
+                    )
+                else:
+                    logger.info(
+                        f"[grade] LAN auto-detect inconclusive for {player_name} — "
+                        f"weighting will be neutral"
+                    )
+            except Exception as _le:
+                logger.warning(f"[grade] LAN auto-detect failed: {_le}")
 
     # --- Step 3.5: Opponent quality enrichment ---
     # Add opp_rank to each historical map entry so the simulator can weight

@@ -926,6 +926,46 @@ def _player_has_upcoming_match(pid: str) -> bool:
     return has_match
 
 
+def get_upcoming_match_context(pid: str) -> bool | None:
+    """
+    Auto-detect whether the player's NEXT upcoming match is LAN or Online.
+
+    Strategy:
+      1. Fetch /matches?player={pid} → find the first upcoming match link.
+      2. Fetch that match page → parse "Best of N (LAN|Online)" with
+         _parse_match_format().
+
+    Returns True (LAN), False (Online), or None if not detectable.
+    Used by !grade to set today_is_lan automatically when the user doesn't
+    pass an explicit `lan` / `online` token.
+    """
+    html = _fetch(f"{HLTV_BASE}/matches?player={pid}")
+    if not html:
+        return None
+
+    upcoming = re.findall(r'/matches/(\d{7,})/([\w-]+)', html)
+    if not upcoming:
+        logger.info(f"[lan_auto] player {pid} — no upcoming match found")
+        return None
+
+    # Take the first upcoming match (HLTV lists them chronologically)
+    match_id, slug = upcoming[0]
+    match_url = f"{HLTV_BASE}/matches/{match_id}/{slug}"
+    match_html = _fetch(match_url)
+    if not match_html:
+        logger.warning(f"[lan_auto] could not fetch upcoming match page {match_url}")
+        return None
+
+    fmt = _parse_match_format(match_html)
+    if fmt is None:
+        logger.info(f"[lan_auto] no LAN/Online tag found in {match_url}")
+        return None
+
+    is_lan = (fmt == "LAN")
+    logger.info(f"[lan_auto] player {pid} next match {match_id} → {fmt} (is_lan={is_lan})")
+    return is_lan
+
+
 def search_player_v2(
     name: str,
     team_hint: str | None = None,
