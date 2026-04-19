@@ -4748,6 +4748,7 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
     # Parse remaining args:
     #   - American odds tokens (e.g. "-110", "+105")
     #   - "vs <opponent>" separator OR trailing tokens = opponent team name
+    import re
     book_implied = 0.5238
     opponent: str | None = None
     leftover: list[str] = []
