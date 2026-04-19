@@ -3676,6 +3676,163 @@ async def cmd_results(ctx, when: str = "today"):
 
 
 # ---------------------------------------------------------------------------
+# !calibration — bucket past predictions by confidence band, show actual hit rates
+# ---------------------------------------------------------------------------
+
+@bot.command(name="calibration", aliases=["cal", "calib"])
+async def cmd_calibration(ctx, days: str = "30"):
+    """
+    !calibration [days]   — show how well the bot's confidence predictions match reality.
+    Buckets every resolved prediction by predicted probability, then shows the actual
+    hit rate per bucket. If "predicted 65%" plays actually hit 50%, the model is
+    overconfident and EV is wrong. If they hit 75%, the model is underconfident.
+
+    Default window: last 30 days.
+    """
+    try:
+        n_days = int(days)
+    except ValueError:
+        n_days = 30
+
+    try:
+        entries = get_recent_entries(days=n_days)
+    except Exception as exc:
+        await ctx.send(f"Couldn't read history: {exc}")
+        return
+
+    # Keep only resolved (over/under) entries with a usable probability
+    resolved = []
+    for e in entries:
+        outcome = (e.get("outcome") or "").lower()
+        if outcome not in ("over", "under"):
+            continue  # skip pending and push
+        p = e.get("over_pct")
+        if p is None:
+            continue
+        try:
+            p = float(p)
+        except (TypeError, ValueError):
+            continue
+        # If bot leaned UNDER, calibrate against under-side probability
+        rec = (e.get("recommendation") or "").upper()
+        if rec == "UNDER":
+            p_pred = 100.0 - p
+            hit = (outcome == "under")
+        else:
+            # Treat OVER and PASS as over-side predictions for calibration
+            p_pred = p
+            hit = (outcome == "over")
+        resolved.append({
+            "p_pred": p_pred,
+            "hit": hit,
+            "rec": rec,
+            "player": e.get("display") or e.get("player") or "?",
+        })
+
+    if not resolved:
+        await ctx.send(
+            embed=discord.Embed(
+                title="📐 Calibration Report",
+                description=f"No resolved predictions found in the last {n_days} days.\n"
+                            f"Use **!fetchresults** or **!result** to log outcomes first.",
+                color=0x95A5A6,
+            )
+        )
+        return
+
+    # Bucket by predicted probability — 5pp bins from 50→95
+    bins = [(50, 55), (55, 60), (60, 65), (65, 70), (70, 75),
+            (75, 80), (80, 85), (85, 100)]
+    rows = []
+    total_hits = 0
+    total_n    = 0
+    sum_brier  = 0.0
+    sum_calib_err_weighted = 0.0
+
+    for lo, hi in bins:
+        bucket = [r for r in resolved if lo <= r["p_pred"] < hi]
+        n = len(bucket)
+        if n == 0:
+            rows.append(f"`{lo:>2}-{hi:<2}%` | n=0  | —")
+            continue
+        hits = sum(1 for r in bucket if r["hit"])
+        actual_pct = 100.0 * hits / n
+        midpoint = (lo + hi) / 2
+        delta = actual_pct - midpoint   # positive = bot is underconfident
+        arrow = "→" if abs(delta) < 5 else ("↑" if delta > 0 else "↓")
+        rows.append(
+            f"`{lo:>2}-{hi:<2}%` | n={n:>2} | actual **{actual_pct:>5.1f}%** {arrow} "
+            f"(predicted ~{midpoint:.0f}%, gap {delta:+.1f})"
+        )
+        total_hits += hits
+        total_n    += n
+        # Brier score per bucket midpoint (rough — uses bin midpoint as p)
+        for r in bucket:
+            sum_brier += (r["hit"] - r["p_pred"] / 100.0) ** 2
+        sum_calib_err_weighted += abs(delta) * n
+
+    overall_hit = 100.0 * total_hits / total_n if total_n else 0.0
+    avg_calib_err = sum_calib_err_weighted / total_n if total_n else 0.0
+    brier = sum_brier / total_n if total_n else 0.0
+
+    # PrizePicks Power Play break-even ≈ 54.5% (-120). Flex ≈ 52%.
+    pp_power_be = 54.5
+    pp_flex_be  = 52.0
+
+    # ROI estimate against -120 line
+    roi_units = sum(0.91 if r["hit"] else -1.0 for r in resolved)
+    roi_pct   = 100.0 * roi_units / total_n if total_n else 0.0
+
+    # Verdict
+    if total_n < 20:
+        verdict = "⚠️ **Sample too small** — need 20+ resolved plays for trustworthy signal"
+        color = 0xF39C12
+    elif avg_calib_err < 5:
+        verdict = "✅ **Well-calibrated** — predicted probabilities match reality within 5pp"
+        color = 0x2ECC71
+    elif overall_hit < pp_power_be - 3:
+        verdict = "🔴 **Overconfident** — bot's predictions are too high vs reality"
+        color = 0xE74C3C
+    elif overall_hit > pp_power_be + 5:
+        verdict = "🟢 **Underconfident with edge** — bot is actually beating its own predictions"
+        color = 0x27AE60
+    else:
+        verdict = "🟡 **Mixed** — calibration uneven across bands; check buckets above"
+        color = 0xF1C40F
+
+    embed = discord.Embed(
+        title=f"📐 Calibration Report — last {n_days} days",
+        description="\n".join(rows),
+        color=color,
+    )
+    embed.add_field(
+        name="Overall",
+        value=(
+            f"Resolved: **{total_n}**\n"
+            f"Actual hit rate: **{overall_hit:.1f}%**\n"
+            f"Avg calibration error: **{avg_calib_err:.1f}pp**\n"
+            f"Brier score: **{brier:.3f}** *(lower = better, 0.25 = coin flip)*"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="ROI vs PrizePicks",
+        value=(
+            f"At -120 (Power): **{roi_pct:+.1f}%** ({roi_units:+.2f}u over {total_n})\n"
+            f"Power break-even: {pp_power_be}%\n"
+            f"Flex break-even:  ~{pp_flex_be}%"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="Verdict", value=verdict, inline=False)
+    embed.set_footer(
+        text="↑ = bot is underconfident (actual > predicted)  |  "
+             "↓ = bot is overconfident (actual < predicted)"
+    )
+    await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
 # !fetchresults — auto-scrape HLTV to fill in pending outcomes
 # ---------------------------------------------------------------------------
 
