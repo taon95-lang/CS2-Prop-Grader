@@ -2502,21 +2502,29 @@ def _decision_icon(decision: str) -> str:
 @bot.command(name="pp", aliases=["pphs", "ppkills"])
 async def cmd_pp(ctx, *, player_arg: str = ""):
     """
-    !pp               — grade all live CS2 PrizePicks props (Kills + HS)
+    !pp               — grade all live CS2 Kills props (default: Kills only)
     !pphs             — grade only Headshots props
-    !ppkills          — grade only Kills props
+    !ppkills          — grade only Kills props (same as !pp)
+    !pp all           — grade both Kills + HS props
     !pp <Player>      — grade that player's live PrizePicks line
     !pp refresh       — force-refresh the PrizePicks cache
     """
     global _pp_cancel
     arg = player_arg.strip()
 
+    # "!pp all" → both Kills + HS
+    _show_all = False
+    if arg.lower() in ("all", "both"):
+        _show_all = True
+        arg = ""
+
     # Determine stat filter from the command alias used
     _invoked = ctx.invoked_with.lower()
     stat_filter: str | None = (
         "HS"    if _invoked == "pphs"    else
         "Kills" if _invoked == "ppkills" else
-        None    # !pp → all stats
+        None    if _show_all             else
+        "Kills"   # !pp default → Kills only
     )
 
     # ── refresh shortcut ────────────────────────────────────────────────────
@@ -3046,9 +3054,8 @@ async def cmd_teamscan(ctx, *, team_arg: str = ""):
     no_line: list[str] = []   # no PP line found
 
     for player_slug in roster:
-        # In default mode (no stat filter), probe Kills first, then HS fallback
-        # so we don't miss HS-only listings.
-        _probe_order = [stat_filter] if stat_filter else ["Kills", "HS"]
+        # Default = Kills only. HS props are only scanned when explicitly requested.
+        _probe_order = [stat_filter] if stat_filter else ["Kills"]
         pp_item = None
         for _probe in _probe_order:
             try:
@@ -3184,14 +3191,17 @@ async def cmd_teamscan(ctx, *, team_arg: str = ""):
 @bot.command(name="ev")
 async def cmd_ev(ctx, stat_arg: str = ""):
     """
-    !ev         — fetch live PrizePicks slate, show only EV+ plays sorted by edge
-    !ev kills   — kills props only
+    !ev         — fetch live PrizePicks slate, show only EV+ Kills plays (default)
+    !ev kills   — kills props only (same as !ev)
     !ev hs      — headshots props only
+    !ev all     — both Kills + HS
     """
-    stat_filter = None
+    stat_filter: str | None = "Kills"   # default → kills-only
     if stat_arg.lower() in ("hs", "headshots"):
         stat_filter = "HS"
-    elif stat_arg.lower() in ("kills", "kill"):
+    elif stat_arg.lower() in ("all", "both"):
+        stat_filter = None
+    elif stat_arg.lower() in ("kills", "kill", ""):
         stat_filter = "Kills"
 
     status_msg = await ctx.send(
