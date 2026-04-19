@@ -782,7 +782,12 @@ def _mad(values: list[float]) -> float:
     return _median(abs_dev) * 1.4826  # scale factor to normal-σ equivalent
 
 
-def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> dict:
+def empirical_grade(
+    map_stats: list,
+    line: float,
+    stat_type: str = "Kills",
+    today_opp_rating: int | None = None,
+) -> dict:
     """
     Best-in-class predictive grader for kills props.
 
@@ -862,19 +867,39 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
     floor        = min(series_totals)
 
     # ── R3: Opponent-quality filtering for projection ────────────────────
+    # Two modes:
+    #   A) today_opp_rating provided → keep series where the opponent was
+    #      within ±200 rating of today's opp (similar competition tier).
+    #   B) no today_opp_rating → drop bottom-quartile of opponents (filters
+    #      stat-padding games against the weakest teams in sample).
     rated_pairs = [(t, r) for t, r in zip(series_totals, series_opp) if r is not None]
     opp_quality_used = False
     proj_totals = list(series_totals)  # default: full sample
     proj_rounds_list = list(series_rounds)
-    if len(rated_pairs) >= 6:
+
+    if today_opp_rating is not None and len(rated_pairs) >= 6:
+        # Proximity mode — same-tier opponents only
+        WINDOW = 200  # rating points either side of today's opp
+        proj_totals = [
+            t for t, r in zip(series_totals, series_opp)
+            if r is None or abs(r - today_opp_rating) <= WINDOW
+        ]
+        proj_rounds_list = [
+            rd for rd, r in zip(series_rounds, series_opp)
+            if r is None or abs(r - today_opp_rating) <= WINDOW
+        ]
+        if len(proj_totals) >= 4:
+            opp_quality_used = True
+        else:
+            proj_totals = list(series_totals)
+            proj_rounds_list = list(series_rounds)
+    elif len(rated_pairs) >= 6:
         opp_ratings = [r for _, r in rated_pairs]
         threshold   = sorted(opp_ratings)[len(opp_ratings) // 4]  # bottom 25% cutoff
-        # Keep maps whose opp rating is at or above the cutoff
         proj_totals = [t for t, r in zip(series_totals, series_opp)
                        if r is None or r >= threshold]
         proj_rounds_list = [rd for rd, r in zip(series_rounds, series_opp)
                             if r is None or r >= threshold]
-        # Don't shrink to fewer than 4 series — fall back if filter is too aggressive
         if len(proj_totals) >= 4:
             opp_quality_used = True
         else:
@@ -1060,6 +1085,7 @@ def empirical_grade(map_stats: list, line: float, stat_type: str = "Kills") -> d
         "opp_quality_filtered": opp_quality_used,
         "opp_split_label": opp_split_label,
         "avg_opp_rating":  avg_opp_rating,
+        "today_opp_rating": today_opp_rating,
         # CI band
         "ci_low":          ci_low,
         "ci_high":         ci_high,

@@ -4258,6 +4258,7 @@ def _build_valorant_embed(
     info: dict,
     sim: dict,
     book_implied: float,
+    opponent: str | None = None,
 ) -> discord.Embed:
     """Compact Valorant prop-grading embed (kills only)."""
     decision = sim.get("decision", "PASS")
@@ -4284,13 +4285,19 @@ def _build_valorant_embed(
     elif confidence >= 35: conf_chr = "D"
     else:                  conf_chr = "F"
 
+    _vs_label = f" vs {opponent}" if opponent else ""
+    _opp_rating_disp = sim.get("today_opp_rating")
+    _opp_rating_line = (
+        f"  ·  **Opp rating:** {_opp_rating_disp}" if _opp_rating_disp else ""
+    )
     embed = discord.Embed(
-        title=f"{proj_icon}  {info['display_name']}  ·  {line:g} {sim['stat_type']}  ·  {decision}",
+        title=f"{proj_icon}  {info['display_name']}{_vs_label}  ·  {line:g} {sim['stat_type']}  ·  {decision}",
         description=(
             f"**Projection:** {proj_word} {line:g}  ·  "
             f"**Confidence:** {conf_chr} ({confidence}/100)\n"
             f"**Game:** Valorant  ·  **Source:** vlr.gg  ·  "
             f"**Series:** {sim['n_series']}  ·  **Maps:** {sim['n_samples']}"
+            f"{_opp_rating_line}"
         ),
         color=color,
     )
@@ -4738,16 +4745,35 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
             ))
             return
 
-    # Optional book odds
+    # Parse remaining args:
+    #   - American odds tokens (e.g. "-110", "+105")
+    #   - "vs <opponent>" separator OR trailing tokens = opponent team name
     book_implied = 0.5238
+    opponent: str | None = None
+    leftover: list[str] = []
     for a in args:
-        m = re.match(r'^([+-])(\d{2,4})$', a)
-        if m:
+        if re.match(r'^([+-])\d{2,4}$', a):
             v = int(a)
             book_implied = (100 / (v + 100)) if v > 0 else (abs(v) / (abs(v) + 100))
-            break
+            continue
+        leftover.append(a)
 
-    msg = await ctx.send(f"🔎 Looking up `{player_name}` on vlr.gg…")
+    if leftover:
+        # Strip an explicit "vs" separator if present
+        if leftover[0].lower() == "vs":
+            leftover = leftover[1:]
+        else:
+            # If "vs" appears later, take everything after it as opponent
+            vs_idx = next((i for i, t in enumerate(leftover) if t.lower() == "vs"), None)
+            if vs_idx is not None:
+                leftover = leftover[vs_idx + 1:]
+        if leftover:
+            opponent = " ".join(leftover).strip().strip('"\'') or None
+
+    msg = await ctx.send(
+        f"🔎 Looking up `{player_name}` on vlr.gg…"
+        + (f" (vs {opponent})" if opponent else "")
+    )
     info = _vlr.get_player_info(player_name, n_series=10)
     if not info or not info.get("map_stats"):
         await msg.edit(content=f"❌ No Valorant data found for `{player_name}`.")
@@ -4760,12 +4786,36 @@ async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
         mm.setdefault("rounds", 24)
         map_stats.append(mm)
 
-    sim = _vlr.empirical_grade(map_stats, line_f, "Kills")
+    # Look up today's opponent rating from vlr.gg so empirical_grade can
+    # weight historical maps against similarly-rated opponents heavier.
+    today_opp_rating: int | None = None
+    if opponent:
+        try:
+            team_lookup = await asyncio.to_thread(_vlr.search_team, opponent)
+            if team_lookup:
+                tid, tslug = team_lookup
+                today_opp_rating = await asyncio.to_thread(
+                    _vlr._team_rating, f"/team/{tid}/{tslug}"
+                )
+                logger.info(
+                    f"[vgrade] Opponent {opponent!r} → {tslug} "
+                    f"rating={today_opp_rating}"
+                )
+            else:
+                logger.info(f"[vgrade] Opponent {opponent!r} not found on vlr.gg")
+        except Exception as exc:
+            logger.warning(f"[vgrade] Opponent rating lookup failed: {exc}")
+
+    sim = _vlr.empirical_grade(
+        map_stats, line_f, "Kills", today_opp_rating=today_opp_rating
+    )
     if sim.get("error"):
         await msg.edit(content=f"❌ Grading error: {sim['error']}")
         return
 
-    embed = _build_valorant_embed(player_name, line_f, info, sim, book_implied)
+    embed = _build_valorant_embed(
+        player_name, line_f, info, sim, book_implied, opponent=opponent
+    )
     if pp_auto:
         existing_footer = embed.footer.text or ""
         embed.set_footer(text=f"📊 Live PrizePicks line auto-fetched · {existing_footer}")
