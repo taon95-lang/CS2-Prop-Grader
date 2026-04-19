@@ -25,6 +25,7 @@ import time
 import logging
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,56 @@ APIFY_BASE     = "https://api.apify.com/v2"
 _CACHE: dict    = {}
 _CACHE_TS: float = 0.0
 _CACHE_TTL: int  = 900   # 15 minutes — fresh run cached across back-to-back commands
+
+# ---------------------------------------------------------------------------
+# Manual player_id → canonical name override
+# ---------------------------------------------------------------------------
+# Apify's PrizePicks scrape sometimes mislabels props (wrong name) or returns
+# empty player_name strings. PrizePicks itself attaches a stable numeric
+# player_id to every prop, so we keep a small JSON map (player_id → name)
+# that takes precedence over Apify's name field. Edit pp_player_overrides.json
+# whenever a mismatch is spotted — IDs are stable across matches.
+_OVERRIDE_PATH = Path(__file__).parent / "pp_player_overrides.json"
+
+
+def _load_player_overrides() -> dict[str, str]:
+    try:
+        with _OVERRIDE_PATH.open() as fh:
+            data = json.load(fh)
+        # Strip comment keys and coerce all keys/values to strings
+        return {
+            str(k): str(v).strip()
+            for k, v in data.items()
+            if not str(k).startswith("_") and str(v).strip()
+        }
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning(f"[prizepicks] override file unreadable: {exc}")
+        return {}
+
+
+def _apply_player_overrides(items: list[dict]) -> list[dict]:
+    """Override Apify's player_name with the canonical name for any known
+    player_id. Logs each correction so you can see what was fixed."""
+    overrides = _load_player_overrides()
+    if not overrides:
+        return items
+    fixed = 0
+    for it in items:
+        pid = str(it.get("player_id") or "").strip()
+        if not pid:
+            continue
+        canonical = overrides.get(pid)
+        if not canonical:
+            continue
+        old = (it.get("player_name") or "").strip()
+        if old.lower() != canonical.lower():
+            it["player_name"] = canonical
+            fixed += 1
+    if fixed:
+        logger.info(f"[prizepicks] applied {fixed} player_id name overrides")
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +408,8 @@ def get_cs2_lines(player_name: str | None = None) -> list[dict]:
         if not items:
             logger.warning("[prizepicks] Apify paths exhausted — trying direct PrizePicks API")
             items = _fetch_direct_cs2()
+        # 4) Apply manual player_id → name overrides (fixes Apify mislabels)
+        items = _apply_player_overrides(items)
         _CACHE    = {"items": items}
         _CACHE_TS = now
 

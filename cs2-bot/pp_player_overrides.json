@@ -1,0 +1,8 @@
+{
+  "_comment": "PrizePicks player_id -> canonical player name. Overrides Apify's player_name field, which sometimes mislabels props or returns empty strings. Add new mappings whenever you spot a mismatch — player_ids are stable.",
+  "288386": "arvid",
+  "288387": "8juho8",
+  "271120": "myggis",
+  "271124": "oopee",
+  "307612": "allu"
+}
