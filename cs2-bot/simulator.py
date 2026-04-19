@@ -85,6 +85,49 @@ def _opp_quality_weights(map_stats: list, today_opp_rank: int | None) -> list[fl
     return weights
 
 
+def _lan_context_weights(map_stats: list, today_is_lan: bool | None) -> list[float]:
+    """
+    Per-map weights based on whether the historical match was played in the
+    same context (LAN vs Online) as today's match.
+
+    Same-context maps are more predictive because peeker's advantage,
+    crowd pressure, ping variance, and equipment reliability all differ.
+
+    - Today is LAN, history is LAN  → weight 1.5 (boost LAN form)
+    - Today is LAN, history is Online → weight 0.6 (online form is less reliable on LAN)
+    - Today is Online, history is Online → weight 1.5
+    - Today is Online, history is LAN  → weight 0.7 (LAN form often inflates online projection)
+    - Unknown context (either side) → weight 1.0 (no change)
+
+    If today_is_lan is None, all maps get weight 1.0 (no weighting applied).
+    If no historical maps have is_lan set, returns flat weights (no signal).
+    """
+    if today_is_lan is None:
+        return [1.0] * len(map_stats)
+
+    weights = []
+    any_known = False
+    for m in map_stats:
+        hist_lan = m.get('is_lan')
+        if hist_lan is None:
+            weights.append(1.0)
+            continue
+        any_known = True
+        if today_is_lan and hist_lan:
+            w = 1.5
+        elif today_is_lan and not hist_lan:
+            w = 0.6
+        elif (not today_is_lan) and (not hist_lan):
+            w = 1.5
+        else:  # today online, history LAN
+            w = 0.7
+        weights.append(w)
+
+    if not any_known:
+        return [1.0] * len(map_stats)
+    return weights
+
+
 def _weighted_mean_var(values: list, weights: list) -> tuple[float, float]:
     """Compute reliability-weighted mean and variance for NB distribution fitting."""
     total_w = sum(weights)
@@ -110,6 +153,7 @@ def run_simulation(
     rank_gap: int = None,
     period_kpr: float = None,
     today_opp_rank: int | None = None,
+    today_is_lan: bool | None = None,
     book_implied_prob: float = BOOK_IMPLIED_PROB,
 ) -> dict:
     """
@@ -118,14 +162,15 @@ def run_simulation(
 
     today_opp_rank: HLTV world rank of today's opponent.  When provided, maps
     played against similarly-ranked opponents are weighted more heavily in the
-    distribution fit.  Maps vs much stronger/weaker teams are down-weighted so
-    they don't distort the projection for today's specific matchup.
+    distribution fit.
+
+    today_is_lan: True if today's match is LAN, False if Online, None if unknown.
+    When provided, historical maps from the same context are weighted heavier.
     """
     stat_values = [m["stat_value"] for m in map_stats]
     rounds_per_map = [m["rounds"] for m in map_stats]
 
     # --- Opponent Quality Weighting ---
-    # Compute per-map reliability weights based on rank proximity to today's opp.
     _opp_weights = _opp_quality_weights(map_stats, today_opp_rank)
     _any_weighted = today_opp_rank is not None and any(w != 1.0 for w in _opp_weights)
     if _any_weighted:
@@ -135,6 +180,23 @@ def run_simulation(
             f"{_covered}/{len(map_stats)} maps have historical opp_rank. "
             f"Weight range: {min(_opp_weights):.2f}–{max(_opp_weights):.2f}"
         )
+
+    # --- LAN/Online Context Weighting ---
+    _lan_weights = _lan_context_weights(map_stats, today_is_lan)
+    _lan_active = today_is_lan is not None and any(w != 1.0 for w in _lan_weights)
+    if _lan_active:
+        _lan_covered = sum(1 for m in map_stats if m.get('is_lan') is not None)
+        _lan_match_count = sum(1 for m in map_stats if m.get('is_lan') is True)
+        ctx = "LAN" if today_is_lan else "Online"
+        logger.info(
+            f"[sim] LAN context weighting active — today={ctx}, "
+            f"{_lan_covered}/{len(map_stats)} maps have known context "
+            f"({_lan_match_count} LAN, {_lan_covered - _lan_match_count} Online). "
+            f"Weight range: {min(_lan_weights):.2f}–{max(_lan_weights):.2f}"
+        )
+
+    # Combine opp + LAN context weights multiplicatively
+    _opp_weights = [o * l for o, l in zip(_opp_weights, _lan_weights)]
 
     if not stat_values:
         return {"error": "No stat data available"}

@@ -220,6 +220,17 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
         stat_raw = remaining.pop(0).lower()
         stat_type = "HS" if stat_raw in ("hs", "headshots") else "Kills"
 
+    # Pull LAN/Online context flag if present (token can appear anywhere)
+    today_is_lan: bool | None = None
+    _lan_token_idx = next(
+        (i for i, a in enumerate(remaining) if a.lower() in ("lan", "online")),
+        None,
+    )
+    if _lan_token_idx is not None:
+        _ctx_token = remaining.pop(_lan_token_idx).lower()
+        today_is_lan = (_ctx_token == "lan")
+        logger.info(f"[grade] User-specified context: today_is_lan={today_is_lan}")
+
     # Pull odds token if present (can be anywhere before vs separator)
     _odds_indices = [i for i, a in enumerate(remaining) if _parse_odds_implied(a) is not None]
     if _odds_indices:
@@ -325,6 +336,7 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
             lambda: _analyze_player(
                 player_name, line_val, stat_type, opponent, team_hint,
                 book_implied=book_implied, book_odds_raw=book_odds_raw,
+                today_is_lan=today_is_lan,
             ),
         )
     )
@@ -566,6 +578,7 @@ def _analyze_player(
     player_team_hint: str | None = None,
     book_implied: float = 0.5238,
     book_odds_raw: str | None = None,
+    today_is_lan: bool | None = None,
 ) -> dict:
     """
     All blocking I/O and CPU work lives here.
@@ -891,6 +904,7 @@ def _analyze_player(
             rank_gap=rank_gap,
             period_kpr=_period_kpr,
             today_opp_rank=today_opp_rank,
+            today_is_lan=today_is_lan,
             book_implied_prob=book_implied,
         )
     except Exception as e:

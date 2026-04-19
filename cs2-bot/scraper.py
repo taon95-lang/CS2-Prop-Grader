@@ -2189,6 +2189,30 @@ def get_team_period_stats(team_id: str, team_slug: str, days: int = 90) -> dict 
 # Step 4 — Get HS kills specifically (from per-round headshot data if available)
 # ---------------------------------------------------------------------------
 
+def _parse_match_format(html: str) -> str | None:
+    """
+    Parse the match format string from an HLTV match page to determine LAN vs Online.
+
+    HLTV puts the format in plain text near the score, like:
+        "Best of 3 (Online)"
+        "Best of 3 (LAN)"
+        "Best of 5 (LAN)"
+
+    Returns "LAN", "Online", or None if it can't be parsed.
+    Note: event names containing "LAN" (e.g. "MPKBK CIS LAN Season 3") are
+    NOT a reliable signal — those events often run online qualifiers. The
+    "(LAN)" / "(Online)" tag in the format string is the ground truth.
+    """
+    if not html:
+        return None
+    # Match either casing in case HLTV ever changes
+    m = re.search(r'Best of \d+\s*\(\s*(LAN|Online)\s*\)', html, re.IGNORECASE)
+    if m:
+        token = m.group(1).strip().lower()
+        return "LAN" if token == "lan" else "Online"
+    return None
+
+
 def _parse_match_hs_pct(html: str, player_slug: str) -> float | None:
     """
     Extract the player's HS% from a match page's ALL-MAPS overview table only.
@@ -2791,6 +2815,12 @@ def get_player_info(
         # Attempt pistol round parse for this match
         pistol_data = _parse_pistol_stats(html, player_slug)
 
+        # Detect LAN vs Online context for this series (ground-truth from HLTV).
+        # Used by the simulator to weight historical maps that match today's
+        # context heavier (LAN-only history is less predictive for an online match).
+        match_format = _parse_match_format(html)
+        is_lan_match = (match_format == "LAN") if match_format else None
+
         # Take maps 1 and 2 only — store dicts so simulator has stat_value + match_id
         _series_maps = maps[:2]
         _audit_parts = []
@@ -2814,6 +2844,7 @@ def get_player_info(
                 'deaths':        m.get('deaths'),
                 'pistol_kills':  pistol_data.get(map_num),
                 'opp_rank':      None,                 # populated later by _enrich_with_opp_ranks in bot.py
+                'is_lan':        is_lan_match,         # True/False/None — LAN vs Online context for this series
             })
             # Build the audit line for this map
             _hs_display = str(_hs_val) if _hs_val is not None else "MISSING"
