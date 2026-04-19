@@ -3494,6 +3494,228 @@ async def cmd_ppstop(ctx):
 
 
 # ---------------------------------------------------------------------------
+# !bankroll / !kelly — stake-sizing using the Kelly Criterion
+# ---------------------------------------------------------------------------
+
+import os as _kelly_os
+import json as _kelly_json
+
+_BANKROLL_FILE = _kelly_os.path.join(_kelly_os.path.dirname(__file__), "bankroll.json")
+
+
+def _load_bankroll() -> dict:
+    try:
+        with open(_BANKROLL_FILE) as f:
+            return _kelly_json.load(f)
+    except (FileNotFoundError, _kelly_json.JSONDecodeError):
+        return {}
+
+
+def _save_bankroll(data: dict) -> None:
+    with open(_BANKROLL_FILE, "w") as f:
+        _kelly_json.dump(data, f, indent=2)
+
+
+def _kelly_fraction(p: float, b: float) -> float:
+    """
+    Classic Kelly: f* = (bp - q) / b, where p=win prob, q=1-p, b=net decimal odds.
+    Returns 0 when edge is negative.
+    """
+    if b <= 0 or p <= 0 or p >= 1:
+        return 0.0
+    q = 1.0 - p
+    f = (b * p - q) / b
+    return max(0.0, f)
+
+
+@bot.command(name="bankroll", aliases=["br"])
+async def cmd_bankroll(ctx, amount: str = None, fraction: str = None):
+    """
+    !bankroll                     — show your current bankroll & Kelly fraction
+    !bankroll <amount>            — set bankroll (e.g. !bankroll 500)
+    !bankroll <amount> <fraction> — set both (e.g. !bankroll 500 0.25)
+                                    fraction = how much of full Kelly you risk
+                                    (0.25 = quarter Kelly, recommended for variance)
+    """
+    data = _load_bankroll()
+    uid = str(ctx.author.id)
+    user = data.get(uid, {"bankroll": 100.0, "fraction": 0.25})
+
+    if amount is not None:
+        try:
+            user["bankroll"] = float(amount.replace("$", "").replace(",", ""))
+        except ValueError:
+            await ctx.send(f"❌ Invalid amount: `{amount}`. Try `!bankroll 500`.")
+            return
+    if fraction is not None:
+        try:
+            f = float(fraction)
+            if not 0 < f <= 1.0:
+                raise ValueError
+            user["fraction"] = f
+        except ValueError:
+            await ctx.send(f"❌ Fraction must be 0–1 (e.g. 0.25 = quarter Kelly).")
+            return
+
+    data[uid] = user
+    _save_bankroll(data)
+
+    f_label = {1.0: "Full Kelly ⚠️ aggressive", 0.5: "Half Kelly", 0.25: "Quarter Kelly (recommended)",
+               0.1: "Tenth Kelly (very safe)"}.get(user["fraction"], f"{user['fraction']}× Kelly")
+
+    embed = discord.Embed(
+        title=f"💰 Bankroll — {ctx.author.display_name}",
+        color=0x2ECC71,
+    )
+    embed.add_field(name="Bankroll",       value=f"**${user['bankroll']:,.2f}**", inline=True)
+    embed.add_field(name="Kelly fraction", value=f"**{user['fraction']}**\n*{f_label}*", inline=True)
+    embed.set_footer(text="Use !kelly <prob%> to size a bet against this bankroll")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="kelly", aliases=["stake"])
+async def cmd_kelly(ctx, prob: str = None, payout: str = None):
+    """
+    !kelly <prob%> [payout]    — size a bet using the Kelly Criterion against your bankroll.
+
+    prob   = your model's win probability (e.g. 65 or 0.65)
+    payout = decimal payout multiple of stake on win.
+             Default = 1.732 (PrizePicks 2-pick Power Play, where each leg
+             must pay √3 for the combined 3.0× payout to break even at 50/50).
+             Other examples:  -110 American → 1.909
+                              +100         → 2.0
+                              PP 3-pick    → 1.710 per leg (5× combined)
+                              PP 4-pick    → 1.778 per leg (10× combined)
+
+    Examples:
+      !kelly 65          → quarter-Kelly stake at 65% win prob, PP 2-pick payout
+      !kelly 0.65 1.91   → at -110 odds
+      !kelly 72 2.0      → at even-money (+100)
+    """
+    if prob is None:
+        await ctx.send(
+            embed=discord.Embed(
+                title="❓ Usage",
+                description=(
+                    "**`!kelly <prob%> [payout]`**\n\n"
+                    "Examples:\n"
+                    "`!kelly 65` — at PrizePicks 2-pick payout\n"
+                    "`!kelly 65 1.91` — at -110 sportsbook odds\n"
+                    "`!kelly 0.72 2.0` — at +100 (even money)\n\n"
+                    "Set bankroll first with `!bankroll <amount>`."
+                ),
+                color=0x7289DA,
+            )
+        )
+        return
+
+    # Parse probability (accept 65, 0.65, "65%")
+    try:
+        p_raw = float(prob.strip().rstrip("%"))
+        p = p_raw / 100.0 if p_raw > 1 else p_raw
+        if not 0 < p < 1:
+            raise ValueError
+    except ValueError:
+        await ctx.send(f"❌ Invalid probability: `{prob}`. Use `65` or `0.65`.")
+        return
+
+    # Parse payout — default to PrizePicks 2-pick break-even per-leg payout (√3)
+    if payout is None:
+        decimal_payout = 1.732   # √3 — PP 2-pick
+        payout_label = "PrizePicks 2-pick Power Play (√3 per leg)"
+    else:
+        try:
+            v = float(payout.lstrip("+"))
+            if v < 0:  # American odds
+                decimal_payout = 1.0 + 100.0 / abs(v)
+                payout_label = f"American {payout}"
+            elif 1.0 < v < 100:
+                decimal_payout = v
+                payout_label = f"Decimal {v:.3f}"
+            elif v >= 100:  # +American odds
+                decimal_payout = 1.0 + v / 100.0
+                payout_label = f"American +{int(v)}"
+            else:
+                raise ValueError
+        except ValueError:
+            await ctx.send(f"❌ Invalid payout: `{payout}`. Try `1.91`, `-110`, `+100`, or `2.0`.")
+            return
+
+    b = decimal_payout - 1.0
+    f_full = _kelly_fraction(p, b)
+
+    # Implied probability the payout requires to break even
+    implied_p = 1.0 / decimal_payout
+    edge_pp = (p - implied_p) * 100.0   # in percentage points
+
+    # Bankroll
+    data = _load_bankroll()
+    user = data.get(str(ctx.author.id), {"bankroll": 100.0, "fraction": 0.25})
+    bankroll = user["bankroll"]
+    user_fraction = user["fraction"]
+
+    stake_full    = bankroll * f_full
+    stake_user    = bankroll * f_full * user_fraction
+    stake_quarter = bankroll * f_full * 0.25
+    stake_half    = bankroll * f_full * 0.50
+
+    # Verdict
+    if f_full <= 0:
+        title = "🚫 NO BET — Negative EV"
+        color = 0xE74C3C
+        verdict = (f"At {p*100:.1f}% win prob, the payout of {decimal_payout:.3f}× requires "
+                   f"{implied_p*100:.1f}% to break even. **No edge — pass.**")
+    elif edge_pp < 2:
+        title = "🟡 THIN EDGE"
+        color = 0xF1C40F
+        verdict = f"Small edge ({edge_pp:+.1f}pp). Consider passing — model error can erase this."
+    elif edge_pp < 5:
+        title = "🟢 PLAYABLE EDGE"
+        color = 0x27AE60
+        verdict = f"Real edge ({edge_pp:+.1f}pp). Stake at your configured fraction."
+    elif edge_pp < 10:
+        title = "🔥 STRONG EDGE"
+        color = 0x2ECC71
+        verdict = f"Strong edge ({edge_pp:+.1f}pp). High-conviction play."
+    else:
+        title = "💎 ELITE EDGE"
+        color = 0xFFD700
+        verdict = f"Elite edge ({edge_pp:+.1f}pp). Cap stake — markets rarely give this much."
+
+    embed = discord.Embed(title=title, color=color, description=verdict)
+    embed.add_field(
+        name="Inputs",
+        value=(f"Win prob: **{p*100:.1f}%**\n"
+               f"Payout: **{decimal_payout:.3f}×** *({payout_label})*\n"
+               f"Implied break-even: **{implied_p*100:.1f}%**\n"
+               f"Edge: **{edge_pp:+.1f}pp**"),
+        inline=True,
+    )
+    embed.add_field(
+        name="Kelly fractions",
+        value=(f"Full Kelly:    **{f_full*100:.2f}%** of bankroll\n"
+               f"Half Kelly:    {f_full*50:.2f}%\n"
+               f"Quarter Kelly: {f_full*25:.2f}%"),
+        inline=True,
+    )
+    embed.add_field(
+        name=f"Stake recommendations (bankroll = ${bankroll:,.2f})",
+        value=(
+            f"⚠️ Full Kelly:           **${stake_full:,.2f}**\n"
+            f"🟢 Your setting ({user_fraction}×): **${stake_user:,.2f}**\n"
+            f"🛡 Half Kelly:            **${stake_half:,.2f}**\n"
+            f"🛡 Quarter Kelly:         **${stake_quarter:,.2f}**"
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text=f"Quarter Kelly is the pro standard — full Kelly is mathematically optimal "
+             f"but extremely volatile. Adjust with !bankroll <amt> <fraction>."
+    )
+    await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
 # !result  — log an actual stat total against a graded prop
 # ---------------------------------------------------------------------------
 
