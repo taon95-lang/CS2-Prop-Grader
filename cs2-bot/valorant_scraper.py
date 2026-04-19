@@ -87,22 +87,40 @@ def _fetch(url: str, *, allow_redirects: bool = True) -> Optional[str]:
 
 # ─────────────────────────── search ─────────────────────────────────────────
 
-def search_player(name: str) -> Optional[tuple[str, str, str]]:
-    """
-    Look up a Valorant player on vlr.gg.
+def _resolve_player_slug(pid: str, fallback_name: str) -> str:
+    """Resolve canonical slug via search redirect; fall back to lowercased name."""
+    redirect_url = f"{VLR_BASE}/search/r/player/{pid}/idx"
+    try:
+        r = requests.get(redirect_url, headers=HDR, timeout=15, allow_redirects=False)
+        loc = r.headers.get("Location", "")
+        m = re.search(r"/player/(\d+)/([^/?#]+)", loc)
+        if m:
+            return m.group(2)
+    except Exception:
+        pass
+    return fallback_name.lower().replace(" ", "")
 
-    Returns (player_id, slug, display_name) or None.
+
+def search_player_candidates(name: str, limit: int = 8) -> list[tuple[str, str, str]]:
+    """
+    Return a ranked list of (player_id, slug, display_name) candidates from
+    vlr.gg's player search.  vlr.gg's search treats short queries fuzzily and
+    often surfaces unrelated names first (e.g. "Lucas" → "Rojo"), so the
+    caller should iterate this list rather than blindly take the first.
+
+    The list is filtered to candidates whose display name contains the
+    query as a substring (case-insensitive); if that yields nothing we
+    return the unfiltered top results so we still try.
     """
     if not name:
-        return None
+        return []
     q = name.strip()
     url = f"{VLR_BASE}/search?q={requests.utils.quote(q)}&type=players"
     html = _fetch(url)
     if not html:
         logger.warning(f"[vlr search] failed for {name!r}")
-        return None
+        return []
 
-    # Each search result = <a href="/search/r/player/<id>/idx" ...><name></div>
     items = re.findall(
         r'<a href="/search/r/player/(\d+)/idx"[^>]*class="[^"]*search-item[^"]*"[^>]*>'
         r'(.*?)</a>',
@@ -110,28 +128,39 @@ def search_player(name: str) -> Optional[tuple[str, str, str]]:
     )
     if not items:
         logger.warning(f"[vlr search] no player results for {name!r}")
+        return []
+
+    candidates: list[tuple[str, str, str]] = []
+    for pid, body in items[:limit]:
+        nm_match = re.search(r'>\s*([A-Za-z0-9_\-\.\u0080-\uffff][^<>]{0,40})\s*<', body)
+        display_name = (nm_match.group(1).strip() if nm_match else name).strip()
+        slug = _resolve_player_slug(pid, display_name)
+        candidates.append((pid, slug, display_name))
+
+    q_lower = q.lower()
+    matched = [c for c in candidates if q_lower in c[2].lower()]
+    if matched:
+        logger.info(
+            f"[vlr search] {name!r} → {len(matched)} name-matched candidates: "
+            f"{[c[2] for c in matched]}"
+        )
+        return matched
+
+    logger.info(
+        f"[vlr search] {name!r} → no exact name match in top {len(candidates)}; "
+        f"returning fuzzy results: {[c[2] for c in candidates]}"
+    )
+    return candidates
+
+
+def search_player(name: str) -> Optional[tuple[str, str, str]]:
+    """Backward-compat wrapper — returns the first candidate or None."""
+    candidates = search_player_candidates(name, limit=1)
+    if not candidates:
         return None
-
-    # Pull display name out of first match: text inside an inner <div>...</div>
-    pid, body = items[0]
-    nm_match = re.search(r'>\s*([A-Za-z0-9_\-\.\u0080-\uffff][^<>]{0,40})\s*<', body)
-    display_name = (nm_match.group(1).strip() if nm_match else name).strip()
-
-    # Resolve canonical slug by visiting the redirect URL or constructing the player URL
-    redirect_url = f"{VLR_BASE}/search/r/player/{pid}/idx"
-    try:
-        r = requests.get(redirect_url, headers=HDR, timeout=15, allow_redirects=False)
-        loc = r.headers.get("Location", "")
-        m = re.search(r"/player/(\d+)/([^/?#]+)", loc)
-        if m:
-            slug = m.group(2)
-        else:
-            slug = display_name.lower().replace(" ", "")
-    except Exception:
-        slug = display_name.lower().replace(" ", "")
-
+    pid, slug, display_name = candidates[0]
     logger.info(f"[vlr search] {name!r} -> {display_name} (id={pid}, slug={slug})")
-    return (pid, slug, display_name)
+    return candidates[0]
 
 
 # ─────────────────────────── match-page parsing ─────────────────────────────
@@ -314,16 +343,38 @@ def get_player_info(name: str, stat_type: str = "Kills", n_series: int = 10) -> 
     if stat_type.lower() != "kills":
         logger.warning(f"[vlr] unsupported stat_type {stat_type!r} — defaulting to Kills")
 
-    found = search_player(name)
-    if not found:
+    candidates = search_player_candidates(name, limit=8)
+    if not candidates:
         return None
-    pid, slug, display = found
 
-    matches = _fetch_match_list(pid, slug)
-    if not matches:
-        logger.warning(f"[vlr] no matches found for {display}")
+    # Iterate candidates — vlr.gg search often returns the wrong player first
+    # (e.g. "Lucas" → "Rojo"). Pick the first candidate that actually has a
+    # recent match list.
+    pid = slug = display = None
+    matches: list = []
+    for cand_pid, cand_slug, cand_display in candidates:
+        cand_matches = _fetch_match_list(cand_pid, cand_slug)
+        if cand_matches:
+            pid, slug, display = cand_pid, cand_slug, cand_display
+            matches = cand_matches
+            logger.info(
+                f"[vlr] picked {display} (id={pid}) — {len(matches)} matches"
+            )
+            break
+        else:
+            logger.info(
+                f"[vlr] candidate {cand_display} (id={cand_pid}) has no matches — "
+                f"trying next"
+            )
+
+    if not pid:
+        logger.warning(
+            f"[vlr] no candidate yielded matches for {name!r} "
+            f"(tried: {[c[2] for c in candidates]})"
+        )
         return {
-            "player_id": pid, "slug": slug, "display_name": display,
+            "player_id": candidates[0][0], "slug": candidates[0][1],
+            "display_name": candidates[0][2],
             "team": None, "country": None, "stat_type": "Kills",
             "map_stats": [],
         }
