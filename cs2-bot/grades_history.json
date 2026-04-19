@@ -2717,6 +2717,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "3069efd9-e5de-4db3-bf21-a43799a280c1",
+      "ts": 1776573544.007219,
+      "date": "2026-04-19",
+      "player": "flouzer",
+      "display": "Flouzer",
+      "line": 32.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 84.5,
+      "under_pct": 15.5,
+      "grade": "10/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 40.5,
+      "hist_median": 40.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
