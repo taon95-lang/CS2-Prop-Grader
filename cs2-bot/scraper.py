@@ -3653,11 +3653,63 @@ def check_standin(player_slug: str, match_html: str) -> bool:
     return False
 
 
+def _get_upcoming_lineup(team_id: str) -> list[str]:
+    """
+    Fetch the team's next upcoming match page and return the 5 player slugs
+    actually scheduled to play (catches stand-ins that are absent from the
+    static team-page roster). Returns [] if no upcoming match or parse fails.
+    """
+    sched = _fetch(f"{HLTV_BASE}/matches?team={team_id}")
+    if not sched:
+        return []
+    upcoming, seen = [], set()
+    for mid, slug in re.findall(r'/matches/(\d{7,})/([\w-]+)', sched):
+        if mid in seen:
+            continue
+        seen.add(mid)
+        upcoming.append((mid, slug))
+        if len(upcoming) >= 3:
+            break
+    for mid, slug in upcoming:
+        mp = _fetch(f"{HLTV_BASE}/matches/{mid}/{slug}")
+        if not mp:
+            continue
+        id_to_slug: dict[str, str] = {}
+        for m in re.finditer(r'/player/(\d+)/([\w-]+)', mp):
+            id_to_slug.setdefault(m.group(1), m.group(2))
+        soup = BeautifulSoup(mp, 'html.parser')
+        for div in soup.select('div.lineup'):
+            if not div.find('a', href=re.compile(rf'/team/{team_id}/')):
+                continue
+            pids: list[str] = []
+            for el in div.select('[data-player-id]'):
+                pid = el.get('data-player-id')
+                if pid and pid not in pids:
+                    pids.append(pid)
+            slugs = [id_to_slug[p] for p in pids if p in id_to_slug]
+            if slugs:
+                logger.info(
+                    f"[roster] team {team_id} upcoming-lineup ({mid}): {slugs}"
+                )
+                return slugs
+    return []
+
+
 def get_recent_team_roster(team_id: str, team_slug: str) -> list[str]:
     """
-    Fetch the current HLTV roster for a team and return a list of player slugs.
-    Used to confirm whether a player is an active member or a stand-in.
+    Return the player slugs that should be treated as the team's active roster.
+
+    Strategy:
+      1. Prefer the lineup listed on the team's NEXT upcoming match page —
+         this captures stand-ins (e.g. Alkaren on Cybershoke) and excludes
+         benched players that are still on the static roster (e.g. fluffy).
+      2. Fall back to the static team-page roster if no upcoming match is
+         scheduled or the match-page parse fails.
     """
+    upcoming = _get_upcoming_lineup(team_id)
+    if upcoming:
+        return upcoming
+
     url = f"{HLTV_BASE}/team/{team_id}/{team_slug}"
     html = _fetch(url)
     if not html:
