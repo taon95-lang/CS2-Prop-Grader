@@ -2757,6 +2757,46 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "a3e56690-c1b0-4a1d-a1dc-d883b2982572",
+      "ts": 1776670755.790517,
+      "date": "2026-04-20",
+      "player": "nikodeon",
+      "display": "nikodeon",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 32.0,
+      "under_pct": 68.0,
+      "grade": "10/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "sim_median": 23.5,
+      "hist_median": 23.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "6c46b3ee-4953-4096-9466-e2d4d433641a",
+      "ts": 1776670958.758506,
+      "date": "2026-04-20",
+      "player": "alkaren",
+      "display": "Alkaren",
+      "line": 31.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 72.1,
+      "under_pct": 27.9,
+      "grade": "10/10 (Elite edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 36.0,
+      "hist_median": 36,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
