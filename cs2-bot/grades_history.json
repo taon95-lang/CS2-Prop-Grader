@@ -2797,6 +2797,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "5693f918-5e63-4655-8298-8f6adbb9ae9f",
+      "ts": 1776670963.951122,
+      "date": "2026-04-20",
+      "player": "alkaren",
+      "display": "Alkaren",
+      "line": 31.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 45.2,
+      "under_pct": 54.8,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 20.0,
+      "hist_median": 20,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
