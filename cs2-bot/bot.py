@@ -4565,7 +4565,7 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
     for p in roster:
         try:
             info = await asyncio.to_thread(
-                _vlr.get_player_info, p["display_name"] or p["slug"], 10
+                _vlr.get_player_info, p["display_name"] or p["slug"], "Kills", 10
             )
         except Exception as exc:
             logger.warning(f"[vteam] {p['slug']} fetch failed: {exc}")
