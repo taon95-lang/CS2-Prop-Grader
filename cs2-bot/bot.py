@@ -4886,7 +4886,7 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
         pname = prop["player_name"]
         line_f = float(prop["line"])
         try:
-            info = await asyncio.to_thread(_vlr.get_player_info, pname, 10)
+            info = await asyncio.to_thread(_vlr.get_player_info, pname, "Kills", 10)
         except Exception:
             continue
         if not info or not info.get("map_stats"):
