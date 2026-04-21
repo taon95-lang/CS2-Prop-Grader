@@ -4484,7 +4484,7 @@ def _build_valorant_embed(
 #         best edge × confidence so you can pick the strongest play.
 # ───────────────────────────────────────────────────────────────────────────
 
-@bot.command(name="vteam", aliases=["vt"])
+@bot.command(name="vteam", aliases=["vt", "vteamscan", "vts", "vtscan"])
 async def cmd_vteam(ctx, *, team_arg: str = ""):
     """
     !vteam <Team>  — Grade every player on a Valorant team at their projected
