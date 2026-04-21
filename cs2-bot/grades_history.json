@@ -2817,6 +2817,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "0c32b301-ef7d-4023-8f94-f3d19c8848b6",
+      "ts": 1776757103.722795,
+      "date": "2026-04-21",
+      "player": "faydett",
+      "display": "faydett",
+      "line": 27.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 52.0,
+      "under_pct": 48.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 27.0,
+      "hist_median": 27.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
