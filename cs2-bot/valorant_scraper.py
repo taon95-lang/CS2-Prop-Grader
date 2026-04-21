@@ -976,7 +976,9 @@ def empirical_grade(
     recent_n_maps = min(6, len(kpr_all))
     recent_kpr  = _mean(kpr_all[:recent_n_maps]) if recent_n_maps else _mean(kpr_all)
     overall_kpr = _mean(kpr_all) if kpr_all else 0.0
-    blended_kpr = 0.60 * recent_kpr + 0.40 * overall_kpr
+    # 50/50 recency blend — prevents 6-map sample noise (e.g. one cold series)
+    # from dragging the projection away from the player's true baseline.
+    blended_kpr = 0.50 * recent_kpr + 0.50 * overall_kpr
 
     # Projected rounds (avg of player's historical 2-map totals)
     proj_rounds = _mean(proj_rounds_list) if proj_rounds_list else 44.0
@@ -1080,11 +1082,14 @@ def empirical_grade(
     # ── R7: Strict decision gate ─────────────────────────────────────────
     proj_aligned_over  = z_proj > -0.20
     proj_aligned_under = z_proj <  0.20
+    # Decision band tightened: require ≥70% probability before firing OVER/UNDER.
+    # Anything in the 50–70% range = PASS. Cuts overconfident calls on noisy
+    # mid-tier signal stacks (e.g. flyuh 67.6% UNDER → now correctly PASS).
     decision = "PASS"
     if (n_series >= 5 and abs(edge * 100) >= 7.0):
-        if   over_prob  >= 0.62 and proj_aligned_over  and over_signals  >= 2:
+        if   over_prob  >= 0.70 and proj_aligned_over  and over_signals  >= 2:
             decision = "OVER"
-        elif under_prob >= 0.62 and proj_aligned_under and under_signals >= 2:
+        elif under_prob >= 0.70 and proj_aligned_under and under_signals >= 2:
             decision = "UNDER"
 
     # Confidence interval on hist_median (robust uncertainty band)
