@@ -1052,7 +1052,10 @@ def empirical_grade(
     if total_voting > 0:
         majority   = max(over_signals, under_signals)
         agreement  = majority / total_voting           # 1.0 = unanimous, 0.5 = split
-        align_mult = 0.4 + 0.6 * (agreement ** 2)     # 0.4 → 1.0
+        # Cap at 0.9 (was 1.0): all 5 signals derive from the same 10-series
+        # sample so they're correlated, not independent. Unanimous agreement
+        # shouldn't get full credit. Prevents 95%+ overconfidence stacks.
+        align_mult = 0.4 + 0.5 * (agreement ** 2)     # 0.4 → 0.9
     else:
         align_mult = 0.5  # nothing voting either way → max softening
 
@@ -1065,6 +1068,19 @@ def empirical_grade(
     logit *= shrink
 
     over_prob  = 1.0 / (1.0 + math.exp(-logit))
+
+    # ── Sample-size probability cap ──────────────────────────────────────
+    # With small samples, the model cannot statistically justify extreme
+    # probabilities. Wilson 95% CI on 10 series caps justifiable claim near
+    # 88-92%. Hard-cap output to prevent overconfident grades like
+    # Kumi @ 32 → 95% OVER (true rate could plausibly be 50-70%).
+    if   n_series <= 4:  prob_cap = 0.72
+    elif n_series <= 6:  prob_cap = 0.80
+    elif n_series <= 8:  prob_cap = 0.85
+    elif n_series <= 12: prob_cap = 0.88
+    elif n_series <= 18: prob_cap = 0.91
+    else:                prob_cap = 0.94
+    over_prob  = max(1.0 - prob_cap, min(prob_cap, over_prob))
     under_prob = 1.0 - over_prob
     edge       = over_prob - 0.5238
 
