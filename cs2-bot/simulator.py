@@ -580,6 +580,67 @@ def run_simulation(
     hist_avg    = mean(series_totals) if series_totals else mean(stat_values) * 2
     hist_median = median(series_totals) if series_totals else median(stat_values) * 2
 
+    # ── Adaptive probability cap (CS2: sample × volatility × floor) ─────
+    # Mirrors Valorant's three-cap stacking. Stops 90%+ confidence calls
+    # on noisy samples or players whose floor is far below the line.
+    # Example: Smash @ 26.5 — floor was 11 (a 13-3 sweep). Floor / line =
+    # 0.42 → cap_floor = 0.70 instead of letting the model claim 80%+.
+    if series_totals:
+        _floor   = min(series_totals)
+        _ceiling = max(series_totals)
+        _hist_avg_real = mean(series_totals)
+        _sigma   = float(np.std(series_totals)) if len(series_totals) > 1 else 0.0
+        _cv      = (_sigma / _hist_avg_real) if _hist_avg_real > 0 else 1.0
+        _n       = len(series_totals)
+
+        if   _n <= 4:  cap_n = 0.72
+        elif _n <= 6:  cap_n = 0.80
+        elif _n <= 8:  cap_n = 0.85
+        elif _n <= 12: cap_n = 0.88
+        elif _n <= 18: cap_n = 0.91
+        else:          cap_n = 0.94
+
+        if   _sigma >= 8 or _cv >= 0.30: cap_vol = 0.72
+        elif _sigma >= 5 or _cv >= 0.18: cap_vol = 0.80
+        else:                            cap_vol = 0.92
+
+        if line > 0:
+            _floor_ratio   = _floor   / line
+            _ceiling_ratio = _ceiling / line
+            if over_prob >= 0.5:
+                if   _floor_ratio >= 1.0:  cap_floor = 0.95
+                elif _floor_ratio >= 0.85: cap_floor = 0.85
+                elif _floor_ratio >= 0.70: cap_floor = 0.78
+                else:                      cap_floor = 0.70
+            else:
+                if   _ceiling_ratio <= 1.0:  cap_floor = 0.95
+                elif _ceiling_ratio <= 1.15: cap_floor = 0.85
+                elif _ceiling_ratio <= 1.30: cap_floor = 0.78
+                else:                        cap_floor = 0.70
+        else:
+            cap_floor = 0.95
+
+        prob_cap = min(cap_n, cap_vol, cap_floor)
+        _orig_over = over_prob
+        # Reserve push mass first; over+under share what's left of probability
+        # space. This keeps push_prob exactly unchanged across the cap.
+        _avail        = max(0.0, 1.0 - push_prob)
+        _cap_hi       = min(prob_cap, _avail)
+        _cap_lo       = max(_avail - prob_cap, 0.0)
+        over_prob     = max(_cap_lo, min(_cap_hi, over_prob))
+        under_prob    = max(0.0, _avail - over_prob)
+        if abs(over_prob - _orig_over) > 0.001:
+            logger.info(
+                f"[sim] CS2 prob cap applied: {_orig_over*100:.1f}% → {over_prob*100:.1f}% "
+                f"(cap_n={cap_n} cap_vol={cap_vol} cap_floor={cap_floor}, push={push_prob*100:.1f}%)"
+            )
+        # Invariants: push unchanged, all in [0,1], sum ≈ 1
+        assert abs((over_prob + under_prob + push_prob) - 1.0) < 1e-6, (
+            f"prob mass broken: over={over_prob} under={under_prob} push={push_prob}"
+        )
+    else:
+        prob_cap = 0.85
+
     # --- Grading ---
     edge = over_prob - 0.5
 

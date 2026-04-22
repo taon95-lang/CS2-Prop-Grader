@@ -2837,6 +2837,46 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "298ee9bf-ef4b-4f48-8585-304c61bf05fd",
+      "ts": 1776866892.090042,
+      "date": "2026-04-22",
+      "player": "s4ltovsk1yy",
+      "display": "s4ltovsk1yy",
+      "line": 30.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 20.0,
+      "under_pct": 80.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 28.0,
+      "hist_median": 28.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "989230e8-3b4e-4abb-bccc-afbd0990faa6",
+      "ts": 1776866925.756898,
+      "date": "2026-04-22",
+      "player": "s4ltovsk1yy",
+      "display": "s4ltovsk1yy",
+      "line": 30.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 62.0,
+      "under_pct": 38.0,
+      "grade": "8/10 (Strong edge)",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "sim_median": 33.5,
+      "hist_median": 33.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
