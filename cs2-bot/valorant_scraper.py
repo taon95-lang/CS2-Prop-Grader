@@ -980,9 +980,53 @@ def empirical_grade(
     # from dragging the projection away from the player's true baseline.
     blended_kpr = 0.50 * recent_kpr + 0.50 * overall_kpr
 
-    # Projected rounds (avg of player's historical 2-map totals)
+    # ── Match-length adjustment by opponent strength ─────────────────────
+    # Mismatch → shorter maps (more 13-3, 13-5 type scores → fewer total
+    # rounds → fewer kills available). Closer match → more 13-11/OT rounds.
+    # Adjustment caps at ±15% of historical avg to avoid wild swings.
     proj_rounds = _mean(proj_rounds_list) if proj_rounds_list else 44.0
-    expected_total = blended_kpr * proj_rounds
+    avg_opp = (
+        sum(r for _, r in rated_pairs) / len(rated_pairs)
+        if rated_pairs else None
+    )
+    round_adj_pct = 0.0
+    if today_opp_rating is not None and avg_opp is not None:
+        gap = today_opp_rating - avg_opp  # +ve = opp stronger than usual
+        # Each 200pt rating gap → ~5% round-count shift (closer match → +rounds)
+        round_adj_pct = max(-0.15, min(0.15, (gap / 200.0) * 0.05))
+        # Sweep risk: if opp is much weaker AND player's team is much stronger,
+        # apply extra round downgrade (blowout potential)
+        if gap < -300:
+            round_adj_pct -= 0.05
+    proj_rounds_adj = proj_rounds * (1.0 + round_adj_pct)
+
+    # ── Map-pool aware projection (veto uncertainty hedge) ───────────────
+    # Without knowing the actual veto, opponents typically ban into the
+    # player's strongest maps. Build per-map kill totals; blend the global
+    # KPR projection with a conservative basket (player's lower 50% of maps
+    # by avg kills/map) at 65/35. Pulls projections back when a player has
+    # weak maps in their pool that opponents will likely force.
+    by_map: dict = {}
+    for m in valid_maps:
+        nm = (m.get("map_name") or "").strip()
+        if not nm or nm.lower() in ("unknown", ""):
+            continue
+        by_map.setdefault(nm, []).append(m["stat_value"])
+    map_pool_kpr_blend = blended_kpr
+    map_pool_used = False
+    if len(by_map) >= 3:
+        # avg kills per map for each pool entry, weighted by sample (cap n=3)
+        per_map_avg = sorted(_mean(v) for v in by_map.values())
+        # Bottom-half basket: maps the player is worst on
+        half = max(2, len(per_map_avg) // 2)
+        weak_basket_avg = _mean(per_map_avg[:half])  # kills/map on weak maps
+        # Convert to per-map KPR equivalent (assume 22 rounds/map)
+        weak_kpr_equiv = weak_basket_avg / 22.0
+        # 65% global projection / 35% conservative weak-pool basket
+        map_pool_kpr_blend = 0.65 * blended_kpr + 0.35 * weak_kpr_equiv
+        map_pool_used = True
+
+    expected_total = map_pool_kpr_blend * proj_rounds_adj
 
     # ── R2: Clip projection to player's IQR ──────────────────────────────
     s_sorted = sorted(series_totals)
@@ -1069,17 +1113,45 @@ def empirical_grade(
 
     over_prob  = 1.0 / (1.0 + math.exp(-logit))
 
-    # ── Sample-size probability cap ──────────────────────────────────────
-    # With small samples, the model cannot statistically justify extreme
-    # probabilities. Wilson 95% CI on 10 series caps justifiable claim near
-    # 88-92%. Hard-cap output to prevent overconfident grades like
-    # Kumi @ 32 → 95% OVER (true rate could plausibly be 50-70%).
-    if   n_series <= 4:  prob_cap = 0.72
-    elif n_series <= 6:  prob_cap = 0.80
-    elif n_series <= 8:  prob_cap = 0.85
-    elif n_series <= 12: prob_cap = 0.88
-    elif n_series <= 18: prob_cap = 0.91
-    else:                prob_cap = 0.94
+    # ── Adaptive probability cap (sample × volatility × floor) ───────────
+    # Stack three caps and take the strictest:
+    #   1. Sample size (Wilson CI logic)
+    #   2. Volatility — high σ means single-game variance can blow up
+    #      any "confident" call; cap aggressively
+    #   3. Floor proximity — if the player has historically scored well
+    #      below the line, even an "OVER" pick must concede that risk
+    # Prevents the Kumi @ 32 case (95% confident on a player whose floor
+    # is 23 = 72% of line, with σ=5+).
+    if   n_series <= 4:  cap_n = 0.72
+    elif n_series <= 6:  cap_n = 0.80
+    elif n_series <= 8:  cap_n = 0.85
+    elif n_series <= 12: cap_n = 0.88
+    elif n_series <= 18: cap_n = 0.91
+    else:                cap_n = 0.94
+
+    cv = sigma / hist_avg if hist_avg > 0 else 1.0
+    if   sigma >= 8 or cv >= 0.30: cap_vol = 0.72   # ⚡ high vol
+    elif sigma >= 5 or cv >= 0.18: cap_vol = 0.80   # 🌊 moderate
+    else:                          cap_vol = 0.92   # 🎯 consistent
+
+    # Floor proximity: how far is the player's worst game from the line?
+    # OVER bets need floor close to line. UNDER bets need ceiling close.
+    floor_ratio   = (floor   / line) if line > 0 else 1.0
+    ceiling_ratio = (ceiling / line) if line > 0 else 1.0
+    if over_prob >= 0.5:
+        # OVER pick — what % of line did the floor reach?
+        if   floor_ratio >= 1.0:  cap_floor = 0.95   # floor clears line
+        elif floor_ratio >= 0.85: cap_floor = 0.85
+        elif floor_ratio >= 0.70: cap_floor = 0.78
+        else:                     cap_floor = 0.70   # floor far below line
+    else:
+        # UNDER pick — what % of line did the ceiling exceed?
+        if   ceiling_ratio <= 1.0:  cap_floor = 0.95
+        elif ceiling_ratio <= 1.15: cap_floor = 0.85
+        elif ceiling_ratio <= 1.30: cap_floor = 0.78
+        else:                       cap_floor = 0.70
+
+    prob_cap = min(cap_n, cap_vol, cap_floor)
     over_prob  = max(1.0 - prob_cap, min(prob_cap, over_prob))
     under_prob = 1.0 - over_prob
     edge       = over_prob - 0.5238
@@ -1138,10 +1210,7 @@ def empirical_grade(
     ci_low  = round(hist_median - sigma, 1)
     ci_high = round(hist_median + sigma, 1)
 
-    avg_opp_rating = (
-        round(sum(r for _, r in rated_pairs) / len(rated_pairs))
-        if rated_pairs else None
-    )
+    avg_opp_rating = round(avg_opp) if avg_opp is not None else None
 
     return {
         "stat_type":       stat_type,
@@ -1169,8 +1238,13 @@ def empirical_grade(
         # Predictive transparency
         "expected_total":  round(expected_total, 2),
         "blended_kpr":     round(blended_kpr, 3),
+        "map_pool_kpr":    round(map_pool_kpr_blend, 3),
+        "map_pool_used":   map_pool_used,
         "recent_kpr":      round(recent_kpr, 3),
         "proj_rounds":     round(proj_rounds, 1),
+        "proj_rounds_adj": round(proj_rounds_adj, 1),
+        "round_adj_pct":   round(round_adj_pct * 100, 1),
+        "prob_cap_used":   round(prob_cap, 2),
         "trend_pct":       round(trend_pct, 1),
         "z_projection":    round(z_proj, 2),
         "z_median":        round(z_med, 2),
@@ -1197,3 +1271,119 @@ def empirical_grade(
 
 # Friendly alias for new callers
 predict_over_under = empirical_grade
+
+
+def classify_miss(sim: dict, line: float, actual_total: int,
+                  actual_rounds: int | None = None) -> dict:
+    """
+    Classify why a graded prop missed. Returns a dict with:
+      cause:      one of "round-count", "kpr", "map-veto", "role-change",
+                  "variance", "correct" (no miss)
+      severity:   "minor" (close call) | "major" (model was significantly off)
+      details:    human-readable explanation
+      delta:      actual - line (how much it missed by)
+    """
+    decision = sim.get("decision", "PASS")
+    over_won  = actual_total >  line
+    under_won = actual_total <  line
+
+    # PASS — bot correctly skipped. Still classify which side won + why,
+    # so the user can see the model's actual projection vs reality.
+    if decision == "PASS":
+        winning_side = "OVER" if over_won else ("UNDER" if under_won else "PUSH")
+        return {
+            "cause":   "skipped",
+            "severity": "minor",
+            "details": (
+                f"Bot did not bet this — current model would PASS. "
+                f"Actual {actual_total} vs line {line:g} = {winning_side}. "
+                f"Model projection was {sim.get('expected_total', 0):.1f}."
+            ),
+            "delta":   actual_total - line,
+        }
+
+    won = (decision == "OVER" and over_won) or (decision == "UNDER" and under_won)
+    if won:
+        return {"cause": "correct", "details": "Bot was right", "delta": actual_total - line}
+
+    delta = actual_total - line
+    expected = sim.get("expected_total", sim.get("hist_avg", 0)) or 0
+    proj_rounds = sim.get("proj_rounds_adj") or sim.get("proj_rounds") or 44
+    blended_kpr = sim.get("blended_kpr") or 0
+    sigma = sim.get("stability_std") or 1.0
+
+    # ── Round-count miss ─────────────────────────────────────────────────
+    # If we know actual rounds and they're way off projection, that's the
+    # primary cause regardless of other factors.
+    if actual_rounds and proj_rounds:
+        round_gap = (actual_rounds - proj_rounds) / proj_rounds
+        if abs(round_gap) >= 0.20:
+            implied_kills = blended_kpr * actual_rounds
+            return {
+                "cause":   "round-count",
+                "severity": "major" if abs(round_gap) >= 0.30 else "minor",
+                "details": (
+                    f"Match ran {actual_rounds} rounds vs projected {proj_rounds:.0f} "
+                    f"({round_gap*100:+.0f}%). At your KPR ({blended_kpr:.2f}) that "
+                    f"changes expected kills by {implied_kills - expected:+.1f}."
+                ),
+                "delta": delta,
+            }
+
+    # ── Variance miss ────────────────────────────────────────────────────
+    # Within ~1σ of model — model was right, dice rolled wrong. Common,
+    # not a model bug.
+    if abs(actual_total - expected) <= sigma:
+        return {
+            "cause":   "variance",
+            "severity": "minor",
+            "details": (
+                f"Actual ({actual_total}) within 1σ of model expectation "
+                f"({expected:.1f} ± {sigma:.1f}). Normal variance — bet was sound."
+            ),
+            "delta": delta,
+        }
+
+    # ── KPR miss (player underperformed/overperformed their baseline) ────
+    if actual_rounds:
+        actual_kpr = actual_total / actual_rounds
+        kpr_gap = (actual_kpr - blended_kpr) / max(blended_kpr, 0.01)
+        if abs(kpr_gap) >= 0.20:
+            return {
+                "cause":   "kpr",
+                "severity": "major" if abs(kpr_gap) >= 0.35 else "minor",
+                "details": (
+                    f"Player's actual KPR ({actual_kpr:.2f}) was {kpr_gap*100:+.0f}% "
+                    f"vs projected ({blended_kpr:.2f}). Player had an off-day, OR "
+                    f"role/agent shift, OR opponent was stylistically different than "
+                    f"expected."
+                ),
+                "delta": delta,
+            }
+
+    # ── Map-veto miss (player got their weak maps) ───────────────────────
+    # If model didn't use map-pool weighting OR if the gap is large,
+    # likely the actual map pool favored the opponent.
+    if not sim.get("map_pool_used"):
+        return {
+            "cause":   "map-veto",
+            "severity": "major",
+            "details": (
+                "Model used global KPR (insufficient map-pool data). "
+                f"Actual ({actual_total}) deviated from projection ({expected:.1f}). "
+                "Likely the actual veto landed on player's weak maps."
+            ),
+            "delta": delta,
+        }
+
+    # ── Default: unexplained variance / model error ──────────────────────
+    return {
+        "cause":   "variance",
+        "severity": "major",
+        "details": (
+            f"Actual ({actual_total}) outside 1σ of model expectation "
+            f"({expected:.1f} ± {sigma:.1f}) but no single cause dominates. "
+            f"Likely a combination of map veto + KPR + round-count drift."
+        ),
+        "delta": delta,
+    }

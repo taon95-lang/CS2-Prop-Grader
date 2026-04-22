@@ -1,0 +1,13 @@
+For CS2, every grade should print a minimum card that mirrors the best of what HLTV already exposes. At minimum, the grading sheet should include player rating, firepower, role profile, HS% when relevant, KPR, DPR, ADR, KAST, impact, round swing, opening attempts and success, entrying, trading, current team ranking, opponent ranking bucket, recent last month and last 3 months splits, featured splits versus top 20/top 30/top 50, likely veto maps, and the relevant best-of format filter. HLTV’s player pages and filters already support nearly all of that structure, including opponent buckets, form windows, time filters, map filters, BO filters, and opening-kill stats. 
+
+From there, the model should change in four important ways.
+
+First, it should build the projection bottom-up, not top-down. For a maps 1+2 kill prop, that means projecting kills separately on each likely first-two-map outcome and then blending those scenarios by veto probability. The model should never just take a global KPR and multiply by a guessed round count if the veto is knowable.
+
+Second, it should use empirical shrinkage. If the recent sample says a player is running hot, that is useful, but the number should be pulled back toward the player’s larger baseline and role baseline unless the sample is large enough to justify the move. This is how you prevent 64%-70% evidence from becoming a 95% claim.
+
+Third, it should add calibration caps. My recommendation would be simple: do not allow a model to call a prop extreme confidence unless all of the following are true at once: large comparable sample, stable role, favorable likely maps, strong similar-opponent split, and a historically well-calibrated confidence bucket. If one of those breaks, confidence should be capped aggressively.
+
+Fourth, it should label misses by cause. Every settled prop should be tagged as a round-count miss, KPR miss, map-veto miss, role-change miss, or variance miss. Your Kumi example is mostly a KPR miss with some evidence of a map-veto modeling problem. That classification matters because it tells you what to fix.
+
+One more improvement is especially important for your use case: define “similar teams” rigorously. In CS2, that should usually mean ranking buckets from HLTV plus form filters, not a hand-built “good teams / bad teams” label. If you want stronger grading, use the site’s existing opponent buckets and recent-window filters instead of loose opponent labels.

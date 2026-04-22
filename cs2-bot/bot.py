@@ -4710,6 +4710,100 @@ async def cmd_vteam(ctx, *, team_arg: str = ""):
     await msg.edit(embed=embed)
 
 
+@bot.command(name="postmortem", aliases=["miss", "vmiss", "pm"])
+async def cmd_postmortem(ctx, player_name: str = None, line: str = None,
+                         actual: str = None, rounds: str = None):
+    """
+    Classify why a Valorant prop missed. Usage:
+      !postmortem <player> <line> <actual_kills> [actual_rounds]
+    Example:
+      !postmortem kumi 32 26 42
+    Tags the cause: round-count, kpr, map-veto, variance, or correct.
+    """
+    if not all([player_name, line, actual]):
+        await ctx.send(embed=discord.Embed(
+            title="❌ Usage",
+            description=(
+                "**`!postmortem <player> <line> <actual> [rounds]`**\n\n"
+                "**Example:** `!postmortem kumi 32 26 42`\n\n"
+                "Re-runs the grade and classifies why it missed:\n"
+                "• `round-count` — match was way longer/shorter than projected\n"
+                "• `kpr` — player's per-round output was off-baseline (off-day, role/agent shift)\n"
+                "• `map-veto` — opp banned into player's strong maps\n"
+                "• `variance` — within 1σ of model, normal noise\n"
+                "• `correct` — bet won"
+            ), color=0xFF4136))
+        return
+
+    try:
+        line_f   = float(line)
+        actual_i = int(actual)
+        rounds_i = int(rounds) if rounds else None
+    except ValueError:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Bad Numbers",
+            description="line/actual/rounds must be numeric",
+            color=0xFF4136)); return
+
+    msg = await ctx.send(embed=discord.Embed(
+        title="🔍 Running Post-Mortem…",
+        description=f"Re-grading `{player_name}` @ {line_f:g} vs actual {actual_i} kills.",
+        color=0x9146FF))
+
+    try:
+        info = await asyncio.to_thread(_vlr.get_player_info, player_name, "Kills", 10)
+    except Exception as exc:
+        await msg.edit(embed=discord.Embed(
+            title="❌ Lookup Failed", description=str(exc)[:200], color=0xFF4136)); return
+    if not info or not info.get("map_stats"):
+        await msg.edit(embed=discord.Embed(
+            title="❌ No Data", description=f"No map stats for {player_name}", color=0xFF4136)); return
+
+    ms = [dict(m, rounds=m.get("rounds", 24)) for m in info["map_stats"]]
+    sim = _vlr.empirical_grade(ms, line_f, "Kills")
+    if sim.get("error"):
+        await msg.edit(embed=discord.Embed(
+            title="❌ Grade Error", description=sim["error"], color=0xFF4136)); return
+
+    cause = _vlr.classify_miss(sim, line_f, actual_i, rounds_i)
+
+    cause_icons = {
+        "correct": "✅", "variance": "🎲", "round-count": "⏱️",
+        "kpr": "🎯", "map-veto": "🗺️", "role-change": "🔄", "skipped": "⏸️",
+    }
+    icon = cause_icons.get(cause["cause"], "❓")
+    sev  = cause.get("severity", "")
+    title_sev = f" ({sev})" if sev else ""
+
+    color = 0x2ECC71 if cause["cause"] == "correct" else (
+        0xFFDC00 if cause["cause"] == "variance" else 0xFF4136)
+
+    delta = cause.get("delta", 0)
+    delta_str = f"{delta:+.1f}"
+
+    embed = discord.Embed(
+        title=f"{icon} Post-Mortem: {info.get('display_name', player_name)} @ {line_f:g}",
+        description=(
+            f"**Bot called:** {sim['decision']} ({sim['over_prob']:.0f}% / {sim['under_prob']:.0f}%)\n"
+            f"**Actual:** {actual_i} kills (line {line_f:g}, delta `{delta_str}`)\n"
+            f"**Result:** **{cause['cause'].upper()}** miss{title_sev}"
+        ),
+        color=color,
+    )
+    embed.add_field(name="📋 What happened", value=cause.get("details", "—"), inline=False)
+    embed.add_field(name="📊 Model state at grade time", value=(
+        f"Expected: **{sim.get('expected_total', 0):.1f}** kills "
+        f"(KPR {sim.get('blended_kpr', 0):.2f} × {sim.get('proj_rounds_adj', sim.get('proj_rounds', 0)):.0f} rounds)\n"
+        f"Map-pool weighting: {'✅ used' if sim.get('map_pool_used') else '❌ insufficient data'}\n"
+        f"Round adj: {sim.get('round_adj_pct', 0):+.0f}%  ·  "
+        f"Prob cap: {sim.get('prob_cap_used', 0)*100:.0f}%\n"
+        f"σ: {sim.get('stability_std', 0):.1f}  ·  "
+        f"Floor: {sim.get('floor', 0)}  ·  Ceiling: {sim.get('ceiling', 0)}"
+    ), inline=False)
+
+    await msg.edit(embed=embed)
+
+
 @bot.command(name="vgrade", aliases=["vg"])
 async def cmd_vgrade(ctx, player_name: str = None, line: str = None, *args):
     """Grade a Valorant kills prop. Usage: !vgrade <player> [line]"""
