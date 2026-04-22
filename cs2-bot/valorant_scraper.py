@@ -1102,11 +1102,37 @@ def empirical_grade(
     # Anything in the 50–70% range = PASS. Cuts overconfident calls on noisy
     # mid-tier signal stacks (e.g. flyuh 67.6% UNDER → now correctly PASS).
     decision = "PASS"
+    is_lock  = False
+    lock_reasons: list[str] = []
     if (n_series >= 5 and abs(edge * 100) >= 7.0):
         if   over_prob  >= 0.70 and proj_aligned_over  and over_signals  >= 2:
             decision = "OVER"
         elif under_prob >= 0.70 and proj_aligned_under and under_signals >= 2:
             decision = "UNDER"
+
+    # ── CERTIFIED LOCK gate ──────────────────────────────────────────────
+    # Strict, all-or-nothing. Every box must be ticked. No exceptions.
+    # Designed to fire only on plays where the model + history + context
+    # all align with no contradicting evidence. Realistically 0-3 per slate.
+    if decision in ("OVER", "UNDER"):
+        prob       = over_prob if decision == "OVER" else under_prob
+        sigs       = over_signals if decision == "OVER" else under_signals
+        opp_sigs   = under_signals if decision == "OVER" else over_signals
+        emp_hit    = (overs / n_series) if decision == "OVER" else ((n_series - overs - pushes) / n_series)
+        floor_ok   = (floor  > line) if decision == "OVER" else (ceiling < line)
+        stable     = sigma <= 5 and (sigma / hist_avg if hist_avg > 0 else 1.0) <= 0.18
+        lock_checks = {
+            "Probability ≥85%":          prob >= 0.85,
+            "Sample ≥8 series":          n_series >= 8,
+            "Hit rate ≥80%":             emp_hit >= 0.80,
+            "Edge vs -110 ≥+25pts":      abs(edge * 100) >= 25,
+            "Unanimous signals (4+/0)":  sigs >= 4 and opp_sigs == 0,
+            "Floor clears line":         floor_ok,
+            "Low volatility":            stable,
+            "Recency not opposing":      (trend_pct >= -3) if decision == "OVER" else (trend_pct <= 3),
+        }
+        is_lock = all(lock_checks.values())
+        lock_reasons = [k for k, v in lock_checks.items() if not v]
 
     # Confidence interval on hist_median (robust uncertainty band)
     ci_low  = round(hist_median - sigma, 1)
@@ -1131,6 +1157,8 @@ def empirical_grade(
         "push_prob":       round((pushes / n_series) * 100, 1) if n_series else 0,
         "edge":            round(edge * 100, 1),
         "decision":        decision,
+        "is_lock":         is_lock,
+        "lock_misses":     lock_reasons,
         "ceiling":         ceiling,
         "floor":           floor,
         "stability_std":   round(sigma, 2),

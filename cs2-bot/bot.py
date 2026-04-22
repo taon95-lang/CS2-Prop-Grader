@@ -4271,9 +4271,11 @@ def _build_valorant_embed(
     series_list = list(series.values())  # newest-first
 
     # Header projection words
-    if   decision == "OVER":  proj_word, proj_icon = "MORE", "✅"
-    elif decision == "UNDER": proj_word, proj_icon = "LESS", "❌"
+    is_lock = bool(sim.get("is_lock"))
+    if   decision == "OVER":  proj_word, proj_icon = "MORE", ("🔒" if is_lock else "✅")
+    elif decision == "UNDER": proj_word, proj_icon = "LESS", ("🔒" if is_lock else "❌")
     else:                     proj_word, proj_icon = "NO BET", "⏸️"
+    lock_tag = "  ·  🔒 **CERTIFIED LOCK**" if is_lock else ""
 
     over_p = sim.get("over_prob", 50.0)
 
@@ -4285,16 +4287,34 @@ def _build_valorant_embed(
     # Confidence is shown in its dedicated field below (composite score:
     # edge + hit-rate + sample-size + stability + recency). Keeping the
     # header lean — projection only — avoids two competing numbers.
+    _decision_label = ("🔒 LOCK " + decision) if is_lock else decision
     embed = discord.Embed(
-        title=f"{proj_icon}  {info['display_name']}{_vs_label}  ·  {line:g} {sim['stat_type']}  ·  {decision}",
+        title=f"{proj_icon}  {info['display_name']}{_vs_label}  ·  {line:g} {sim['stat_type']}  ·  {_decision_label}",
         description=(
-            f"**Projection:** {proj_word} {line:g}\n"
+            f"**Projection:** {proj_word} {line:g}{lock_tag}\n"
             f"**Game:** Valorant  ·  **Source:** vlr.gg  ·  "
             f"**Series:** {sim['n_series']}  ·  **Maps:** {sim['n_samples']}"
             f"{_opp_rating_line}"
         ),
-        color=color,
+        color=(0xFFD700 if is_lock else color),
     )
+    if is_lock:
+        embed.add_field(
+            name="🔒 CERTIFIED LOCK",
+            value=(
+                "All 8 lock criteria met: prob ≥85%, sample ≥8, hit ≥80%, "
+                "edge ≥+25pts, unanimous signals, floor clears line, low "
+                "volatility, recency aligned. Bet with full conviction."
+            ),
+            inline=False,
+        )
+    elif sim.get("lock_misses"):
+        misses = sim["lock_misses"]
+        embed.add_field(
+            name=f"🔓 Not a Lock — {len(misses)} criteria short",
+            value="• " + "\n• ".join(misses),
+            inline=False,
+        )
 
     # Probability box
     embed.add_field(
@@ -4920,6 +4940,7 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
             "team":     prop.get("player_team", ""),
             "line":     line_f,
             "decision": decision,
+            "is_lock":  bool(sim.get("is_lock")),
             "edge_pct": abs(sim.get("over_prob", 50) - 50),
             "conf":     conf,
             "score":    conf * (1 + abs(sim.get("over_prob", 50) - 50)/100),
@@ -4938,8 +4959,10 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
         )); return
 
     actionable = [g for g in graded if g["decision"] in ("OVER", "UNDER")]
-    actionable.sort(key=lambda g: g["score"], reverse=True)
+    # Locks always sort to the top, then by score
+    actionable.sort(key=lambda g: (not g["is_lock"], -g["score"]))
     top = actionable[:15]
+    locks = [g for g in actionable if g["is_lock"]]
 
     if not top:
         await msg.edit(embed=discord.Embed(
@@ -4954,6 +4977,9 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
             icon, dec_str, ev = "✅", f"OVER {g['line']:.1f}", g["ev_over"]
         else:
             icon, dec_str, ev = "❌", f"UNDER {g['line']:.1f}", g["ev_under"]
+        if g["is_lock"]:
+            icon = "🔒"
+            dec_str = "LOCK " + dec_str
         ev_str = f"{'+' if (ev or 0) >= 0 else ''}{(ev or 0):.3f}u"
         trend = "🔥" if g["trend"] >= 8 else ("🧊" if g["trend"] <= -8 else "➖")
         rows.append(
@@ -4962,15 +4988,17 @@ async def cmd_vpp(ctx, *, filter_arg: str = ""):
             f"Hit `{g['hit_rate']:.0f}%`  Avg `{g['hist_avg']:.1f}`  EV `{ev_str}` {trend}"
         )
 
+    lock_summary = f" · 🔒 **{len(locks)} CERTIFIED LOCK{'S' if len(locks) != 1 else ''}**" if locks else ""
     embed = discord.Embed(
         title=f"🎯 Valorant PrizePicks Slate — Top {len(top)} Plays",
         description=(
             f"📊 Graded **{len(graded)}** live props · "
             f"🏆 **{len(actionable)} actionable** (OVER/UNDER) · "
-            f"⏸️ {len(graded)-len(actionable)} PASS\n\n"
+            f"⏸️ {len(graded)-len(actionable)} PASS"
+            f"{lock_summary}\n\n"
             + "\n\n".join(rows)
         ),
-        color=0x9146FF,
+        color=(0xFFD700 if locks else 0x9146FF),
     )
     embed.set_footer(text="Valorant · Live PrizePicks lines · Ranked by Conf × (1+Edge) · empirical grading")
     await msg.edit(embed=embed)
