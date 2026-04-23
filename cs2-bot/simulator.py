@@ -14,6 +14,24 @@ N_SIMULATIONS = 0
 # Standard sportsbook vig (-110 both sides = 52.38% implied probability)
 BOOK_IMPLIED_PROB = 0.5238
 
+# ── Bayesian regression-to-the-mean for projections ─────────────────────────
+# Diagnosis (Apr 2026 audit, n=139 settled grades):
+#   • sim_median had +3.95 mean error (bot consistently OVER-projected)
+#   • Bot's projection MAE (7.52) was WORSE than the bookmaker's line MAE (6.34)
+#   • Top-tier "Elite Edge" calls hit 54%, vs "Small Edge" hitting 83% — i.e.
+#     the bot's confidence was inversely correlated with hit rate.
+#
+# Root cause: with n≥8 series, the existing book-shrink does nothing, leaving
+# raw recent-form to drive over_prob with zero regression to the mean.
+#
+# Fix: blend the projection toward a population mean using prior strength K.
+# At n=10 series, K=12 → 45% player / 55% population weight.
+# Backtested on the same 139 settled grades: lifted hit rate from 60% → 66%
+# and units from +10 to +18 (Policy C, k=12).
+POP_MEAN_KILLS_BO3 = 27.65   # empirical mean of actual BO3 maps 1+2 kill totals
+POP_MEAN_HS_BO3    = 11.0    # placeholder — refine when HS settles land
+PROJ_SHRINK_K      = 12      # prior strength (higher = more shrinkage)
+
 
 def _trimmed_mean(values: list, pct: float = 0.10) -> float:
     """Mean after trimming `pct` from each tail (default 10/10). Robust to outliers."""
@@ -458,6 +476,31 @@ def run_simulation(
             f"[sim] Empirical+weighted blend — anchor={expected_total:.2f} "
             f"w_mean={_w_mean:.2f} w_total={_w_total_proj:.2f}"
         )
+
+    # ── Bayesian regression-to-the-mean (Apr 2026 calibration fix) ──────────
+    # Without this, players coming off a hot run (n=10 series with raw mean
+    # well above population) get projected at their hot-form rate, generating
+    # phantom OVER edges. See header constants for diagnosis details.
+    if series_totals:
+        # Pick prior based on stat type; default to kills if unknown
+        if stat_type and "head" in stat_type.lower():
+            pop_mean = POP_MEAN_HS_BO3
+        else:
+            pop_mean = POP_MEAN_KILLS_BO3
+        n_series = len(series_totals)
+        w_player = n_series / (n_series + PROJ_SHRINK_K)
+        pre_shrink = expected_total
+        expected_total = w_player * expected_total + (1.0 - w_player) * pop_mean
+        # Propagate shrinkage to series_totals so the empirical over/under
+        # count below inherits the regression — otherwise the projection and
+        # the probability disagree.
+        delta = expected_total - pre_shrink
+        if abs(delta) > 0.01:
+            series_totals = [v + delta for v in series_totals]
+            logger.info(
+                f"[sim] R2M shrinkage: {pre_shrink:.2f} → {expected_total:.2f} "
+                f"(pop_mean={pop_mean}, n={n_series}, w_player={w_player:.2f}, Δ={delta:+.2f})"
+            )
 
     # Sim-mean / sim-std / sim-median now come from empirical stats.
     # We keep the field names (`sim_*`) for downstream backward-compat.
