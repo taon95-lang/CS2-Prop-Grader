@@ -491,6 +491,7 @@ def _fetch_via_apify_proxy(url: str, referer: str = "") -> str | None:
     # Try multiple auth formats — Apify changed how they handle credentials
     proxy_candidates = [
         f"http://auto:{token}@proxy.apify.com:8000",
+        f"http://groups-BUYPROXIES94952:{token}@proxy.apify.com:8000",
         f"http://groups-RESIDENTIAL:{token}@proxy.apify.com:8000",
         f"http://{token}:@proxy.apify.com:8000",
     ]
