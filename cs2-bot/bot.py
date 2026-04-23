@@ -668,43 +668,64 @@ def _analyze_player(
     if stat_type == "HS" and not used_fallback:
         n_hs_matches = info.get("hs_pct_n_matches", 0)
 
-        # Priority 0: period stats page HS% (90-day aggregate, most reliable)
-        if period_stats and period_stats.get("hs_pct") is not None:
-            _ps_hs  = period_stats["hs_pct"] / 100.0
-            hs_rate     = _ps_hs
-            hs_rate_src = f"HLTV stats page 90d ({round(period_stats['hs_pct'])}%)"
-            logger.info(f"[hs_scale] Using period stats HS%: {hs_rate_src}")
+        # ── Sanity cap on rifler HS% ──────────────────────────────────────────
+        # Rifler career HS% rarely exceeds 60%. Anything ≥ 65% is almost
+        # certainly KAST% leaking through from a wrong column scrape (KAST
+        # commonly sits at 65-78% for pros). HLTV's overview pages have
+        # historically had this bug; we treat any value above this cap as
+        # contaminated and ignore it in favor of cleaner sources.
+        _RIFLER_HS_CAP = 0.65
 
-        # Priority 1: recent HS% derived from actual match pages (last ~10 matches)
+        def _is_clean_hs(rate: float | None) -> bool:
+            return rate is not None and 0.10 <= rate <= _RIFLER_HS_CAP
+
+        # Priority 0: bo3.gg career HS% (most reliable — public API, never
+        # contaminated by KAST). Was priority 2; promoted because HLTV's
+        # period_stats and recent_hs_pct sources have repeatedly been observed
+        # returning KAST% values for non-AWPers.
+        _pslug = info.get("player_slug")
+        if _pslug:
+            try:
+                from bo3_scraper import get_career_hs_pct as _bo3_career_hs_bot
+                profile_rate = _bo3_career_hs_bot(_pslug)
+                if _is_clean_hs(profile_rate):
+                    hs_rate     = profile_rate
+                    hs_rate_src = f"bo3.gg career avg ({round(profile_rate * 100)}%)"
+                    logger.info(
+                        f"[hs_scale] bo3.gg career HS% for {_pslug}: "
+                        f"{round(profile_rate * 100, 1)}%"
+                    )
+            except Exception as _e:
+                logger.warning(f"bo3.gg HS% lookup failed ({type(_e).__name__}): {_e}")
+
+        # Priority 1: period stats page HS% (90-day aggregate)
+        if hs_rate is None and period_stats and period_stats.get("hs_pct") is not None:
+            _ps_hs = period_stats["hs_pct"] / 100.0
+            if _is_clean_hs(_ps_hs):
+                hs_rate     = _ps_hs
+                hs_rate_src = f"HLTV stats page 90d ({round(period_stats['hs_pct'])}%)"
+                logger.info(f"[hs_scale] Using period stats HS%: {hs_rate_src}")
+            else:
+                logger.warning(
+                    f"[hs_scale] period_stats HS% {round(_ps_hs*100, 1)}% rejected "
+                    f"(>{int(_RIFLER_HS_CAP*100)}% — likely KAST contamination)"
+                )
+
+        # Priority 2: recent HS% derived from actual match pages
         if hs_rate is None:
             recent_hs = info.get("recent_hs_pct")
-            if recent_hs is not None:
+            if _is_clean_hs(recent_hs):
                 hs_rate     = recent_hs
                 hs_rate_src = (
                     f"last {n_hs_matches} matches avg "
                     f"({round(recent_hs * 100)}%)"
                 )
                 logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
-
-        # Priority 2: career HS% from bo3.gg public API (always accessible)
-        # HLTV player profile pages don't expose HS% in their HTML, so the
-        # previous get_player_hs_pct() call always returned None.  bo3.gg's
-        # public accuracy API is a reliable replacement.
-        if hs_rate is None:
-            _pslug = info.get("player_slug")
-            if _pslug:
-                try:
-                    from bo3_scraper import get_career_hs_pct as _bo3_career_hs_bot
-                    profile_rate = _bo3_career_hs_bot(_pslug)
-                    if profile_rate is not None:
-                        hs_rate     = profile_rate
-                        hs_rate_src = f"bo3.gg career avg ({round(profile_rate * 100)}%)"
-                        logger.info(
-                            f"[hs_scale] bo3.gg career HS% for {_pslug}: "
-                            f"{round(profile_rate * 100, 1)}%"
-                        )
-                except Exception as _e:
-                    logger.warning(f"bo3.gg HS% lookup failed ({type(_e).__name__}): {_e}")
+            elif recent_hs is not None:
+                logger.warning(
+                    f"[hs_scale] recent_hs_pct {round(recent_hs*100, 1)}% rejected "
+                    f"(>{int(_RIFLER_HS_CAP*100)}% — likely KAST contamination)"
+                )
 
     if stat_type == "HS":
         # --- Known-rate override ---
