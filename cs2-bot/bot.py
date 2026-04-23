@@ -2371,6 +2371,164 @@ async def cmd_scout(ctx, *, player_arg: str = ""):
 
 
 # ---------------------------------------------------------------------------
+# !maps — Per-map kill totals (last 10 of each active map)
+# ---------------------------------------------------------------------------
+
+ACTIVE_MAP_POOL = ["Ancient", "Anubis", "Dust2", "Inferno", "Mirage", "Nuke", "Overpass"]
+_MAP_DISPLAY = {"dust2": "Dust 2"}
+
+
+@bot.command(name="maps", aliases=["mapcard", "permap"])
+async def cmd_maps(ctx, player_arg: str = "", line_arg: str = ""):
+    """
+    Usage: !maps <Player> [line]
+    Shows last 10 kill totals per map (Ancient, Anubis, Dust2, Inferno,
+    Mirage, Nuke, Overpass). If a series line is provided, also shows what
+    each map is worth toward that line (per-map avg × 2 = projected series).
+    """
+    if not player_arg.strip():
+        await ctx.send(
+            embed=discord.Embed(
+                title="❌ Usage Error",
+                description="Usage: `!maps <Player> [line]`\nExample: `!maps ZywOo 41.5`",
+                color=0xFF4136,
+            )
+        )
+        return
+
+    player_name = player_arg.strip()
+    line = None
+    if line_arg.strip():
+        try:
+            line = float(line_arg.strip())
+        except ValueError:
+            line = None
+
+    status_msg = await ctx.send(
+        embed=discord.Embed(
+            title=f"🗺️ Loading map breakdown for {player_name}…",
+            description="Fetching per-map history from HLTV.",
+            color=0x7289DA,
+        )
+    )
+
+    try:
+        info = await asyncio.to_thread(get_player_info, player_name, "Kills")
+        map_stats = info.get("map_kills", []) or []
+        resolved  = info.get("player_name", player_name)
+
+        if not map_stats:
+            await status_msg.edit(
+                embed=discord.Embed(
+                    title="❌ No Data",
+                    description=f"No recent map data for **{resolved}**.",
+                    color=0xFF4136,
+                )
+            )
+            return
+
+        # Group by map (preserve newest-first order from the scrape)
+        per_map: dict[str, list] = {}
+        for m in map_stats:
+            mn = (m.get("map_name") or "").strip().lower()
+            if not mn or mn == "unknown":
+                continue
+            per_map.setdefault(mn, []).append(int(round(m["stat_value"])))
+
+        embed = discord.Embed(
+            title=f"🗺️ {resolved} — Per-Map Kill History",
+            description=(
+                f"Last 10 kill totals per active-pool map "
+                f"(newest → oldest)\n"
+                f"_Sample: {len(map_stats)} maps across {len(per_map)} unique maps_"
+                + (f"\n**Series line:** {line}" if line is not None else "")
+            ),
+            color=0x2ECC71,
+        )
+
+        rows = []
+        for canon in ACTIVE_MAP_POOL:
+            key = canon.lower()
+            vals = per_map.get(key, [])[:10]
+            if not vals:
+                rows.append((canon, None, None, None, None, "—"))
+                continue
+            avg = sum(vals) / len(vals)
+            mn  = min(vals)
+            mx  = max(vals)
+            series_proj = avg * 2  # both maps of a BO3 grade
+            arrow = ""
+            if line is not None:
+                if series_proj > line + 0.5:
+                    arrow = "🟢 OVER"
+                elif series_proj < line - 0.5:
+                    arrow = "🔴 UNDER"
+                else:
+                    arrow = "⚪ EVEN"
+            rows.append((canon, vals, avg, mn, mx, arrow))
+
+        # Build a single monospace block for easy comparison
+        lines_out = ["```"]
+        header = f"{'Map':<10}  n  avg   range   last10"
+        lines_out.append(header)
+        lines_out.append("-" * 60)
+        for canon, vals, avg, mn, mx, arrow in rows:
+            display = _MAP_DISPLAY.get(canon.lower(), canon)
+            if vals is None:
+                lines_out.append(f"{display:<10}  -  —     —       no recent data")
+            else:
+                vals_str = ",".join(str(v) for v in vals)
+                lines_out.append(
+                    f"{display:<10}  {len(vals):>2} {avg:>5.1f}  {mn:>2}-{mx:<2}  {vals_str}"
+                )
+        lines_out.append("```")
+        embed.add_field(name="Per-Map Breakdown", value="\n".join(lines_out), inline=False)
+
+        # If line was given, show series projection per map
+        if line is not None:
+            proj_lines = []
+            for canon, vals, avg, mn, mx, arrow in rows:
+                if vals is None:
+                    continue
+                display = _MAP_DISPLAY.get(canon.lower(), canon)
+                series_proj = avg * 2
+                edge_pct = (series_proj - line) / max(line, 1) * 100
+                sign = "+" if edge_pct >= 0 else ""
+                proj_lines.append(
+                    f"{arrow} **{display}** → projected {series_proj:.1f} "
+                    f"({sign}{edge_pct:.1f}% vs {line})"
+                )
+            if proj_lines:
+                embed.add_field(
+                    name=f"📐 Series Projection vs {line}",
+                    value="\n".join(proj_lines),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="ℹ️ How to use this",
+                    value=(
+                        "Series projection = per-map avg × 2 (BO3 plays Maps 1 & 2). "
+                        "If you know which 2 maps the series will play, average those "
+                        "two projections — that's your map-weighted line.\n"
+                        "**Note:** `!grade` does this automatically when the match's "
+                        "likely veto is known (deep analysis)."
+                    ),
+                    inline=False,
+                )
+
+        await status_msg.edit(embed=embed)
+
+    except Exception as e:
+        await status_msg.edit(
+            embed=discord.Embed(
+                title="❌ Error",
+                description=f"Could not load map breakdown: {str(e)[:200]}",
+                color=0xFF4136,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
 # !lines — Multi-line probability table
 # ---------------------------------------------------------------------------
 
