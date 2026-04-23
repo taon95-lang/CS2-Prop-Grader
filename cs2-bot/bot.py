@@ -3,6 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 from typing import Literal
 import os
+import re
 import asyncio
 import logging
 from scraper import (
@@ -2045,6 +2046,57 @@ def build_result_embed(
         mi_parts.append("**KPR by Map:** " + " · ".join(_mkpr_parts))
     if mi_parts:
         embed.add_field(name="🗺️ Map Intelligence", value="\n".join(mi_parts), inline=False)
+
+    # ── Per-Map Kill History (last 10 per active-pool map) ────────────────────
+    _per_map_samples = (map_intel or {}).get("per_map_samples") or {}
+    if _per_map_samples:
+        _ACTIVE_POOL = ["Ancient", "Anubis", "Dust2", "Inferno", "Mirage", "Nuke", "Overpass"]
+        _DISPLAY = {"dust2": "Dust 2"}
+        _line_val = None
+        try:
+            _line_val = float(line) if line not in (None, "") else None
+        except (TypeError, ValueError):
+            _line_val = None
+
+        # Build expected-map set for highlighting (case-insensitive)
+        _expected_lower = set()
+        for _lbl in (map_intel.get("projected_labels") or []):
+            _name = re.sub(r'[`↑↓→ ].*$', '', _lbl).strip().lower()
+            if _name:
+                _expected_lower.add(_name)
+
+        _map_lines = ["```"]
+        _map_lines.append(f"{'Map':<10} {'n':>2} {'avg':>5}  {'rng':>5}   last10 (newest→oldest)")
+        _map_lines.append("-" * 62)
+        for _canon in _ACTIVE_POOL:
+            _key = _canon.lower()
+            _vals = _per_map_samples.get(_key, [])
+            _disp = _DISPLAY.get(_key, _canon)
+            _flag = "▶" if _key in _expected_lower else " "
+            if not _vals:
+                _map_lines.append(f"{_flag}{_disp:<9} {'-':>2} {'—':>5}  {'—':>5}   no data")
+                continue
+            _avg  = sum(_vals) / len(_vals)
+            _mn, _mx = min(_vals), max(_vals)
+            # Per-map series projection vs line marker
+            _marker = ""
+            if _line_val is not None:
+                _proj = _avg * 2
+                if   _proj > _line_val + 0.5: _marker = "🟢"
+                elif _proj < _line_val - 0.5: _marker = "🔴"
+                else:                         _marker = "⚪"
+            _vals_str = ",".join(str(v) for v in _vals)
+            _map_lines.append(
+                f"{_flag}{_disp:<9} {len(_vals):>2} {_avg:>5.1f}  {_mn:>2}-{_mx:<2}  {_vals_str} {_marker}"
+            )
+        _map_lines.append("```")
+        _hint = "▶ = likely map for this match" if _expected_lower else ""
+        if _line_val is not None:
+            _hint += ("  ·  " if _hint else "") + "🟢 over · 🔴 under · ⚪ even (per-map avg×2 vs line)"
+        _val = "\n".join(_map_lines)
+        if _hint:
+            _val += f"\n_{_hint}_"
+        embed.add_field(name="🗺️ Per-Map Kill History (last 10)", value=_val, inline=False)
 
     # ── Analysis Blurb ────────────────────────────────────────────────────────
     try:

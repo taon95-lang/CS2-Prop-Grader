@@ -387,8 +387,15 @@ def compute_map_intel(map_stats: list, likely_maps: list | None, line: float) ->
 
     projected_series = round(projected_avg * 2, 1) if projected_avg is not None else None
 
+    # Last-10 raw kill values per map (newest-first as scraped)
+    per_map_samples: dict[str, list] = {
+        mn: [int(round(v)) for v in vals[:10]]
+        for mn, vals in per_map.items()
+    }
+
     return {
         "per_map":           map_avgs,
+        "per_map_samples":   per_map_samples,
         "sorted_maps":       sorted_maps,
         "best_map":          best_map,
         "worst_map":         worst_map,
