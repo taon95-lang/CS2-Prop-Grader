@@ -3297,6 +3297,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "c5ae7aa3-b84d-47d7-bd93-b92a74df5583",
+      "ts": 1776953001.927336,
+      "date": "2026-04-23",
+      "player": "faven",
+      "display": "Faven",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 52.0,
+      "under_pct": 48.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 27.0,
+      "hist_median": 27.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
