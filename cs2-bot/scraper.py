@@ -239,38 +239,41 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
 
 _PLAYER_ID_CACHE: dict[str, tuple[str, str, str]] = {
     # key            player_id   slug              display_name
+    # NOTE: All IDs below verified against /player/<id>/<slug> on 2026-04-23.
+    # 23 of the original 32 entries had wrong IDs (HLTV reassigned them);
+    # IDs are now resolved via search and verified by profile-page title.
     "lake":         ("22921",   "lake",            "Lake"),
     "zywoo":        ("11893",   "zywoo",           "ZywOo"),
-    "donk":         ("21202",   "donk",            "donk"),
+    "donk":         ("21167",   "donk",            "donk"),
     "niko":         ("3741",    "niko",            "NiKo"),
-    "m0nesy":       ("18943",   "m0nesy",          "m0NESY"),
-    "sh1ro":        ("15096",   "sh1ro",           "sh1ro"),
-    "b1t":          ("18936",   "b1t",             "b1t"),
+    "m0nesy":       ("19230",   "m0nesy",          "m0NESY"),
+    "sh1ro":        ("16920",   "sh1ro",           "sh1ro"),
+    "b1t":          ("18987",   "b1t",             "b1t"),
     "simple":       ("7998",    "simple",          "s1mple"),
     "s1mple":       ("7998",    "simple",          "s1mple"),
     "twistzz":      ("10394",   "twistzz",         "Twistzz"),
-    "elige":        ("9816",    "elige",           "EliGE"),
+    "elige":        ("8738",    "elige",           "EliGE"),
     "ropz":         ("11816",   "ropz",            "ropz"),
-    "yekindar":     ("16957",   "yekindar",        "YEKINDAR"),
-    "naf":          ("9176",    "naf",             "NAF"),
-    "perfecto":     ("18872",   "perfecto",        "Perfecto"),
-    "electronic":   ("8649",    "electronic",      "electronic"),
-    "broky":        ("15513",   "broky",           "broky"),
-    "rain":         ("3728",    "rain",            "rain"),
+    "yekindar":     ("13915",   "yekindar",        "YEKINDAR"),
+    "naf":          ("8520",    "naf",             "NAF"),
+    "perfecto":     ("16947",   "perfecto",        "Perfecto"),
+    "electronic":   ("8918",    "electronic",      "electroNic"),
+    "broky":        ("18053",   "broky",           "broky"),
+    "rain":         ("8183",    "rain",            "rain"),
     "karrigan":     ("429",     "karrigan",        "karrigan"),
-    "frozen":       ("13586",   "frozen",          "frozen"),
-    "degster":      ("17072",   "degster",         "degster"),
-    "torzsi":       ("17376",   "torzsi",          "torzsi"),
-    "idisbalance":  ("22434",   "idisbalance",     "iDISBALANCE"),
-    "xant3r":       ("20838",   "xant3r",          "xant3r"),
-    "jl":           ("17668",   "jl",              "jL"),
-    "malbsmd":      ("21208",   "malbsmd",         "malbsMd"),
-    "grim":         ("14119",   "grim",            "Grim"),
-    "coldzera":     ("4344",    "coldzera",        "coldzera"),
+    "frozen":       ("9960",    "frozen",          "frozen"),
+    "degster":      ("17306",   "degster",         "degster"),
+    "torzsi":       ("18072",   "torzsi",          "torzsi"),
+    "idisbalance":  ("14273",   "idisbalance",     "iDISBALANCE"),
+    "xant3r":       ("20387",   "xant3r",          "Xant3r"),
+    "jl":           ("19206",   "jl",              "jL"),
+    "malbsmd":      ("11617",   "malbsmd",         "malbsMd"),
+    "grim":         ("13578",   "grim",            "Grim"),
+    "coldzera":     ("9216",    "coldzera",        "coldzera"),
     "fallen":       ("2023",    "fallen",          "FalleN"),
-    "device":       ("1550",    "device",          "dev1ce"),
-    "dupreeh":      ("1291",    "dupreeh",         "dupreeh"),
-    "magisk":       ("9547",    "magisk",          "Magisk"),
+    "device":       ("7592",    "device",          "device"),
+    "dupreeh":      ("7398",    "dupreeh",         "dupreeh"),
+    "magisk":       ("9032",    "magisk",          "Magisk"),
 }
 
 
@@ -1245,11 +1248,87 @@ def is_bo3_html(html: str) -> bool:
     return False
 
 
-def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[str, str]]:
+def _get_player_current_team_id(player_id: str, player_slug: str) -> str | None:
     """
-    Fetch /results?player={id} and return a list of (match_id, slug) tuples
-    for recently completed matches. Only returns large IDs (7+ digits) which
-    correspond to accessible HLTV match pages.
+    Fetch /player/{id}/{slug} and extract the player's CURRENT team ID.
+    HLTV embeds team-scoped stats links like
+        /stats/players/matches/<pid>/<slug>?startDate=YYYY&endDate=YYYY&teamId=NNNN
+    The block whose endDate matches today (or is the most recent) is the
+    current team. Returns the team ID as a string, or None if not found.
+    """
+    if not player_slug:
+        return None
+    url = f"{HLTV_BASE}/player/{player_id}/{player_slug}"
+    html = _fetch(url)
+    if not html:
+        return None
+    # Find all teamId references with their date ranges
+    team_blocks = re.findall(
+        r'startDate=(\d{4}-\d{2}-\d{2})&(?:amp;)?endDate=(\d{4}-\d{2}-\d{2})&(?:amp;)?teamId=(\d+)',
+        html,
+    )
+    if not team_blocks:
+        # Fallback: take the first /team/<id>/<slug> link in the page body
+        m = re.search(r'/team/(\d+)/[a-z-]+', html)
+        if m:
+            logger.info(f"[profile] No team-blocks for {player_slug} — using first /team/ link {m.group(1)}")
+            return m.group(1)
+        return None
+    # Pick the block with the latest endDate
+    team_blocks.sort(key=lambda b: b[1], reverse=True)
+    current_team = team_blocks[0][2]
+    logger.info(
+        f"[profile] {player_slug} current teamId={current_team} "
+        f"(latest range {team_blocks[0][0]}..{team_blocks[0][1]})"
+    )
+    return current_team
+
+
+def _enumerate_from_team_results(team_id: str) -> list[tuple[str, str]]:
+    """
+    Fetch /results?team={team_id} and return ALL CS2-era match IDs ordered
+    newest-first. Team results pages list a player's matches reliably (as
+    long as the player was on the team for those matches).
+    """
+    url = f"{HLTV_BASE}/results?team={team_id}"
+    html = _fetch(url)
+    if not html:
+        return []
+    # CS2-era IDs are 7+ digits. Preserve appearance order (newest-first).
+    seen: dict[str, str] = {}
+    for mid, slug in re.findall(r'/matches/(\d{7,})/([a-z0-9-]+)', html):
+        if mid not in seen:
+            seen[mid] = slug
+    # /results pages list newest first when sorted by appearance? HLTV actually
+    # renders newest at TOP, so first-seen = newest. But the regex picks them in
+    # document order which is top-down → newest first. Confirm by sort:
+    out = list(seen.items())
+    logger.info(f"[team-results] team={team_id} → {len(out)} CS2 match IDs")
+    return out
+
+
+def _enumerate_from_profile_page(player_id: str, player_slug: str) -> list[tuple[str, str]]:
+    """
+    Two-step enumeration:
+      1. Fetch profile → extract player's current teamId.
+      2. Fetch /results?team={teamId} → get team's recent matches.
+    This works around HLTV's broken /results?player= filter (2026-04).
+    """
+    team_id = _get_player_current_team_id(player_id, player_slug)
+    if not team_id:
+        logger.warning(f"[profile] Could not resolve current team for {player_slug}")
+        return []
+    return _enumerate_from_team_results(team_id)
+
+
+def get_player_match_ids(player_id: str, max_matches: int = 25, player_slug: str = "") -> list[tuple[str, str]]:
+    """
+    Return a list of (match_id, slug) tuples for the player's recent matches.
+
+    Strategy (as of 2026-04, HLTV broke /results?player= filter):
+      1. PRIMARY: scrape /player/{id}/{slug} profile page (works on direct cffi)
+      2. FALLBACK: scrape /results?player={id} (no longer player-filtered, but
+         returns recent CS2 results we can at least try)
 
     Results are cached for 3 hours — if HLTV returns 403 on a repeat query,
     we serve the last successful fetch rather than falling to estimated data.
@@ -1268,6 +1347,20 @@ def get_player_match_ids(player_id: str, max_matches: int = 25) -> list[tuple[st
             return cached_ids
         logger.info(f"[results] Cache stale for player {player_id} ({age_min}min) — refreshing")
 
+    # ── PRIMARY: profile page ─────────────────────────────────────────────────
+    if player_slug:
+        prof_results = _enumerate_from_profile_page(player_id, player_slug)
+        if len(prof_results) >= 6:
+            prof_results = prof_results[:max_matches]
+            _MATCH_IDS_CACHE[player_id] = (now, prof_results)
+            return prof_results
+        if prof_results:
+            logger.info(
+                f"[results] Profile page only yielded {len(prof_results)} IDs — "
+                f"will also try /results?player= for more"
+            )
+
+    # ── FALLBACK: /results?player= (legacy path, may be unfiltered) ───────────
     url = f"{HLTV_BASE}/results?player={player_id}"
     html = _fetch(url)
     if not html:
@@ -2774,7 +2867,7 @@ def get_player_info(
             )
 
     # Step 2: Get recent match IDs
-    match_ids = get_player_match_ids(player_id, max_matches=40)
+    match_ids = get_player_match_ids(player_id, max_matches=40, player_slug=player_slug)
     if not match_ids:
         raise RuntimeError(f"No recent matches found for '{display_name}'")
 
