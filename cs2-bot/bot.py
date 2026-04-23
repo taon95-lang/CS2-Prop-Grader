@@ -250,9 +250,22 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
         team_hint  = " ".join(team_parts).strip() or None
         opponent   = " ".join(opp_parts).strip() or None
     else:
-        # No "vs" — everything left is the player's own team (disambiguation)
-        team_hint = " ".join(remaining).strip() or None
-        opponent  = None
+        # No "vs" — ambiguous which team is meant. Pass the trailing tokens
+        # as BOTH team_hint (for player disambiguation) AND opponent (for the
+        # opponent-defense multiplier).
+        # The scraper auto-drops a stale team_hint that doesn't match the
+        # resolved player's actual team, so this is safe — opponent survives
+        # and the deep analysis uses it. This matches natural usage like
+        # `!grade Faven 28.5 100 Thieves` meaning "Faven vs 100 Thieves".
+        _trailing = " ".join(remaining).strip() or None
+        team_hint = _trailing
+        opponent  = _trailing
+        if _trailing:
+            logger.info(
+                f"[grade] No 'vs' separator — using '{_trailing}' as both "
+                f"team_hint AND opponent (team_hint will be dropped if it "
+                f"doesn't match resolved player's team)"
+            )
 
     # If no line provided, try to pull it from PrizePicks live board
     pp_line_fetched = False
