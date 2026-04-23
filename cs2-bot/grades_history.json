@@ -510,8 +510,9 @@
       "recommendation": "UNDER",
       "sim_median": 22.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 50.0,
+      "outcome": "over",
+      "baseline_match_id": "2393119"
     },
     {
       "id": "579e77d5-8735-4eeb-a5e9-7dd5e8bb3b57",
@@ -738,8 +739,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 37.0,
+      "outcome": "over",
+      "baseline_match_id": "2393033"
     },
     {
       "id": "50fa9883-093b-468a-9729-83d27580fffa",
@@ -833,8 +835,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null
+      "actual": 37.0,
+      "outcome": "over",
+      "baseline_match_id": "2393128"
     },
     {
       "id": "d8abb2fc-d507-4d84-9385-5b343ca7e453",
@@ -871,9 +874,9 @@
       "recommendation": "OVER",
       "sim_median": 37.0,
       "hist_median": 34.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 43.0,
+      "outcome": "over",
+      "baseline_match_id": "2393358"
     },
     {
       "id": "9c283b02-1a51-4bb7-a632-d51c3fd9d52c",
@@ -891,9 +894,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 33.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 25.0,
+      "outcome": "under",
+      "baseline_match_id": "2393358"
     },
     {
       "id": "71b979c8-221f-40c3-bdc0-265a78f241e0",
@@ -911,9 +914,9 @@
       "recommendation": "OVER",
       "sim_median": 27.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 16.0,
+      "outcome": "under",
+      "baseline_match_id": "2392494"
     },
     {
       "id": "b0cbd551-c421-4c07-909d-7242ae945a93",
@@ -931,9 +934,9 @@
       "recommendation": "PASS",
       "sim_median": 36.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 27.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "ab547392-ddfb-48ed-a349-3a9ae42f88da",
@@ -951,9 +954,9 @@
       "recommendation": "UNDER",
       "sim_median": 30.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 38.0,
+      "outcome": "over",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "ead34945-f497-46b1-8ded-18de347a3bc7",
@@ -971,9 +974,9 @@
       "recommendation": "PASS",
       "sim_median": 35.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 27.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "b27d93ec-9986-4735-a800-db7393857451",
@@ -991,9 +994,9 @@
       "recommendation": "UNDER",
       "sim_median": 33.0,
       "hist_median": 24.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "over",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "95b2e3b1-642a-45db-84a2-3ef4df8f1a95",
@@ -1011,9 +1014,9 @@
       "recommendation": "PASS",
       "sim_median": 37.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "5579e39d-e43e-46b0-a4c4-4d26c0750415",
@@ -1031,9 +1034,9 @@
       "recommendation": "PASS",
       "sim_median": 36.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 27.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "9fd4161a-1375-435e-8a17-3afaf88eb88d",
@@ -1051,9 +1054,9 @@
       "recommendation": "UNDER",
       "sim_median": 31.0,
       "hist_median": 24.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 43.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "d5629813-1795-4058-b699-34a17546648f",
@@ -1071,9 +1074,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "e1eb7209-8b45-49ac-b37a-00954bd29ba8",
@@ -1091,9 +1094,9 @@
       "recommendation": "PASS",
       "sim_median": 36.0,
       "hist_median": 26.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "8852cd5e-fa3f-4b45-9398-7789caae741d",
@@ -1111,9 +1114,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 37.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 38.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "44ad1d80-948c-4bf8-b69c-220d3255f9de",
@@ -1152,9 +1155,9 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 27.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "d434c2a4-5f0f-4a73-9a69-fd3fd2886889",
@@ -1172,9 +1175,9 @@
       "recommendation": "UNDER",
       "sim_median": 30.0,
       "hist_median": 27.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "b0170194-1e93-4a3b-be23-74adfa692e9d",
@@ -1192,9 +1195,9 @@
       "recommendation": "UNDER",
       "sim_median": 29.0,
       "hist_median": 26.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 17.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "ffabb804-ac86-4023-a473-df2c92172e48",
@@ -1212,9 +1215,9 @@
       "recommendation": "PASS",
       "sim_median": 36.0,
       "hist_median": 31.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 21.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "342da4e9-f658-41dc-9eec-de8a0f710afd",
@@ -1232,9 +1235,9 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 24.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 17.0,
+      "outcome": "under",
+      "baseline_match_id": "2392972"
     },
     {
       "id": "e5c457bf-393b-4c02-a425-b4d6b530f51b",
@@ -1252,9 +1255,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 37.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 38.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "298bff0d-c573-41b7-968a-8608d58e56fa",
@@ -1272,9 +1275,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 37.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 38.0,
+      "outcome": "over",
+      "baseline_match_id": "2393246"
     },
     {
       "id": "084a5652-5ac0-4c5e-85df-26d4cc61b782",
@@ -1292,9 +1295,9 @@
       "recommendation": "OVER",
       "sim_median": 43.0,
       "hist_median": 40,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 28.0,
+      "outcome": "under",
+      "baseline_match_id": "2393425"
     },
     {
       "id": "dab3d502-736d-4e45-803a-cb5e8a21e62b",
@@ -1312,9 +1315,9 @@
       "recommendation": "OVER",
       "sim_median": 42.0,
       "hist_median": 38.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 28.0,
+      "outcome": "under",
+      "baseline_match_id": "2393425"
     },
     {
       "id": "42204c1f-6bab-4bed-ba31-0d562ff21924",
@@ -1332,9 +1335,9 @@
       "recommendation": "PASS",
       "sim_median": 35.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 27.0,
+      "outcome": "under",
+      "baseline_match_id": "2393425"
     },
     {
       "id": "94d5956e-3653-4cd1-b66c-937ef677a488",
@@ -1352,9 +1355,9 @@
       "recommendation": "OVER",
       "sim_median": 45.0,
       "hist_median": 32.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393340"
     },
     {
       "id": "29fda1b9-25d1-4a80-b200-8acecbd95c87",
@@ -1372,9 +1375,9 @@
       "recommendation": "OVER",
       "sim_median": 45.0,
       "hist_median": 32.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393340"
     },
     {
       "id": "08181c96-be95-4bd5-8512-699b792d8001",
@@ -1392,9 +1395,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 16.0,
+      "outcome": "under",
+      "baseline_match_id": "2392494"
     },
     {
       "id": "139bc0b7-ed61-43cd-bfe9-dda31f68947f",
@@ -1412,9 +1415,9 @@
       "recommendation": "OVER",
       "sim_median": 29.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 16.0,
+      "outcome": "under",
+      "baseline_match_id": "2392494"
     },
     {
       "id": "14da3939-9753-418d-9c69-47fee52395ff",
@@ -1432,9 +1435,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 37.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 31.0,
+      "outcome": "over",
+      "baseline_match_id": "2393344"
     },
     {
       "id": "9ef25538-5e63-4b76-8afa-b65ec4d7f53d",
@@ -1452,9 +1455,9 @@
       "recommendation": "OVER",
       "sim_median": 37.0,
       "hist_median": 32.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 26.0,
+      "outcome": "under",
+      "baseline_match_id": "2393002"
     },
     {
       "id": "764f11fd-106a-4a53-995c-20b9222e27da",
@@ -1472,9 +1475,9 @@
       "recommendation": "PASS",
       "sim_median": 33.0,
       "hist_median": 25.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393002"
     },
     {
       "id": "d244c69e-8d57-4434-a514-085adc108a9b",
@@ -1492,9 +1495,9 @@
       "recommendation": "OVER",
       "sim_median": 40.0,
       "hist_median": 33.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 33.0,
+      "outcome": "over",
+      "baseline_match_id": "2393002"
     },
     {
       "id": "8c1566d9-b8c0-4817-b74c-ce6caf94eb38",
@@ -1512,9 +1515,9 @@
       "recommendation": "OVER",
       "sim_median": 38.0,
       "hist_median": 32.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 34.0,
+      "outcome": "over",
+      "baseline_match_id": "2393002"
     },
     {
       "id": "40be2432-e9cb-4edf-b30c-b18fd4904922",
@@ -1532,9 +1535,9 @@
       "recommendation": "OVER",
       "sim_median": 34.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 36.0,
+      "outcome": "over",
+      "baseline_match_id": "2393033"
     },
     {
       "id": "3a3f7823-0ce2-4341-91b7-6bd4858eed94",
@@ -1552,9 +1555,9 @@
       "recommendation": "PASS",
       "sim_median": 39.0,
       "hist_median": 35.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "over",
+      "baseline_match_id": "2393308"
     },
     {
       "id": "d8e3bcfe-01c8-4e37-8af9-87518b596857",
@@ -1572,9 +1575,9 @@
       "recommendation": "OVER",
       "sim_median": 34.0,
       "hist_median": 29,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 37.0,
+      "outcome": "over",
+      "baseline_match_id": "2393308"
     },
     {
       "id": "bca8c7ee-037b-40ac-956f-697644950f29",
@@ -1592,9 +1595,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 33.0,
+      "outcome": "over",
+      "baseline_match_id": "2393308"
     },
     {
       "id": "4e00249d-7fa2-471b-beb7-601233585b7f",
@@ -1612,9 +1615,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 26.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "d88e4cc6-b737-471d-b8d6-9d3b3eac12e3",
@@ -1632,9 +1635,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 20.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "a69af6fc-0cbc-4bfe-bac3-67320aaceff9",
@@ -1652,9 +1655,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 21.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "15462e52-8f1a-473f-9b6c-24cf0b260d19",
@@ -1672,9 +1675,9 @@
       "recommendation": "PASS",
       "sim_median": 29.0,
       "hist_median": 27.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 15.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "2b7bd1a6-2121-4996-b5c4-ad6eac1affaf",
@@ -1692,9 +1695,9 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 39.0,
+      "outcome": "over",
+      "baseline_match_id": "2393444"
     },
     {
       "id": "46ccd801-8652-481a-a7dd-a161a0b6c50e",
@@ -1732,9 +1735,9 @@
       "recommendation": "PASS",
       "sim_median": 26.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2393444"
     },
     {
       "id": "7a545995-6cf6-4d7b-aacc-51d4e6e55d24",
@@ -1752,9 +1755,9 @@
       "recommendation": "PASS",
       "sim_median": 26.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2393444"
     },
     {
       "id": "8dbf5b2c-6140-41d3-88de-2c39fede48d3",
@@ -1772,9 +1775,9 @@
       "recommendation": "PASS",
       "sim_median": 26.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2393444"
     },
     {
       "id": "764efadd-31e7-4289-8266-a3550969b661",
@@ -1812,9 +1815,9 @@
       "recommendation": "PASS",
       "sim_median": 29.0,
       "hist_median": 27.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 15.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "f22375ce-81b1-428b-848b-30d290f61763",
@@ -1832,9 +1835,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 20.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "d3c91641-627c-401b-8e73-d1b48c662d6a",
@@ -1852,9 +1855,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 26.0,
+      "outcome": "under",
+      "baseline_match_id": "2393234"
     },
     {
       "id": "62f6d37f-7470-4890-b485-27cfeb0027c3",
@@ -1914,9 +1917,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 31.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393472"
     },
     {
       "id": "8eb8f870-db9b-4c16-b8bc-091cd83bf11c",
@@ -1934,9 +1937,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 31.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393472"
     },
     {
       "id": "78fc2699-9207-465a-80bb-82cf7fd132ee",
@@ -1954,9 +1957,9 @@
       "recommendation": "OVER",
       "sim_median": 31.0,
       "hist_median": 33.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393484"
     },
     {
       "id": "bd42e024-afea-495f-94b4-6a6ad85b9c10",
@@ -2034,9 +2037,9 @@
       "recommendation": "OVER",
       "sim_median": 33.0,
       "hist_median": 30.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2393223"
     },
     {
       "id": "2e73b51c-3efc-4b0e-903e-77a391826813",
@@ -2054,9 +2057,9 @@
       "recommendation": "PASS",
       "sim_median": 33.0,
       "hist_median": 31.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 17.0,
+      "outcome": "under",
+      "baseline_match_id": "2393223"
     },
     {
       "id": "ba1c2f16-3c14-4b4c-9793-997d6d13942c",
@@ -2074,9 +2077,9 @@
       "recommendation": "UNDER",
       "sim_median": 25.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 9.0,
+      "outcome": "under",
+      "baseline_match_id": "2393223"
     },
     {
       "id": "ccf6c3a3-1c89-4f59-9cbc-ab7c85046354",
@@ -2094,9 +2097,9 @@
       "recommendation": "PASS",
       "sim_median": 33.0,
       "hist_median": 31.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 23.0,
+      "outcome": "under",
+      "baseline_match_id": "2393223"
     },
     {
       "id": "64897772-efac-4618-a14d-14455da28651",
@@ -2114,9 +2117,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 31.0,
+      "outcome": "over",
+      "baseline_match_id": "2393045"
     },
     {
       "id": "2f93fbfd-c0bf-4446-b964-285f030bf800",
@@ -2134,9 +2137,9 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "under",
+      "baseline_match_id": "2393045"
     },
     {
       "id": "0f7ffafb-ebaa-4a96-9405-c956aec5c47c",
@@ -2154,9 +2157,9 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393045"
     },
     {
       "id": "ccd0b987-6268-4ab7-9a8d-517baca9aa7c",
@@ -2174,9 +2177,9 @@
       "recommendation": "UNDER",
       "sim_median": 31.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 16.0,
+      "outcome": "under",
+      "baseline_match_id": "2393045"
     },
     {
       "id": "04bda0de-65d1-428b-911b-51df3be8d7c0",
@@ -2194,9 +2197,9 @@
       "recommendation": "UNDER",
       "sim_median": 28.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 19.0,
+      "outcome": "under",
+      "baseline_match_id": "2393045"
     },
     {
       "id": "5e257a6a-f016-4c78-9605-ef503c1507e5",
@@ -2214,9 +2217,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "over",
+      "baseline_match_id": "2393386"
     },
     {
       "id": "b006e89e-9076-4ac4-8149-b57a38ee5030",
@@ -2234,9 +2237,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "over",
+      "baseline_match_id": "2393386"
     },
     {
       "id": "0a7b3f2d-720a-40c6-a8ab-207218ce94ce",
@@ -2254,9 +2257,9 @@
       "recommendation": "PASS",
       "sim_median": 31.0,
       "hist_median": 34.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 21.0,
+      "outcome": "under",
+      "baseline_match_id": "2393307"
     },
     {
       "id": "bd3df0cd-3e92-490f-ad2e-89530dbe1084",
@@ -2274,9 +2277,9 @@
       "recommendation": "PASS",
       "sim_median": 24.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393386"
     },
     {
       "id": "636ce6f7-4763-4df6-a743-67015909d5f5",
@@ -2294,9 +2297,9 @@
       "recommendation": "PASS",
       "sim_median": 31.0,
       "hist_median": 35.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 35.0,
+      "outcome": "over",
+      "baseline_match_id": "2393386"
     },
     {
       "id": "04e557c5-8451-4aab-8f9a-06e3d6c639eb",
@@ -2334,9 +2337,9 @@
       "recommendation": "PASS",
       "sim_median": 24.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393386"
     },
     {
       "id": "44c47f26-f25a-41d8-9222-7f746c4985b3",
@@ -2554,9 +2557,9 @@
       "recommendation": "PASS",
       "sim_median": 34.0,
       "hist_median": 33.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 39.0,
+      "outcome": "over",
+      "baseline_match_id": "2393482"
     },
     {
       "id": "c35702fe-3176-4253-8982-1e565e5bab40",
@@ -2574,9 +2577,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 28.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 26.0,
+      "outcome": "under",
+      "baseline_match_id": "2393484"
     },
     {
       "id": "3cfb488a-9fee-4dd0-8aa0-68d8c81d994d",
@@ -2594,9 +2597,9 @@
       "recommendation": "PASS",
       "sim_median": 44.0,
       "hist_median": 40.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "under",
+      "baseline_match_id": "2393245"
     },
     {
       "id": "5b9cd133-7e0d-4a19-ba89-dbf8a31cffce",
@@ -2614,9 +2617,9 @@
       "recommendation": "OVER",
       "sim_median": 29.5,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "f11ac0ce-95c1-4db3-8254-1f6c03b2b806",
@@ -2634,9 +2637,9 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 39.0,
+      "outcome": "over",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "d66877fb-968c-4f45-bb2e-613a347091f2",
@@ -2654,9 +2657,9 @@
       "recommendation": "PASS",
       "sim_median": 28.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "under",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "18d16326-0fcf-4d27-a06b-69c1209a5344",
@@ -2674,9 +2677,9 @@
       "recommendation": "PASS",
       "sim_median": 31.0,
       "hist_median": 31.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 21.0,
+      "outcome": "under",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "60dabc52-ebc4-4feb-bb41-c66bcd749b25",
@@ -2694,9 +2697,9 @@
       "recommendation": "PASS",
       "sim_median": 29.5,
       "hist_median": 29.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 23.0,
+      "outcome": "under",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "88e70605-d6c6-4f5f-9666-5bc79f2c5404",
@@ -2714,9 +2717,9 @@
       "recommendation": "PASS",
       "sim_median": 42.0,
       "hist_median": 42.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393244"
     },
     {
       "id": "3069efd9-e5de-4db3-bf21-a43799a280c1",
@@ -2734,9 +2737,9 @@
       "recommendation": "OVER",
       "sim_median": 40.5,
       "hist_median": 40.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 28.0,
+      "outcome": "under",
+      "baseline_match_id": "2393183"
     },
     {
       "id": "748091c7-c272-4da2-8446-07c29a6b8d40",
@@ -2754,9 +2757,9 @@
       "recommendation": "OVER",
       "sim_median": 38.0,
       "hist_median": 38.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 35.0,
+      "outcome": "over",
+      "baseline_match_id": "2393344"
     },
     {
       "id": "a3e56690-c1b0-4a1d-a1dc-d883b2982572",
@@ -2774,9 +2777,9 @@
       "recommendation": "UNDER",
       "sim_median": 23.5,
       "hist_median": 23.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 40.0,
+      "outcome": "over",
+      "baseline_match_id": "2393189"
     },
     {
       "id": "6c46b3ee-4953-4096-9466-e2d4d433641a",
@@ -2794,9 +2797,9 @@
       "recommendation": "OVER",
       "sim_median": 36.0,
       "hist_median": 36,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393182"
     },
     {
       "id": "5693f918-5e63-4655-8298-8f6adbb9ae9f",
@@ -2814,9 +2817,9 @@
       "recommendation": "PASS",
       "sim_median": 20.0,
       "hist_median": 20,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393182"
     },
     {
       "id": "0c32b301-ef7d-4023-8f94-f3d19c8848b6",
@@ -2834,9 +2837,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 34.0,
+      "outcome": "over",
+      "baseline_match_id": "2393185"
     },
     {
       "id": "298ee9bf-ef4b-4f48-8585-304c61bf05fd",
@@ -2854,9 +2857,9 @@
       "recommendation": "PASS",
       "sim_median": 28.0,
       "hist_median": 28.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 39.0,
+      "outcome": "over",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "989230e8-3b4e-4abb-bccc-afbd0990faa6",
@@ -2874,9 +2877,9 @@
       "recommendation": "OVER",
       "sim_median": 33.5,
       "hist_median": 33.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 39.0,
+      "outcome": "over",
+      "baseline_match_id": "2393190"
     },
     {
       "id": "2c99c52f-2d13-46c5-a09b-857dfd6e52e5",
@@ -2894,9 +2897,9 @@
       "recommendation": "PASS",
       "sim_median": 40.0,
       "hist_median": 40.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 24.0,
+      "outcome": "under",
+      "baseline_match_id": "2393411"
     },
     {
       "id": "90791ed3-1ab9-48a4-8f19-4fbd66e95759",
@@ -2914,9 +2917,9 @@
       "recommendation": "UNDER",
       "sim_median": 27.5,
       "hist_median": 27.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 31.0,
+      "outcome": "over",
+      "baseline_match_id": "2393659"
     },
     {
       "id": "8a9e17a9-0af1-4449-9c04-20fc0313c0f4",
@@ -2934,9 +2937,9 @@
       "recommendation": "PASS",
       "sim_median": 32.5,
       "hist_median": 32.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393659"
     },
     {
       "id": "69717568-4e19-475b-8b06-63ab3ff0190e",
@@ -2954,9 +2957,9 @@
       "recommendation": "UNDER",
       "sim_median": 19.5,
       "hist_median": 19.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 28.0,
+      "outcome": "over",
+      "baseline_match_id": "2393659"
     },
     {
       "id": "cbb28ed1-c9e2-4902-a3eb-a6108d18c4ec",
@@ -2974,9 +2977,9 @@
       "recommendation": "UNDER",
       "sim_median": 23.0,
       "hist_median": 23.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 28.0,
+      "outcome": "over",
+      "baseline_match_id": "2393410"
     },
     {
       "id": "388d8cc1-897f-4c90-aaf2-22b034b11694",
@@ -2994,9 +2997,9 @@
       "recommendation": "PASS",
       "sim_median": 30.5,
       "hist_median": 30.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 32.0,
+      "outcome": "over",
+      "baseline_match_id": "2393410"
     },
     {
       "id": "58877433-8541-4bde-a1db-cd4447fa9ea1",
@@ -3014,9 +3017,9 @@
       "recommendation": "UNDER",
       "sim_median": 25.0,
       "hist_median": 25.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 22.0,
+      "outcome": "under",
+      "baseline_match_id": "2393410"
     },
     {
       "id": "b0322bb1-d00c-4555-b74d-9d621955c058",
@@ -3054,9 +3057,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 30.0,
+      "outcome": "over",
+      "baseline_match_id": "2393410"
     },
     {
       "id": "b7bc13ab-64e1-4bf0-bd03-452f19656fb7",
@@ -3114,9 +3117,9 @@
       "recommendation": "UNDER",
       "sim_median": 22.0,
       "hist_median": 22.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 25.0,
+      "outcome": "under",
+      "baseline_match_id": "2393472"
     },
     {
       "id": "d970617a-27db-4e8c-addc-642b6d2d89f6",
@@ -3134,9 +3137,9 @@
       "recommendation": "UNDER",
       "sim_median": 23.5,
       "hist_median": 23.5,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "over",
+      "baseline_match_id": "2393473"
     },
     {
       "id": "06c9dd3f-790b-4009-a451-c8d5d623fe0d",
@@ -3154,9 +3157,9 @@
       "recommendation": "UNDER",
       "sim_median": 26.0,
       "hist_median": 26.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 23.0,
+      "outcome": "under",
+      "baseline_match_id": "2393473"
     },
     {
       "id": "157d9bff-3d3e-4f5b-92e0-4c9b14c15df3",
@@ -3174,9 +3177,9 @@
       "recommendation": "PASS",
       "sim_median": 32.0,
       "hist_median": 32.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "under",
+      "baseline_match_id": "2393473"
     },
     {
       "id": "3417bd7d-aa51-4303-898b-00dce309f785",
@@ -3214,9 +3217,9 @@
       "recommendation": "PASS",
       "sim_median": 30.0,
       "hist_median": 30.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 37.0,
+      "outcome": "over",
+      "baseline_match_id": "2393473"
     },
     {
       "id": "c8371064-5d45-4d63-850f-0cdac1e9a375",
@@ -3234,9 +3237,9 @@
       "recommendation": "PASS",
       "sim_median": 29.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 33.0,
+      "outcome": "over",
+      "baseline_match_id": "2393473"
     },
     {
       "id": "85b0d0bc-8111-40dd-ba21-c7d9a287217e",
@@ -3274,9 +3277,9 @@
       "recommendation": "PASS",
       "sim_median": 29.0,
       "hist_median": 29.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 29.0,
+      "outcome": "under",
+      "baseline_match_id": "2393309"
     },
     {
       "id": "933ae3e7-721d-4bdb-b37b-e6ff9baa6911",
@@ -3314,9 +3317,9 @@
       "recommendation": "PASS",
       "sim_median": 27.0,
       "hist_median": 27.0,
-      "actual": null,
-      "outcome": null,
-      "baseline_match_id": null
+      "actual": 20.0,
+      "outcome": "under",
+      "baseline_match_id": "2393411"
     }
   ]
 }

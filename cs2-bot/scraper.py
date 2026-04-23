@@ -3903,13 +3903,21 @@ def _get_fresh_match_ids_with_timestamps(
             continue
         seen_ids.add(mid)
 
-        ts_tag = con.find(attrs={'data-unix': True})
         unix_sec = None
-        if ts_tag:
-            try:
-                unix_sec = int(ts_tag['data-unix']) / 1000
-            except (ValueError, TypeError):
-                pass
+        # HLTV currently uses 'data-zonedgrouping-entry-unix' on the result-con
+        # itself; older layout used 'data-unix' on a child tag. Try both.
+        for attr in ('data-zonedgrouping-entry-unix', 'data-unix'):
+            raw = con.get(attr)
+            if raw is None:
+                child = con.find(attrs={attr: True})
+                if child:
+                    raw = child.get(attr)
+            if raw:
+                try:
+                    unix_sec = int(raw) / 1000
+                    break
+                except (ValueError, TypeError):
+                    continue
 
         results.append((mid, slug, unix_sec))
         if len(results) >= max_matches:
@@ -3954,7 +3962,7 @@ def get_actual_result(
         f"[auto_result] Checking {display} — after ts={grade_ts:.0f}, baseline={baseline_match_id}"
     )
 
-    matches = _get_fresh_match_ids_with_timestamps(player_id, max_matches=10)
+    matches = _get_fresh_match_ids_with_timestamps(player_id, max_matches=30)
     if not matches:
         logger.warning(f"[auto_result] No match IDs for {display}")
         return None
