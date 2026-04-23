@@ -863,29 +863,23 @@ def calculate_grade(
         pass_reason = f"sample-size gate (N={n_series}<5)"
         decision = "PASS"
 
-    # 2. Edge size: need ≥ 2.5% directional edge vs book-implied.
-    #    (Was 7% — too strict; bot was forcing PASS on borderline-but-genuine
-    #    leans like 52/48. Now anything above a true coinflip earns a call,
-    #    with the grade number reflecting how thin that edge is.)
+    # 2. Edge size: need ≥ 7% directional edge vs book-implied
     if decision != "PASS":
         if decision == "OVER":
             _dir_edge_check = (over_prob - book_implied_prob)
         else:
             _dir_edge_check = ((1.0 - over_prob) - book_implied_prob)
-        if _dir_edge_check < 0.025:
-            pass_reason = f"edge gate (|edge|={_dir_edge_check*100:.1f}%<2.5%)"
+        if _dir_edge_check < 0.07:
+            pass_reason = f"edge gate (|edge|={_dir_edge_check*100:.1f}%<7%)"
             decision = "PASS"
 
-    # 3. Signal alignment: previously hard-gated to PASS. Now a soft warning
-    #    captured in pass_reason so the embed can flag it, but the directional
-    #    call survives. Lets weak-but-real leans graduate to a 5/10 or 6/10.
-    signals_split = False
+    # 3. Signal alignment: majority of sub-signals must point the same way
     if decision == "OVER" and over_votes <= under_votes:
-        signals_split = True
+        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
+        decision = "PASS"
     elif decision == "UNDER" and under_votes <= over_votes:
-        signals_split = True
-    if signals_split and decision != "PASS":
-        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴) — low confidence"
+        pass_reason = f"signals split ({over_votes}🟢/{under_votes}🔴)"
+        decision = "PASS"
     # If we landed at PASS via base threshold AND signals are split, surface
     # that to the user too so the embed always explains why it's a PASS.
     if decision == "PASS" and pass_reason is None and over_votes == under_votes:
