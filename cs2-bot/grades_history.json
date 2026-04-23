@@ -2877,6 +2877,26 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "2c99c52f-2d13-46c5-a09b-857dfd6e52e5",
+      "ts": 1776923615.768672,
+      "date": "2026-04-23",
+      "player": "device",
+      "display": "device",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "",
+      "over_pct": 88.0,
+      "under_pct": 12.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "sim_median": 40.0,
+      "hist_median": 40.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
