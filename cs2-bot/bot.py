@@ -679,53 +679,45 @@ def _analyze_player(
         def _is_clean_hs(rate: float | None) -> bool:
             return rate is not None and 0.10 <= rate <= _RIFLER_HS_CAP
 
-        # Priority 0: bo3.gg career HS% (most reliable — public API, never
-        # contaminated by KAST). Was priority 2; promoted because HLTV's
-        # period_stats and recent_hs_pct sources have repeatedly been observed
-        # returning KAST% values for non-AWPers.
-        _pslug = info.get("player_slug")
-        if _pslug:
-            try:
-                from bo3_scraper import get_career_hs_pct as _bo3_career_hs_bot
-                profile_rate = _bo3_career_hs_bot(_pslug)
-                if _is_clean_hs(profile_rate):
-                    hs_rate     = profile_rate
-                    hs_rate_src = f"bo3.gg career avg ({round(profile_rate * 100)}%)"
-                    logger.info(
-                        f"[hs_scale] bo3.gg career HS% for {_pslug}: "
-                        f"{round(profile_rate * 100, 1)}%"
-                    )
-            except Exception as _e:
-                logger.warning(f"bo3.gg HS% lookup failed ({type(_e).__name__}): {_e}")
+        # Priority 0: recent HS% from the LAST ~10 BO3 match overviews.
+        # Freshest signal — captures current form. Only used if it passes
+        # the rifler-HS sanity cap (else it's KAST contamination).
+        recent_hs = info.get("recent_hs_pct")
+        if _is_clean_hs(recent_hs):
+            hs_rate     = recent_hs
+            hs_rate_src = (
+                f"last {n_hs_matches} matches avg "
+                f"({round(recent_hs * 100)}%)"
+            )
+            logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
+        elif recent_hs is not None:
+            logger.warning(
+                f"[hs_scale] recent_hs_pct {round(recent_hs*100, 1)}% rejected "
+                f"(>{int(_RIFLER_HS_CAP*100)}% — likely KAST contamination)"
+            )
 
-        # Priority 1: period stats page HS% (90-day aggregate)
-        if hs_rate is None and period_stats and period_stats.get("hs_pct") is not None:
-            _ps_hs = period_stats["hs_pct"] / 100.0
-            if _is_clean_hs(_ps_hs):
-                hs_rate     = _ps_hs
-                hs_rate_src = f"HLTV stats page 90d ({round(period_stats['hs_pct'])}%)"
-                logger.info(f"[hs_scale] Using period stats HS%: {hs_rate_src}")
-            else:
-                logger.warning(
-                    f"[hs_scale] period_stats HS% {round(_ps_hs*100, 1)}% rejected "
-                    f"(>{int(_RIFLER_HS_CAP*100)}% — likely KAST contamination)"
-                )
-
-        # Priority 2: recent HS% derived from actual match pages
+        # Priority 1: bo3.gg career HS% (uncontaminated public API). Used only
+        # when the freshest source is missing or contaminated. NOTE: this is a
+        # career average, not a recent window — falls back gracefully but does
+        # not capture current-form swings.
         if hs_rate is None:
-            recent_hs = info.get("recent_hs_pct")
-            if _is_clean_hs(recent_hs):
-                hs_rate     = recent_hs
-                hs_rate_src = (
-                    f"last {n_hs_matches} matches avg "
-                    f"({round(recent_hs * 100)}%)"
-                )
-                logger.info(f"[hs_scale] Using recent match HS%: {hs_rate_src}")
-            elif recent_hs is not None:
-                logger.warning(
-                    f"[hs_scale] recent_hs_pct {round(recent_hs*100, 1)}% rejected "
-                    f"(>{int(_RIFLER_HS_CAP*100)}% — likely KAST contamination)"
-                )
+            _pslug = info.get("player_slug")
+            if _pslug:
+                try:
+                    from bo3_scraper import get_career_hs_pct as _bo3_career_hs_bot
+                    profile_rate = _bo3_career_hs_bot(_pslug)
+                    if _is_clean_hs(profile_rate):
+                        hs_rate     = profile_rate
+                        hs_rate_src = f"bo3.gg career avg ({round(profile_rate * 100)}%)"
+                        logger.info(
+                            f"[hs_scale] bo3.gg career HS% for {_pslug}: "
+                            f"{round(profile_rate * 100, 1)}%"
+                        )
+                except Exception as _e:
+                    logger.warning(f"bo3.gg HS% lookup failed ({type(_e).__name__}): {_e}")
+
+        # NOTE: 90-day HLTV period_stats source intentionally dropped — too
+        # stale to reflect current form, and frequently KAST-contaminated.
 
     if stat_type == "HS":
         # --- Known-rate override ---
