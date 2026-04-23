@@ -189,11 +189,11 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
                 )
                 if resp.status_code == 403:
                     got_403_this_profile = True
-                    _trip_stats_circuit(url)   # no-op for non-/stats/ URLs
-                    # If the circuit just tripped, bail immediately — no more retries
-                    if _STATS_SUBDOMAIN_BLOCKED and '/stats/' in url:
-                        logger.warning(f"[fetch] /stats/ circuit tripped — abandoning {url}")
-                        return None
+                    # NOTE: do NOT trip the circuit-breaker on a single 403.
+                    # We have 5 profiles; trip only after ALL of them fail
+                    # (handled below the profile-rotation loop). Tripping on
+                    # the first attempt was the root cause of the "0 maps"
+                    # bug — the other 4 profiles never got a chance.
                     if attempt < max_retries - 1:
                         time.sleep(_FETCH_RETRY_DELAYS[attempt])
                     else:
@@ -221,6 +221,10 @@ def _fetch(url: str, max_retries: int = 3) -> str | None:
         else:
             # Non-403 failure (timeout, parse error) — don't rotate, just give up
             break
+
+    # Only NOW (after all profiles 403'd) do we trip the circuit-breaker.
+    if '/stats/' in url and profiles_tried >= max_profile_rotations:
+        _trip_stats_circuit(url)
 
     logger.warning(f"[fetch] Giving up on {url} after trying {profiles_tried} profile(s)")
     return None
@@ -303,7 +307,7 @@ _MAPSTATS_HTML_CACHE: dict[str, str] = {}
 
 _STATS_SUBDOMAIN_BLOCKED: bool = False
 _STATS_SUBDOMAIN_BLOCKED_AT: float = 0.0
-_STATS_SUBDOMAIN_BLOCK_TTL: int = 30 * 60   # 30 minutes (player/team stats)
+_STATS_SUBDOMAIN_BLOCK_TTL: int = 5 * 60   # 5 minutes (player/team stats) — was 30 min, reduced for faster recovery now that the circuit only trips after exhausting all 5 profiles
 
 _MAPSTATS_CIRCUIT_BLOCKED: bool = False
 _MAPSTATS_CIRCUIT_BLOCKED_AT: float = 0.0
@@ -547,29 +551,33 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
         logger.info(f"[stats_fetch] /stats/ circuit open — skipping {stats_url[-60:]}")
         return None
 
-    # ── mapstatsid URLs: skip profile cycling, go straight to proxy ───────────
+    # ── mapstatsid URLs: ONE direct attempt only, no profile cycling ─────────
+    # Empirically all 5 cffi profiles uniformly 403 on /stats/matches/mapstatsid/
+    # paths (HLTV protects these harder than match pages). Cycling all profiles
+    # × 3 retries = 15 attempts of dead time per HS page × 10 series × 2 maps
+    # = 300 dead requests per !grade. Now: one quick attempt, fail fast,
+    # let the calibrated HS% fallback take over.
     if _is_mapstats_url(stats_url):
-        # Try ScraperAPI first (Cloudflare-aware, free tier 1k req/mo)
+        sess = _get_hltv_session()
+        if sess is not None:
+            try:
+                resp = sess.get(stats_url, timeout=10, headers={"Referer": match_url})
+                if resp.status_code == 200 and "Just a moment" not in resp.text:
+                    logger.info(f"[stats_fetch] Direct cffi mapstats OK — {len(resp.text):,} chars")
+                    return resp.text
+            except Exception:
+                pass
+        # Try ScraperAPI as a single fallback if it's still got credits
         html = _fetch_via_scraperapi(stats_url, referer=match_url)
         if html:
             logger.info("[stats_fetch] ScraperAPI mapstats fetch succeeded.")
             return html
-        # Fallback to Apify proxy (requires paid plan)
-        html = _fetch_via_apify_proxy(stats_url, referer=match_url)
-        if html:
-            logger.info("[stats_fetch] Apify mapstats fetch succeeded.")
-            return html
-        # No circuit trip — let each URL try independently
-        logger.info(f"[stats_fetch] All proxies failed for {stats_url[-60:]} — using HS% fallback")
+        # Don't try Apify — empirically returns 407 on free plan
+        logger.debug(f"[stats_fetch] mapstats unavailable for {stats_url[-60:]} — using HS%% fallback")
         return None
 
-    # ── non-mapstats /stats/ URLs: try ScraperAPI first ───────────────────────
-    html = _fetch_via_scraperapi(stats_url, referer=match_url)
-    if html:
-        logger.info("[stats_fetch] ScraperAPI player-stats fetch succeeded.")
-        return html
-
-    # ── then fall back to profile-cycling with circuit-breaker ────────────────
+    # ── non-mapstats /stats/ URLs: direct cffi profile-cycling FIRST ─────────
+    # (Was scraperapi-first, which burned credits even when direct works.)
     global _STATS_SESSION_WARMED
 
     all_profiles = list(_PROFILES)
@@ -628,10 +636,8 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
                 return resp.text
 
             if resp.status_code == 403:
-                _trip_stats_circuit(stats_url)
-                if _STATS_SUBDOMAIN_BLOCKED:
-                    logger.warning("[stats_fetch] player-stats circuit TRIPPED — 30 min block")
-                    return None
+                # Don't trip the circuit on a single 403 — try the next profile.
+                # Only trip after we've exhausted all profiles (handled below).
                 _STATS_SESSION_WARMED = False
                 delay = min(1.0 + profile_attempt * 1.0, 4.0) + random.uniform(0, 0.5)
                 time.sleep(delay)
@@ -645,7 +651,14 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
             time.sleep(1.0)
             continue
 
-    logger.warning("[stats_fetch] All profiles exhausted for non-mapstats URL")
+    # All 5 profiles 403'd — NOW trip the circuit and try ScraperAPI fallback
+    _trip_stats_circuit(stats_url)
+    logger.info(f"[stats_fetch] All profiles 403'd — falling back to ScraperAPI for {stats_url[-60:]}")
+    html = _fetch_via_scraperapi(stats_url, referer=match_url)
+    if html:
+        logger.info("[stats_fetch] ScraperAPI player-stats fetch succeeded.")
+        return html
+    logger.warning(f"[stats_fetch] All paths exhausted for {stats_url[-60:]}")
     return None
 
 
