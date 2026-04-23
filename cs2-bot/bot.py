@@ -789,6 +789,23 @@ def _analyze_player(
                 parts.append(f"{n_global} default estimate ({round(hs_rate*100)}%)")
         hs_rate_src = " + ".join(parts) if parts else hs_rate_src
         logger.info(f"[hs_scale] HS sources: {hs_rate_src}")
+
+        # ── At-a-glance summary so it's obvious whether the grade is real or
+        # estimated. Logged at WARNING level when 0/N maps had real HS data so
+        # it stands out in the workflow logs.
+        _total_maps = n_actual + n_match_pct + n_global
+        _quality = "REAL" if n_actual == _total_maps else (
+            "MIXED" if n_actual > 0 else "FULLY ESTIMATED"
+        )
+        _summary = (
+            f"[hs_summary] {_quality}: {n_actual}/{_total_maps} maps from "
+            f"actual scorecard, {n_match_pct} from per-match HS%, "
+            f"{n_global} from global rate ({round(hs_rate*100)}%)"
+        )
+        if n_actual == 0:
+            logger.warning(_summary + " — mapstatsid pages all blocked")
+        else:
+            logger.info(_summary)
     else:
         hs_rate_src = None
 

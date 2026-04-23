@@ -561,22 +561,35 @@ def _fetch_stats_page(stats_url: str, match_url: str) -> str | None:
     # = 300 dead requests per !grade. Now: one quick attempt, fail fast,
     # let the calibrated HS% fallback take over.
     if _is_mapstats_url(stats_url):
+        # Tier 1 — Direct cffi (fast path, almost always 403 but free if it works)
         sess = _get_hltv_session()
         if sess is not None:
             try:
                 resp = sess.get(stats_url, timeout=10, headers={"Referer": match_url})
                 if resp.status_code == 200 and "Just a moment" not in resp.text:
-                    logger.info(f"[stats_fetch] Direct cffi mapstats OK — {len(resp.text):,} chars")
+                    logger.info(f"[hs_fetch] ✅ Tier 1 (direct cffi) — {len(resp.text):,} chars · {stats_url[-50:]}")
+                    _MAPSTATS_HTML_CACHE[stats_url] = resp.text
                     return resp.text
-            except Exception:
-                pass
-        # Try ScraperAPI as a single fallback if it's still got credits
+                logger.debug(f"[hs_fetch] Tier 1 failed (status={resp.status_code}) — escalating")
+            except Exception as e:
+                logger.debug(f"[hs_fetch] Tier 1 exception ({type(e).__name__}) — escalating")
+
+        # Tier 2 — ScraperAPI (paid credits, usually works on HLTV)
         html = _fetch_via_scraperapi(stats_url, referer=match_url)
         if html:
-            logger.info("[stats_fetch] ScraperAPI mapstats fetch succeeded.")
+            logger.info(f"[hs_fetch] ✅ Tier 2 (ScraperAPI) — {stats_url[-50:]}")
             return html
-        # Don't try Apify — empirically returns 407 on free plan
-        logger.debug(f"[stats_fetch] mapstats unavailable for {stats_url[-60:]} — using HS%% fallback")
+
+        # Tier 3 — Apify residential proxy (last resort — different IP pool)
+        # Re-enabled after Tier 2 became unreliable. Even if free-plan creds
+        # 407 on most attempts, the function tries 4 credential formats so
+        # one paid/upgraded plan format may succeed.
+        html = _fetch_via_apify_proxy(stats_url, referer=match_url)
+        if html:
+            logger.info(f"[hs_fetch] ✅ Tier 3 (Apify) — {stats_url[-50:]}")
+            return html
+
+        logger.warning(f"[hs_fetch] ❌ ALL TIERS FAILED for {stats_url[-60:]} — falling back to estimated HS")
         return None
 
     # ── non-mapstats /stats/ URLs: direct cffi profile-cycling FIRST ─────────
