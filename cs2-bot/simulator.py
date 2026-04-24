@@ -1061,6 +1061,67 @@ def apply_tier_caps(
     return g, caps
 
 
+def apply_post_simulation_caps(
+    grade_num: int,
+    decision: str,
+    role_tag: str | None,
+    map_pool_label: str | None,
+    short_proj: float | None,
+    normal_proj: float | None,
+    line: float,
+    stat_type: str = "Kills",
+) -> tuple[int, list[str]]:
+    """
+    Caps applied AFTER simulation, using info that wasn't available at sim time.
+    Implements:
+      - Doc 1 (long para): both-scenarios-fail → cap at 6 on OVERS.
+      - Doc 2 #7: Role + Map Pool gate.
+        * Plain Rifler + Mixed/Unknown map pool → cap at 7 (no convergence
+          on style or map fit, no elite tier).
+        * Elite tiers (9-10) require strong role (AWPer / Entry / Star Rifler /
+          Support) AND a non-mixed map pool fit.
+
+    Only applies to Kills props.
+    """
+    if stat_type != "Kills":
+        return grade_num, []
+
+    caps: list[str] = []
+    g = grade_num
+
+    def cap(new_max: int, reason: str):
+        nonlocal g
+        if g > new_max:
+            caps.append(f"{reason}→cap {new_max}")
+            g = new_max
+
+    # Doc 1: Both short-map AND normal-map projections fail → block OVER, cap 6
+    if decision == "OVER" and short_proj is not None and normal_proj is not None:
+        if short_proj < line and normal_proj < line:
+            cap(6, f"both scenarios below line ({short_proj:.1f}/{normal_proj:.1f}<{line})")
+
+    # Doc 2 #7: Role + Map Pool gate
+    role = (role_tag or "").lower()
+    pool = (map_pool_label or "").lower()
+    elite_role = role in {"awper", "entry fragger", "star rifler", "support"}
+    plain_role = role == "rifler"  # generic, no convergence
+    favorable_pool = ("high-frag" in pool) or ("tactical" in pool)
+    neutral_pool   = ("mixed" in pool) or (pool == "") or ("unknown" in pool)
+
+    # Plain rifler on a generic map pool → no elite tier
+    if plain_role and neutral_pool:
+        cap(7, "neutral role + neutral map pool")
+
+    # Elite tiers require both role AND map pool to confirm
+    if g >= 9:
+        if not elite_role:
+            cap(8, f"elite needs strong role (got {role_tag or '—'})")
+        if neutral_pool:
+            cap(8, "elite needs favorable map pool")
+
+    return g, caps
+
+
 def calculate_grade(
     edge: float,
     over_prob: float,

@@ -1537,6 +1537,70 @@ def _analyze_player(
         logger.warning(f"[grade_engine] Failed: {_ge_err}")
         sim_result["grade_pkg"] = {}
 
+    # --- Step 10b: Post-simulation caps (Doc 1 both-scenario + Doc 2 #7 role/pool) ---
+    # Re-grade using info that wasn't available at simulation time:
+    #   role tag (from determine_role) and short/normal scenario projections.
+    try:
+        from simulator import apply_post_simulation_caps as _post_caps
+        _gp = sim_result.get("grade_pkg") or {}
+        _scn = _gp.get("scenario") or {}
+        _decision = sim_result.get("decision", "OVER")
+        _stat_type = sim_result.get("stat_type", "Kills")
+        _line = sim_result.get("line") or sim_result.get("prop_line")
+
+        # Derive role tag from period_stats
+        _role_tag = None
+        if period_stats:
+            _avg_kpr = period_stats.get("kpr")
+            _hs      = period_stats.get("hs_pct")
+            _hs_rate = (_hs / 100.0) if _hs is not None else None
+            try:
+                from grade_engine import determine_role as _det_role
+                _slug = (player_name or "").lower().strip().replace(" ", "-")
+                _role_tag, _ = _det_role(
+                    _slug, _KNOWN_AWPERS,
+                    avg_kpr=_avg_kpr,
+                    avg_fk_rate=period_stats.get("opening") or period_stats.get("opening_ratio"),
+                    avg_survival=period_stats.get("survival") or period_stats.get("survival_pct"),
+                    hs_rate=_hs_rate,
+                )
+            except Exception:
+                _role_tag = None
+
+        _map_pool_label = ((deep or {}).get("map_pool") or {}).get("label")
+
+        # Parse current grade ("8/10 (Strong edge)") and apply post-caps
+        _grade_str_now = sim_result.get("grade", "")
+        import re as _re
+        _m = _re.match(r"(\d+)/10\s*\(([^)]*)\)", _grade_str_now)
+        if _m and _line is not None:
+            _gnum_old = int(_m.group(1))
+            _glabel   = _m.group(2)
+            _gnum_new, _new_caps = _post_caps(
+                grade_num=_gnum_old,
+                decision=_decision,
+                role_tag=_role_tag,
+                map_pool_label=_map_pool_label,
+                short_proj=_scn.get("short_proj"),
+                normal_proj=_scn.get("normal_proj"),
+                line=float(_line),
+                stat_type=_stat_type,
+            )
+            if _new_caps and _gnum_new < _gnum_old:
+                if "(capped)" not in _glabel:
+                    _glabel = f"{_glabel} (capped)"
+                _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
+                _sign = "✅" if _decision == "OVER" else "❌"
+                sim_result["grade"] = _new_grade_str
+                sim_result["recommendation"] = f"{_sign} {_decision} — {_new_grade_str}"
+                _vt = sim_result.get("vote_tally") or {}
+                _existing = list(_vt.get("caps_applied") or [])
+                _existing.extend(_new_caps)
+                _vt["caps_applied"] = _existing
+                sim_result["vote_tally"] = _vt
+    except Exception as _pc_err:
+        logger.warning(f"[post_caps] Failed: {_pc_err}")
+
     # --- Unit Sizing (after grade_pkg so confidence is consistent with the embed) ---
     # Use the full grade_engine confidence score (same number displayed to the user)
     # rather than the simplified Step 9 score so unit sizing matches displayed confidence.
