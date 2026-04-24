@@ -92,9 +92,19 @@ def _apply_player_overrides(items: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _token() -> str:
-    t = os.getenv("APIFY_TOKEN", "")
+    raw = os.getenv("APIFY_TOKEN", "")
+    # Defensive: strip whitespace, tabs, newlines, and zero-width chars that
+    # commonly sneak in from copy-paste. http.client refuses URLs containing
+    # any control character (incl. plain space), so a leading space in the
+    # secret kills every Apify call with "URL can't contain control characters".
+    t = raw.strip().strip("\u200b\u200c\u200d\ufeff")
     if not t:
         raise RuntimeError("APIFY_TOKEN env var not set")
+    if t != raw:
+        logger.warning(
+            f"[prizepicks] APIFY_TOKEN had stray whitespace/control chars "
+            f"(raw_len={len(raw)}, clean_len={len(t)}) — using cleaned value"
+        )
     return t
 
 
