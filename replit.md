@@ -94,14 +94,34 @@ The `!grade` embed has a compact professional layout:
 - Reporting helpers in `bot.py`: `_is_skip_rec()` and `_is_directional_rec()` — used by `!result`, `!results`, `!calibration`, `!fetchresults` so NO_BET / PASS are excluded from win/loss math instead of being mis-counted as OVER losses
 - `settle_backlog.py` already buckets non-directional recs into `passes_w_outcome`
 
-### UNDER score gate (April 2026, refined)
-Located in `simulator.py::apply_post_simulation_caps`:
-- **4-trigger FORCE MIN 6/10** when ALL fire: (a) both scenarios below line + (b) projection gap ≤ -10% + (c) hit rate ≤ 40% + (d) simulator under_prob ≥ 60%. Floor enforced at end (overrides earlier caps), gated by σ ≤ 9.
-- **ELSE IF score < 50** → AUTO NO BET (lowered from 55).
-- **50 ≤ score < 65** → needs original 3-trigger confirmation set (a)+(b)+(c); else AUTO NO BET. Capped at 7.
-- **score ≥ 65** → allowed on score alone.
-- Legacy 3-trigger FORCE MIN 7 was removed (lacked simulator agreement check; bumped grades too aggressively).
-- OVER unchanged: strict ≥ 65 score gate, else AUTO NO BET.
+### UNDER score gate — Tiered system (April 2026, refined)
+Located in `simulator.py::apply_post_simulation_caps`. Six possible triggers:
+- (a) both scenarios below line  [baseline]
+- (b) projection gap ≤ -10% vs line  [baseline]
+- (c) hit rate ≤ 40%  [baseline]
+- (d) simulator under_prob ≥ 60%  [baseline]
+- (e) stomp helps UNDER (stomp_via_rank OR favorite_prob ≥ 0.72)
+- (f) low variance (σ ≤ 6)
+
+**Tier system** (requires baseline a+b+c+d to qualify, σ > 9 suppresses):
+- n=4 (baseline only)        → grade clamped to **[6, 7]**
+- n=5 (baseline + e or f)    → grade clamped to **[7, 8]**
+- n=6 (baseline + both e+f)  → grade clamped to **[8, 9]**
+
+**Else** (no tier active):
+- score < 50 → AUTO NO BET.
+- 50 ≤ score < 65 → needs 3-trigger set (a)+(b)+(c); else AUTO NO BET. Cap 7.
+- score ≥ 65 → allowed on score alone.
+
+`apply_post_simulation_caps` returns `(grade, caps_list, under_triggers_count)` — the count is consumed downstream by the POTD evaluator. OVER unchanged: strict ≥ 65 score gate.
+
+### Play of the Day (POTD)
+`grade_engine.py::evaluate_potd(play)` runs in `bot.py` after the bot finalizes a grade. Returns `{potd, tier ("S"|"A"), units, reason}`. Displayed in the FINAL BET RECOMMENDATION embed field.
+- **S-tier OVER**: score ≥ 85, edge ≥ 10%, over_prob ≥ 0.65, both scenarios clear → 1.25u
+- **S-tier UNDER**: under_triggers ≥ 5, edge ≥ 10%, under_prob ≥ 0.65 → 1.25u
+- **A-tier OVER**: score ≥ 75, edge ≥ 7%, over_prob ≥ 0.60, both scenarios clear → 1.0u
+- **A-tier UNDER**: under_triggers ≥ 4, edge ≥ 8%, under_prob ≥ 0.62 → 1.0u
+- Eligibility: grade ≥ 7 AND edge ≥ 5%; OVER also rejects stomp_risk and σ ≥ 10 with score < 85.
 
 ### MK (multi-kill) scoring asymmetry
 In `grade_engine.py::compute_weighted_score_100`:

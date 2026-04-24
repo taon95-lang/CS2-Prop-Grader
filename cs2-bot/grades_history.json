@@ -3424,6 +3424,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "65b1b6f2-28d5-4122-9e27-ce58849e751c",
+      "ts": 1777007648.21055,
+      "date": "2026-04-24",
+      "player": "blamef",
+      "display": "blamef",
+      "line": 33.0,
+      "stat": "Kills",
+      "opponent": "acend",
+      "over_pct": 34.5,
+      "under_pct": 65.5,
+      "grade": "7/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "auto_no_bet": false,
+      "sim_median": 27.36,
+      "hist_median": 29.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

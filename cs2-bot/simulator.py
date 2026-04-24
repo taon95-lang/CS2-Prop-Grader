@@ -932,6 +932,7 @@ def run_simulation(
         "stomp_via_rank":         stomp_via_rank,
         "close_via_rank":         close_via_rank,
         "rank_gap":               rank_gap,
+        "favorite_prob":          round(favorite_prob, 3),
         # --- Recency / trend ---
         "trend_pct":              trend_pct,
         "trend_label":            trend_label,
@@ -1075,28 +1076,35 @@ def apply_post_simulation_caps(
     hit_rate: float | None = None,        # 0..1 over-side conversion
     stability_std: float | None = None,   # series σ
     under_prob: float | None = None,      # 0..1 under-side simulator probability
-) -> tuple[int, list[str]]:
+    stomp_via_rank: bool = False,         # game expected to be lopsided
+    favorite_prob: float | None = None,   # 0..1 favorite win probability
+) -> tuple[int, list[str], int]:
     """
     Caps applied AFTER simulation, using info that wasn't available at sim time.
 
-    Asymmetric score gates (April 2026, refined):
+    Asymmetric score gates (April 2026, tiered):
       OVER  — strict: score ≥ 65 required (else AUTO NO BET).
-      UNDER — flexible:
-        IF all 4 confirmation triggers fire:
-              (a) both scenarios below line
-              (b) projection gap ≤ -10% vs line
-              (c) hit rate ≤ 40%   (under conversion ≥ 60%)
-              (d) simulator under_prob ≥ 60%
-            → no AUTO NO BET; FORCE MIN GRADE = 6/10 at end (overrides caps).
-        ELSE IF score < 50 → AUTO NO BET.
-        ELSE 50 ≤ score < 65: allowed only with the original 3-trigger
-              confirmation set (a)+(b)+(c); else AUTO NO BET. Capped at 7.
-        ELSE score ≥ 65 → allowed on score alone.
 
-    FORCE UNDER MIN 6 (4-trigger): bumps grade to a minimum of 6/10 when
-      (a)+(b)+(c)+(d) fire and σ ≤ 9. (The legacy 3-trigger FORCE MIN 7
-      was removed in the April 2026 refinement — it bumped grades without
-      requiring simulator agreement on under_prob.)
+      UNDER — six possible confirmation triggers:
+        (a) both scenarios below line          [baseline]
+        (b) projection gap ≤ -10% vs line      [baseline]
+        (c) hit rate ≤ 40%                     [baseline]
+        (d) simulator under_prob ≥ 60%         [baseline]
+        (e) stomp helps UNDER (stomp_via_rank OR favorite_prob ≥ 0.72)
+        (f) low variance (σ ≤ 6)
+
+      Tier system (requires baseline a+b+c+d to qualify):
+        n = 4 (just baseline)        → grade clamped to [6, 7]
+        n = 5 (baseline + e or f)    → grade clamped to [7, 8]
+        n = 6 (baseline + both e+f)  → grade clamped to [8, 9]
+
+      ELSE IF score < 50 → AUTO NO BET.
+      ELSE 50 ≤ score < 65 → allowed only with original 3-trigger set
+            (a)+(b)+(c); else AUTO NO BET. Capped at 7.
+      ELSE score ≥ 65 → allowed on score alone.
+
+    Returns: (grade_num, caps_applied_list, under_triggers_count)
+      under_triggers_count is the int 0..6 used by POTD evaluation.
 
     Other gates retained: both-scenarios-fail OVER cap, ceiling sub-component
     requirement for elite, role + map-pool gate.
@@ -1136,9 +1144,18 @@ def apply_post_simulation_caps(
     _gap_supports = (_proj_for_gap is not None and _gap_pct <= -10.0)
     _hr_supports  = (hit_rate is not None and hit_rate <= 0.40)
     _under_prob_supports = (under_prob is not None and under_prob >= 0.60)
+    _stomp_supports      = bool(stomp_via_rank or (favorite_prob is not None and favorite_prob >= 0.72))
+    _low_var_supports    = bool(stability_std is not None and stability_std <= 6.0)
     _all_under_triggers   = bool(_both_fail and _gap_supports and _hr_supports)
-    _all_under_triggers_4 = bool(_all_under_triggers and _under_prob_supports)
+    _baseline_4           = bool(_all_under_triggers and _under_prob_supports)
     _variance_extreme     = bool(stability_std is not None and stability_std > 9.0)
+
+    # Tiered trigger count: only valid when baseline (a+b+c+d) all fire.
+    # n=0 if baseline missing; otherwise n = 4 + e + f (so 4, 5, or 6).
+    if _baseline_4:
+        _under_triggers_n = 4 + (1 if _stomp_supports else 0) + (1 if _low_var_supports else 0)
+    else:
+        _under_triggers_n = 0
 
     # Asymmetric 100-point weighted score gate
     if weighted_score_total is not None:
@@ -1149,11 +1166,10 @@ def apply_post_simulation_caps(
             elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
             elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")
         else:  # UNDER
-            if _all_under_triggers_4:
-                # 4-trigger path — NEVER NO BET, force min 6 enforced at end.
-                # Apply only the upper score caps (≥ 65 tier ladder).
-                if   ws < 70: cap(7, f"UNDER 4-trigger, score {ws:.0f}<70 → cap 7")
-                elif ws < 78 and g >= 9: cap(8, f"score {ws:.0f}<78 for elite")
+            if _baseline_4:
+                # Tier system fires — never NO BET, clamp applied at end.
+                # Skip score-based AUTO NO BET; clamp targets supersede caps.
+                pass
             elif ws < 50:
                 cap(3, f"AUTO NO BET — UNDER score {ws:.0f}<50")
             elif ws < 65:
@@ -1191,27 +1207,32 @@ def apply_post_simulation_caps(
         if neutral_pool:
             cap(8, "elite needs favorable map pool")
 
-    # ── FORCE UNDER floor — applied LAST so it overrides earlier caps ──────
-    # 4-trigger FORCE → min 6/10. Requires all 4 confirmations (the original
-    # 3 PLUS simulator under_prob ≥ 60%). The 4-trigger score-gate path
-    # never fires AUTO NO BET, so no _no_bet_fired suppression is needed —
-    # but we still gate on extreme variance (σ > 9).
-    # NOTE: legacy 3-trigger FORCE MIN 7 was removed — the previous version
-    # bumped grades without requiring simulator agreement on under_prob,
-    # which violated the strict-gate philosophy. The new 4-trigger floor is
-    # stricter (4 conditions) and more conservative (min 6 instead of 7).
+    # ── TIERED UNDER clamp — applied LAST so it overrides earlier caps ─────
+    # Requires baseline (a+b+c+d) all firing. Then:
+    #   n=4 → clamp [6,7], n=5 → clamp [7,8], n=6 → clamp [8,9].
+    # Extreme variance (σ > 9) suppresses the clamp entirely.
+    # The score-gate path never fires AUTO NO BET when baseline holds.
     if (decision == "UNDER"
-            and _all_under_triggers_4
-            and not _variance_extreme
-            and g < 6):
-        caps.append(
-            f"FORCE UNDER {g}→6 — all 4 triggers "
-            f"(gap {_gap_pct:.0f}%, HR {(hit_rate or 0)*100:.0f}%, "
-            f"under_prob {(under_prob or 0)*100:.0f}%, both<line)"
-        )
-        g = 6
+            and _baseline_4
+            and not _variance_extreme):
+        if   _under_triggers_n >= 6: lo, hi = 8, 9
+        elif _under_triggers_n >= 5: lo, hi = 7, 8
+        else:                        lo, hi = 6, 7  # n == 4
+        _orig_g = g
+        if g < lo: g = lo
+        if g > hi: g = hi
+        if g != _orig_g:
+            extras = []
+            if _stomp_supports:   extras.append("stomp")
+            if _low_var_supports: extras.append(f"σ≤6 (got {(stability_std or 0):.1f})")
+            extras_str = (" + " + " + ".join(extras)) if extras else ""
+            caps.append(
+                f"TIER {_under_triggers_n} UNDER {_orig_g}→{g} clamp [{lo},{hi}] — "
+                f"baseline (gap {_gap_pct:.0f}%, HR {(hit_rate or 0)*100:.0f}%, "
+                f"under_prob {(under_prob or 0)*100:.0f}%, both<line){extras_str}"
+            )
 
-    return g, caps
+    return g, caps, _under_triggers_n
 
 
 def calculate_grade(

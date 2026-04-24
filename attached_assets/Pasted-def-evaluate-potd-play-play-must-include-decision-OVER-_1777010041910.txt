@@ -1,0 +1,106 @@
+def evaluate_potd(play):
+    """
+    play must include:
+    - decision ("OVER","UNDER","NO BET")
+    - grade (int 1–10)
+    - edge_percent (float)
+    - over_prob (float)
+    - under_prob (float)
+    - score (0–100)
+    - stomp_risk (True/False)
+    - variance_sigma (float)
+    - under_triggers (int)
+    - both_scenarios_clear (bool)   # for OVER
+    """
+
+    # -----------------------------
+    # STEP 1: BASE ELIGIBILITY
+    # -----------------------------
+    if play["decision"] == "NO BET":
+        return {"potd": False, "tier": None, "reason": "No bet"}
+
+    if play["grade"] < 7:
+        return {"potd": False, "tier": None, "reason": "Grade too low"}
+
+    if play["edge_percent"] < 5:
+        return {"potd": False, "tier": None, "reason": "Insufficient edge"}
+
+    # -----------------------------
+    # STEP 2: STABILITY FILTER
+    # -----------------------------
+    # Remove fragile plays
+    if play["decision"] == "OVER":
+        if play["stomp_risk"]:
+            return {"potd": False, "tier": None, "reason": "Stomp risk (over fragile)"}
+        if play["variance_sigma"] >= 10 and play["score"] < 85:
+            return {"potd": False, "tier": None, "reason": "Too volatile"}
+
+    # -----------------------------
+    # STEP 3: S-TIER (ELITE POTD)
+    # -----------------------------
+    if play["decision"] == "OVER":
+        if (
+            play["score"] >= 85 and
+            play["edge_percent"] >= 10 and
+            play["over_prob"] >= 0.65 and
+            play["both_scenarios_clear"]
+        ):
+            return {
+                "potd": True,
+                "tier": "S",
+                "units": 1.25,
+                "reason": "Elite over edge"
+            }
+
+    if play["decision"] == "UNDER":
+        if (
+            play["under_triggers"] >= 5 and
+            play["edge_percent"] >= 10 and
+            play["under_prob"] >= 0.65
+        ):
+            return {
+                "potd": True,
+                "tier": "S",
+                "units": 1.25,
+                "reason": "Elite under edge"
+            }
+
+    # -----------------------------
+    # STEP 4: A-TIER (STANDARD POTD)
+    # -----------------------------
+    if play["decision"] == "OVER":
+        if (
+            play["score"] >= 75 and
+            play["edge_percent"] >= 7 and
+            play["over_prob"] >= 0.60 and
+            play["both_scenarios_clear"]
+        ):
+            return {
+                "potd": True,
+                "tier": "A",
+                "units": 1.0,
+                "reason": "Strong over edge"
+            }
+
+    if play["decision"] == "UNDER":
+        if (
+            play["under_triggers"] >= 4 and
+            play["edge_percent"] >= 8 and
+            play["under_prob"] >= 0.62
+        ):
+            return {
+                "potd": True,
+                "tier": "A",
+                "units": 1.0,
+                "reason": "Strong under edge"
+            }
+
+    # -----------------------------
+    # STEP 5: FAILSAFE
+    # -----------------------------
+    return {
+        "potd": False,
+        "tier": None,
+        "units": 0,
+        "reason": "Does not meet POTD criteria"
+    }

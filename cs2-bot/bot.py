@@ -1584,7 +1584,12 @@ def _analyze_player(
             _up_pct  = sim_result.get("under_prob")
             _up_unit = (_up_pct / 100.0) if isinstance(_up_pct, (int, float)) else None
 
-            _gnum_new, _new_caps = _post_caps(
+            # Pull stomp/favorite signals (favorite_prob is 0..1 in sim_result)
+            _stomp_v = bool(sim_result.get("stomp_via_rank"))
+            _fav_p   = sim_result.get("favorite_prob")
+            _fav_p   = float(_fav_p) if isinstance(_fav_p, (int, float)) else None
+
+            _gnum_new, _new_caps, _under_triggers_n = _post_caps(
                 grade_num=_gnum_old,
                 decision=_decision,
                 role_tag=_role_tag,
@@ -1598,10 +1603,15 @@ def _analyze_player(
                 hit_rate=_hr_unit,
                 stability_std=_s_std if isinstance(_s_std, (int, float)) else None,
                 under_prob=_up_unit,
+                stomp_via_rank=_stomp_v,
+                favorite_prob=_fav_p,
             )
-            # Distinguish NO BET (score-gated, drops to ≤3) from FORCE UNDER (raises to ≥7)
+            # Persist trigger count so POTD evaluation downstream can read it
+            sim_result["under_triggers"] = _under_triggers_n
+            # Distinguish NO BET (score-gated, drops to ≤3) from TIERED UNDER clamp
             _is_no_bet  = any("AUTO NO BET" in c for c in _new_caps) and _gnum_new <= 3
-            _is_forced  = any(c.startswith("FORCE UNDER") for c in _new_caps)
+            _tier_cap   = next((c for c in _new_caps if c.startswith("TIER ")), None)
+            _is_tiered  = _tier_cap is not None
             _grade_changed = _gnum_new != _gnum_old
 
             if _new_caps and _grade_changed:
@@ -1614,9 +1624,9 @@ def _analyze_player(
                         f"🚫 NO BET — {_new_grade_str} "
                         f"(was {_decision} {_gnum_old}/10)"
                     )
-                elif _is_forced and _gnum_new > _gnum_old:
-                    # FORCE UNDER bumped grade up to min 6/10 (4 triggers)
-                    _glabel = "Forced UNDER (4 triggers)"
+                elif _is_tiered and _gnum_new > _gnum_old:
+                    # Tiered UNDER clamp bumped grade up (n=4→[6,7], n=5→[7,8], n=6→[8,9])
+                    _glabel = f"Tiered UNDER ({_under_triggers_n} triggers)"
                     _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
                     sim_result["grade"] = _new_grade_str
                     sim_result["recommendation"] = f"❌ UNDER — {_new_grade_str} 🔻"
@@ -1641,6 +1651,61 @@ def _analyze_player(
                 sim_result["vote_tally"] = _vt
     except Exception as _pc_err:
         logger.warning(f"[post_caps] Failed: {_pc_err}")
+
+    # ── Play of the Day (POTD) evaluation ──────────────────────────────────────
+    # Runs ONLY after the bot has finalized a grade. Builds the play dict the
+    # POTD evaluator expects, calls evaluate_potd, and stores the result on
+    # sim_result for the embed builder to surface.
+    try:
+        from grade_engine import evaluate_potd as _eval_potd
+
+        _g_str = sim_result.get("grade", "N/A") or "N/A"
+        _g_num = 0
+        try:
+            if isinstance(_g_str, str) and "/" in _g_str:
+                _g_num = int(_g_str.split("/")[0].strip())
+        except Exception:
+            _g_num = 0
+
+        _rec_str   = str(sim_result.get("recommendation", "") or "")
+        _decision_for_potd = (
+            "NO BET" if ("NO BET" in _rec_str.upper() or _g_num < 4)
+            else (sim_result.get("decision") or "NO BET")
+        )
+
+        _ws_total = ((sim_result.get("grade_pkg") or {}).get("weighted_score") or {}).get("total")
+        _op_pct   = sim_result.get("over_prob")
+        _up_pct2  = sim_result.get("under_prob")
+        _edge_val = sim_result.get("edge")
+        _sigma    = sim_result.get("stability_std")
+        _line_for_scn = float(sim_result.get("line") or sim_result.get("prop_line") or 0)
+        _scn2     = ((sim_result.get("grade_pkg") or {}).get("scenario")) or {}
+        _short_p  = _scn2.get("short_proj")
+        _normal_p = _scn2.get("normal_proj")
+        _both_clear = bool(
+            _line_for_scn > 0
+            and isinstance(_short_p, (int, float))
+            and isinstance(_normal_p, (int, float))
+            and _short_p > _line_for_scn
+            and _normal_p > _line_for_scn
+        )
+
+        _play_for_potd = {
+            "decision":             _decision_for_potd,
+            "grade":                _g_num,
+            "edge_percent":         abs(float(_edge_val)) if isinstance(_edge_val, (int, float)) else 0.0,
+            "over_prob":            (_op_pct / 100.0) if isinstance(_op_pct, (int, float)) else 0.0,
+            "under_prob":           (_up_pct2 / 100.0) if isinstance(_up_pct2, (int, float)) else 0.0,
+            "score":                float(_ws_total) if isinstance(_ws_total, (int, float)) else 0.0,
+            "stomp_risk":           bool(sim_result.get("stomp_via_rank")),
+            "variance_sigma":       float(_sigma) if isinstance(_sigma, (int, float)) else 0.0,
+            "under_triggers":       int(sim_result.get("under_triggers") or 0),
+            "both_scenarios_clear": _both_clear,
+        }
+        sim_result["potd"] = _eval_potd(_play_for_potd)
+    except Exception as _potd_err:
+        logger.warning(f"[potd] Failed: {_potd_err}")
+        sim_result["potd"] = {"potd": False, "tier": None, "units": 0, "reason": "POTD eval error"}
 
     # --- Unit Sizing (after grade_pkg so confidence is consistent with the embed) ---
     # Use the full grade_engine confidence score (same number displayed to the user)
@@ -1956,6 +2021,15 @@ def build_result_embed(
         final_rec_value += f"\n⚠️ AWPer detected — {hs_src}"
     elif hs_src:
         final_rec_value += f"\n_HS rate: {hs_src}_"
+
+    # ── Play of the Day banner (after grade is finalized) ───────────────────
+    _potd = result.get("potd") or {}
+    if _potd.get("potd"):
+        _tier  = _potd.get("tier") or "?"
+        _units = _potd.get("units") or 0
+        _rsn   = _potd.get("reason") or ""
+        _emoji = "🏆" if _tier == "S" else "🥇"
+        final_rec_value += f"\n{_emoji} **POTD {_tier}-TIER** · {_units}u · _{_rsn}_"
 
     # ── Title + Description (GURU header block) ───────────────────────────────
     lock_pfx = "🔒 " if is_lock else ""
