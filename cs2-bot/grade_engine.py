@@ -895,6 +895,205 @@ def classify_player_profile(round_swing: dict, multikill: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 11c-bis. 100-Point Weighted Scoring Model (Doc 1 — strict edge-detection)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# "Scoring should run on a 100-point weighted model where ceiling (how often
+#  the player hits 30+ or 35+) is the most important driver, followed by
+#  hit rate, multi-kill ability, round swing, match-length risk, role, and
+#  consistency, with averages and medians heavily de-emphasized since kills
+#  props are distribution and ceiling-driven rather than mean-driven."
+#
+# Component weights (sum = 100):
+#   Ceiling frequency .... 25  (line+3 hit rate × 0.5  +  line+8 hit rate × 0.5)
+#   Hit rate ............. 20  (over-line conversion)
+#   Multi-kill ........... 15  (HIGH/MED/LOW from grade_pkg)
+#   Round swing .......... 12  (HIGH/MED/LOW from grade_pkg)
+#   Match-length risk .... 12  (favorite_prob, stomp, projected_rounds)
+#   Role ................. 8   (Star/AWPer/Entry > Support > Rifler)
+#   Consistency .......... 8   (σ ≤ 4 best, σ ≥ 9 worst)
+#
+# Direction-aware: for UNDER decisions, ceiling/hit-rate/role components are
+# inverted (low MK + low swing + plain rifler + short maps = strong UNDER score).
+
+_WS_WEIGHTS = {
+    "ceiling":      25,
+    "hit_rate":     20,
+    "multikill":    15,
+    "round_swing":  12,
+    "match_length": 12,
+    "role":          8,
+    "consistency":   8,
+}
+
+def _ws_label(total: float) -> tuple[str, str]:
+    if total >= 85: return "🟢 ELITE",    "Conviction play — all signals align"
+    if total >= 75: return "✅ STRONG",   "Strong play — supports elite tiers"
+    if total >= 65: return "🟡 LEAN",     "Playable lean — needs price"
+    if total >= 50: return "⚪ MARGINAL", "Marginal — skip unless price is plus"
+    return "🔴 SKIP", "Weak score — do not bet"
+
+
+def _level_to_unit(level: str, invert: bool = False) -> float:
+    """HIGH/MEDIUM/LOW level → 0..1 unit score, optionally inverted."""
+    table = {"HIGH": 1.0, "MEDIUM": 0.55, "LOW": 0.15}
+    base = table.get((level or "MEDIUM").upper(), 0.55)
+    return (1.0 - base) if invert else base
+
+
+def compute_weighted_score_100(
+    series_totals:    list[float],
+    line:             float,
+    decision:         str,
+    hit_rate:         float,
+    round_swing:      dict,
+    multikill:        dict,
+    favorite_prob:    float,
+    stomp_via_rank:   bool,
+    projected_rounds: int | float | None,
+    role_tag:         str | None,
+    stability_std:    float,
+) -> dict:
+    """
+    Direction-aware 100-point weighted score.
+
+    Returns:
+      {
+        "total":        float (0-100),
+        "label":        str,
+        "verdict":      str,
+        "components": {
+            "<name>": {"score": float, "weight": int, "points": float, "detail": str},
+            ...
+        },
+        "direction":    "OVER" | "UNDER",
+        "ceiling_pct":  float (ceiling component as % of its max — used for
+                                elite-tier confirmation gate),
+      }
+    """
+    direction = decision if decision in {"OVER", "UNDER"} else "OVER"
+    is_over   = direction == "OVER"
+
+    # ── 1. Ceiling frequency (25 pts) ────────────────────────────────────────
+    if series_totals:
+        n = len(series_totals)
+        if is_over:
+            clear_pct = sum(1 for x in series_totals if x >= line + 3) / n
+            peak_pct  = sum(1 for x in series_totals if x >= line + 8) / n
+            detail_str = f"{clear_pct*100:.0f}% ≥ line+3, {peak_pct*100:.0f}% ≥ line+8"
+        else:
+            clear_pct = sum(1 for x in series_totals if x <= line - 3) / n
+            peak_pct  = sum(1 for x in series_totals if x <= line - 8) / n
+            detail_str = f"{clear_pct*100:.0f}% ≤ line-3, {peak_pct*100:.0f}% ≤ line-8"
+        ceiling_score = 0.5 * clear_pct + 0.5 * peak_pct
+    else:
+        ceiling_score = 0.0
+        detail_str = "no series data"
+
+    # ── 2. Hit rate (20 pts) ─────────────────────────────────────────────────
+    # hit_rate is over-side conversion (0..1). For UNDER, invert.
+    hr = hit_rate if is_over else (1.0 - hit_rate)
+    # Map: 0.50→0.0, 0.60→0.5, 0.75→1.0
+    hr_score = max(0.0, min(1.0, (hr - 0.50) / 0.25))
+    hr_detail = f"{hr*100:.0f}% {'over' if is_over else 'under'} conversion"
+
+    # ── 3. Multi-kill (15 pts) ──────────────────────────────────────────────
+    mk_level   = multikill.get("level", "MEDIUM")
+    mk_score   = _level_to_unit(mk_level, invert=not is_over)
+    mk_detail  = f"{mk_level} multi-kill"
+
+    # ── 4. Round swing (12 pts) ─────────────────────────────────────────────
+    rs_level   = round_swing.get("level", "MEDIUM")
+    rs_score   = _level_to_unit(rs_level, invert=not is_over)
+    rs_detail  = f"{rs_level} round swing"
+
+    # ── 5. Match-length risk (12 pts) ───────────────────────────────────────
+    pr = projected_rounds or 44
+    if is_over:
+        # Long maps + competitive odds = high score
+        if   pr >= 46:                       length_score = 1.00
+        elif pr >= 44:                       length_score = 0.85
+        elif pr >= 42:                       length_score = 0.65
+        elif pr >= 40:                       length_score = 0.40
+        else:                                length_score = 0.15
+        if stomp_via_rank or favorite_prob >= 0.72:
+            length_score = min(length_score, 0.20)
+        elif favorite_prob >= 0.65:
+            length_score = min(length_score, 0.50)
+        ml_detail = f"~{pr} rds, fav {favorite_prob*100:.0f}%"
+    else:
+        # Short maps benefit UNDERS
+        if   pr <= 38:                       length_score = 1.00
+        elif pr <= 40:                       length_score = 0.85
+        elif pr <= 42:                       length_score = 0.65
+        elif pr <= 44:                       length_score = 0.40
+        else:                                length_score = 0.15
+        if stomp_via_rank or favorite_prob >= 0.72:
+            length_score = max(length_score, 0.85)   # stomp favors UNDER
+        ml_detail = f"~{pr} rds, fav {favorite_prob*100:.0f}%"
+
+    # ── 6. Role (8 pts) ─────────────────────────────────────────────────────
+    role  = (role_tag or "").lower()
+    if is_over:
+        role_score = {
+            "awper": 1.00, "entry fragger": 0.95, "star rifler": 1.00,
+            "support": 0.55, "rifler": 0.45,
+        }.get(role, 0.50)
+    else:
+        # Plain Rifler / Support are UNDER-friendly (low ceiling)
+        role_score = {
+            "awper": 0.50, "entry fragger": 0.30, "star rifler": 0.30,
+            "support": 0.85, "rifler": 0.80,
+        }.get(role, 0.55)
+    role_detail = f"{role_tag or '—'}"
+
+    # ── 7. Consistency (8 pts) ──────────────────────────────────────────────
+    s = stability_std or 0.0
+    if   s <= 4:  cons_score = 1.00
+    elif s >= 9:  cons_score = 0.20
+    else:         cons_score = max(0.20, 1.00 - (s - 4) / 5.0 * 0.80)
+    cons_detail = f"σ={s:.1f}"
+
+    # ── Assemble ─────────────────────────────────────────────────────────────
+    raw = {
+        "ceiling":      (ceiling_score, detail_str),
+        "hit_rate":     (hr_score,      hr_detail),
+        "multikill":    (mk_score,      mk_detail),
+        "round_swing":  (rs_score,      rs_detail),
+        "match_length": (length_score,  ml_detail),
+        "role":         (role_score,    role_detail),
+        "consistency":  (cons_score,    cons_detail),
+    }
+
+    components: dict = {}
+    total = 0.0
+    for k, (sc, det) in raw.items():
+        w   = _WS_WEIGHTS[k]
+        pts = round(sc * w, 1)
+        total += pts
+        components[k] = {
+            "score":  round(sc, 3),
+            "weight": w,
+            "points": pts,
+            "detail": det,
+        }
+
+    total = round(total, 1)
+    label, verdict = _ws_label(total)
+
+    ceiling_pct = (components["ceiling"]["points"] / _WS_WEIGHTS["ceiling"]) * 100
+
+    return {
+        "total":       total,
+        "label":       label,
+        "verdict":     verdict,
+        "components":  components,
+        "direction":   direction,
+        "ceiling_pct": round(ceiling_pct, 1),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 11d. Scenario Projections (Short-map vs Normal-map)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1145,6 +1344,29 @@ def compute_grade_package(
         avg_kpr       = avg_kpr,
     )
     player_profile = classify_player_profile(round_swing, multikill)
+
+    # ── 100-Point Weighted Score (Doc 1) ─────────────────────────────────────
+    # Reads role tag + favorite_prob from sim_result (passed through bot.py).
+    weighted_score = None
+    try:
+        _stab_std = sim_result.get("sim_std") or sim_result.get("sigma_mad") or 0.0
+        weighted_score = compute_weighted_score_100(
+            series_totals    = series_totals,
+            line             = float(line),
+            decision         = decision,
+            hit_rate         = float(hit_rate) / 100.0 if hit_rate > 1 else float(hit_rate),
+            round_swing      = round_swing,
+            multikill        = multikill,
+            favorite_prob    = float(sim_result.get("favorite_prob", 0.55) or 0.55),
+            stomp_via_rank   = bool(stomp),
+            projected_rounds = sim_result.get("total_projected_rounds")
+                               or sim_result.get("projected_rounds"),
+            role_tag         = sim_result.get("role_tag"),
+            stability_std    = float(_stab_std),
+        )
+    except Exception:
+        weighted_score = None
+
     scenario       = compute_scenario_projections(
         kpr            = avg_kpr,
         hist_avg       = float(hist_avg),
@@ -1218,6 +1440,7 @@ def compute_grade_package(
         "scenario":       scenario,
         "misprice":       misprice,
         "avg_kpr":        avg_kpr,
+        "weighted_score": weighted_score,
     }
 
 

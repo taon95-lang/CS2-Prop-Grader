@@ -1524,6 +1524,25 @@ def _analyze_player(
     sim_result["confidence_grade"] = conf_grade
     sim_result["confidence_label"] = conf_label_final
 
+    # --- Step 9b: Derive role tag BEFORE grade_engine so 100-pt score sees it ---
+    _role_tag = None
+    if period_stats:
+        try:
+            from grade_engine import determine_role as _det_role
+            _hs       = period_stats.get("hs_pct")
+            _hs_rate  = (_hs / 100.0) if _hs is not None else None
+            _slug_rt  = (player_name or "").lower().strip().replace(" ", "-")
+            _role_tag, _ = _det_role(
+                _slug_rt, _KNOWN_AWPERS,
+                avg_kpr=period_stats.get("kpr"),
+                avg_fk_rate=period_stats.get("opening") or period_stats.get("opening_ratio"),
+                avg_survival=period_stats.get("survival") or period_stats.get("survival_pct"),
+                hs_rate=_hs_rate,
+            )
+        except Exception:
+            _role_tag = None
+    sim_result["role_tag"] = _role_tag
+
     # --- Step 10: Grade Engine Package (new analytics layer) ---
     try:
         grade_pkg = compute_grade_package(
@@ -1537,36 +1556,17 @@ def _analyze_player(
         logger.warning(f"[grade_engine] Failed: {_ge_err}")
         sim_result["grade_pkg"] = {}
 
-    # --- Step 10b: Post-simulation caps (Doc 1 both-scenario + Doc 2 #7 role/pool) ---
-    # Re-grade using info that wasn't available at simulation time:
-    #   role tag (from determine_role) and short/normal scenario projections.
+    # --- Step 10b: Post-simulation caps ----------------------------------------
+    # Doc 1: both-scenario gate, 100-point weighted score gate.
+    # Doc 2 #7: Role + Map Pool gate.
     try:
         from simulator import apply_post_simulation_caps as _post_caps
         _gp = sim_result.get("grade_pkg") or {}
         _scn = _gp.get("scenario") or {}
+        _ws  = _gp.get("weighted_score") or {}
         _decision = sim_result.get("decision", "OVER")
         _stat_type = sim_result.get("stat_type", "Kills")
         _line = sim_result.get("line") or sim_result.get("prop_line")
-
-        # Derive role tag from period_stats
-        _role_tag = None
-        if period_stats:
-            _avg_kpr = period_stats.get("kpr")
-            _hs      = period_stats.get("hs_pct")
-            _hs_rate = (_hs / 100.0) if _hs is not None else None
-            try:
-                from grade_engine import determine_role as _det_role
-                _slug = (player_name or "").lower().strip().replace(" ", "-")
-                _role_tag, _ = _det_role(
-                    _slug, _KNOWN_AWPERS,
-                    avg_kpr=_avg_kpr,
-                    avg_fk_rate=period_stats.get("opening") or period_stats.get("opening_ratio"),
-                    avg_survival=period_stats.get("survival") or period_stats.get("survival_pct"),
-                    hs_rate=_hs_rate,
-                )
-            except Exception:
-                _role_tag = None
-
         _map_pool_label = ((deep or {}).get("map_pool") or {}).get("label")
 
         # Parse current grade ("8/10 (Strong edge)") and apply post-caps
@@ -1585,6 +1585,8 @@ def _analyze_player(
                 normal_proj=_scn.get("normal_proj"),
                 line=float(_line),
                 stat_type=_stat_type,
+                weighted_score_total=_ws.get("total"),
+                weighted_ceiling_pct=_ws.get("ceiling_pct"),
             )
             if _new_caps and _gnum_new < _gnum_old:
                 if "(capped)" not in _glabel:
@@ -2171,6 +2173,41 @@ def build_result_embed(
         embed.add_field(
             name="📐 MATCH-LENGTH SCENARIOS",
             value=sc_val,
+            inline=False,
+        )
+
+    # ── 100-Point Weighted Score (Doc 1) ──────────────────────────────────────
+    _ws = _pkg_fw.get("weighted_score") or {}
+    if _ws.get("total") is not None:
+        _comps = _ws.get("components") or {}
+        _order = ["ceiling", "hit_rate", "multikill", "round_swing",
+                  "match_length", "role", "consistency"]
+        _names = {
+            "ceiling":      "Ceiling Frequency",
+            "hit_rate":     "Hit Rate",
+            "multikill":    "Multi-kill",
+            "round_swing":  "Round Swing",
+            "match_length": "Match-Length Risk",
+            "role":         "Role",
+            "consistency":  "Consistency",
+        }
+        _lines = []
+        for _k in _order:
+            _c = _comps.get(_k) or {}
+            _pts = _c.get("points", 0)
+            _w   = _c.get("weight", 0)
+            _det = _c.get("detail", "")
+            _lines.append(
+                f"`{_pts:>4.1f}/{_w:<2}` **{_names[_k]}** — _{_det}_"
+            )
+        _ws_val = (
+            f"**Total: `{_ws.get('total', 0):.1f}/100`  ·  {_ws.get('label', '—')}**\n"
+            f"_{_ws.get('verdict', '')}_\n\n"
+            + "\n".join(_lines)
+        )
+        embed.add_field(
+            name=f"📋 100-PT WEIGHTED SCORE  ·  {_ws.get('direction', 'OVER')}",
+            value=_ws_val[:1020],
             inline=False,
         )
 

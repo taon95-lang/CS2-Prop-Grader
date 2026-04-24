@@ -1070,11 +1070,20 @@ def apply_post_simulation_caps(
     normal_proj: float | None,
     line: float,
     stat_type: str = "Kills",
+    weighted_score_total: float | None = None,
+    weighted_ceiling_pct: float | None = None,
 ) -> tuple[int, list[str]]:
     """
     Caps applied AFTER simulation, using info that wasn't available at sim time.
     Implements:
       - Doc 1 (long para): both-scenarios-fail → cap at 6 on OVERS.
+      - Doc 1 (long para): "overs only when score is strong (75+) … and
+        ceiling is high"  →  weighted-score gate.
+            OVER  + score < 75 → cap 7
+            OVER  + score < 65 → cap 6
+            UNDER + score < 70 → cap 7
+            Elite (9-10) requires score ≥ 80 AND ceiling sub-component ≥ 60%
+            of its 25-pt max (i.e. ceiling_pct ≥ 60).
       - Doc 2 #7: Role + Map Pool gate.
         * Plain Rifler + Mixed/Unknown map pool → cap at 7 (no convergence
           on style or map fit, no elite tier).
@@ -1099,6 +1108,21 @@ def apply_post_simulation_caps(
     if decision == "OVER" and short_proj is not None and normal_proj is not None:
         if short_proj < line and normal_proj < line:
             cap(6, f"both scenarios below line ({short_proj:.1f}/{normal_proj:.1f}<{line})")
+
+    # Doc 1: 100-point weighted score gate
+    if weighted_score_total is not None:
+        ws = weighted_score_total
+        if decision == "OVER":
+            if   ws < 65: cap(6, f"100-pt score {ws:.0f}<65")
+            elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
+            elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")
+        else:  # UNDER
+            if   ws < 60: cap(6, f"100-pt score {ws:.0f}<60")
+            elif ws < 70: cap(7, f"100-pt score {ws:.0f}<70")
+            elif ws < 78 and g >= 9: cap(8, f"score {ws:.0f}<78 for elite")
+        # Ceiling-component requirement for elite tiers
+        if g >= 9 and weighted_ceiling_pct is not None and weighted_ceiling_pct < 60:
+            cap(8, f"ceiling sub-score {weighted_ceiling_pct:.0f}%<60% for elite")
 
     # Doc 2 #7: Role + Map Pool gate
     role = (role_tag or "").lower()
