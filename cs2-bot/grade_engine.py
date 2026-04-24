@@ -473,6 +473,53 @@ def compute_risk_flags(
     return flags
 
 
+def compute_semantic_risk_flags(sim_result: dict, variance: dict) -> list[str]:
+    """
+    Returns a list of plain string keys (e.g. "high_variance", "stomp_risk")
+    suitable for programmatic risk-based confidence adjustment.
+
+    Distinct from compute_risk_flags() which returns emoji-prefixed display
+    strings. Both are derived from the same underlying signals.
+    """
+    keys: list[str] = []
+    vtier = (variance or {}).get("tier", "MEDIUM")
+    if vtier in ("HIGH", "VERY_HIGH"):
+        keys.append("high_variance")
+    if (sim_result or {}).get("stomp_via_rank"):
+        keys.append("stomp_risk")
+    if (sim_result or {}).get("close_via_rank"):
+        keys.append("ot_risk")
+    return keys
+
+
+def adjust_for_risk(result, decision_obj):
+    """
+    Downgrade the displayed confidence tier based on risk flags.
+    Only reduces confidence — never changes the betting decision itself.
+
+    Expects:
+      result["risk_flags"]      : list[str] of semantic keys
+                                  (e.g. "high_variance", "stomp_risk")
+      decision_obj["confidence"]: one of "High", "Moderate", "Low"
+
+    Returns the (mutated) decision_obj.
+    """
+    risk_flags = result.get("risk_flags", [])
+
+    # Only reduce confidence, NOT decision
+    if "high_variance" in risk_flags:
+        if decision_obj["confidence"] == "High":
+            decision_obj["confidence"] = "Moderate"
+
+    if "stomp_risk" in risk_flags:
+        if decision_obj["confidence"] == "High":
+            decision_obj["confidence"] = "Moderate"
+        elif decision_obj["confidence"] == "Moderate":
+            decision_obj["confidence"] = "Low"
+
+    return decision_obj
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. Verdict Reason
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1430,6 +1477,8 @@ def compute_grade_package(
 
     # ── Risk flags, confidence, edge ─────────────────────────────────────────
     flags = compute_risk_flags(sim_result, variance, form, deep, line)
+    # Semantic (programmatic) risk-flag keys, used by adjust_for_risk()
+    risk_flag_keys = compute_semantic_risk_flags(sim_result, variance)
 
     # Augment flags from framework
     rs_level = round_swing.get("level", "MEDIUM")
@@ -1469,6 +1518,7 @@ def compute_grade_package(
         "variance":       variance,
         "map_intel":      map_intel,
         "flags":          flags,
+        "risk_flags":     risk_flag_keys,
         "confidence":     confidence,
         "edge_pct":       edge_pct,
         "reason":         reason,

@@ -30,6 +30,8 @@ from grade_engine import (
     detect_dog_line,
     score_correlated_parlay,
     build_slips,
+    adjust_for_risk,
+    compute_semantic_risk_flags,
 )
 from scraper import check_standin, get_recent_team_roster, search_team
 
@@ -1589,6 +1591,35 @@ def _analyze_player(
         "F": "⚫ Unreliable",
     }
     conf_label_final = _conf_labels[conf_grade]
+
+    # ── Risk-flag confidence downgrade ──────────────────────────────────────
+    # Map letter grade to "High"/"Moderate"/"Low" for adjust_for_risk(),
+    # then if it downgrades us, snap conf_grade and label back into sync.
+    _grade_to_tier = {"A": "High", "B": "Moderate", "C": "Low", "D": "Low", "F": "Low"}
+    _tier_to_grade = {"High": "A", "Moderate": "B", "Low": "C"}
+    _orig_tier = _grade_to_tier[conf_grade]
+    try:
+        _semantic_flags = compute_semantic_risk_flags(sim_result, sim_result.get("variance") or {})
+        _decision_obj  = {"confidence": _orig_tier}
+        _decision_obj  = adjust_for_risk({"risk_flags": _semantic_flags}, _decision_obj)
+        _new_tier = _decision_obj["confidence"]
+        if _new_tier != _orig_tier:
+            _new_grade = _tier_to_grade[_new_tier]
+            # Only downgrade — never upgrade. If already at C/D/F, keep that.
+            _order = ["A", "B", "C", "D", "F"]
+            if _order.index(_new_grade) > _order.index(conf_grade):
+                conf_grade = _new_grade
+                conf_label_final = _conf_labels[conf_grade]
+                sim_result["risk_downgrade"] = {
+                    "from": _orig_tier, "to": _new_tier,
+                    "flags": _semantic_flags,
+                }
+                logger.info(
+                    f"[adjust_for_risk] downgraded {_orig_tier}→{_new_tier} "
+                    f"(flags={_semantic_flags})"
+                )
+    except Exception as _adj_err:
+        logger.warning(f"[adjust_for_risk] failed: {_adj_err}")
 
     # Unit Sizing: only for directional calls with enough conviction
     grade_str_val = sim_result.get("grade", "0/10")

@@ -1083,7 +1083,11 @@ def apply_post_simulation_caps(
     Caps applied AFTER simulation, using info that wasn't available at sim time.
 
     Asymmetric score gates (April 2026, tiered):
-      OVER  — strict: score ≥ 65 required (else AUTO NO BET).
+      OVER  — score-based confidence caps only (no AUTO NO BET):
+                score < 75            → cap 7
+                score 75-79 elite (g≥9) → cap 8
+              Risk-based downgrades (high_variance / stomp_risk) are applied
+              later via adjust_for_risk() in bot.py.
 
       UNDER — six possible confirmation triggers:
         (a) both scenarios below line          [baseline]
@@ -1161,9 +1165,9 @@ def apply_post_simulation_caps(
     if weighted_score_total is not None:
         ws = weighted_score_total
         if decision == "OVER":
-            # OVER strict — require score ≥ 65, else NO BET
-            if   ws < 65: cap(3, f"AUTO NO BET — OVER score {ws:.0f}<65 (strict)")
-            elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
+            # OVER — score-based confidence caps only (no AUTO NO BET on score alone).
+            # Risk-based downgrades happen later via adjust_for_risk().
+            if   ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
             elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")
         else:  # UNDER
             if _baseline_4:

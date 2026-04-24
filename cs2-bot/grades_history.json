@@ -3445,6 +3445,48 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "1531587b-d197-483a-b8a8-f320d8ad3b2f",
+      "ts": 1777013896.906627,
+      "date": "2026-04-24",
+      "player": "h4rn",
+      "display": "H4rn",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "big",
+      "over_pct": 52.0,
+      "under_pct": 48.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 28.69,
+      "hist_median": 33.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "4ca744b4-2068-46dc-9162-3ffd7986da1a",
+      "ts": 1777014588.722575,
+      "date": "2026-04-24",
+      "player": "kaluber",
+      "display": "kaluber",
+      "line": 26.0,
+      "stat": "Kills",
+      "opponent": "big",
+      "over_pct": 72.0,
+      "under_pct": 28.0,
+      "grade": "3/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "NO_BET",
+      "auto_no_bet": true,
+      "sim_median": 29.97,
+      "hist_median": 32.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
