@@ -961,7 +961,9 @@ def _analyze_player(
                 f"reusing cached {rank_gap} from earlier teammate grade"
             )
 
-    _period_kpr = (period_stats or {}).get("kpr")
+    _period_kpr    = (period_stats or {}).get("kpr")
+    _period_rating = (period_stats or {}).get("rating")
+    _period_adr    = (period_stats or {}).get("adr")
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
@@ -971,6 +973,8 @@ def _analyze_player(
             likely_maps=likely_maps if likely_maps else None,
             rank_gap=rank_gap,
             period_kpr=_period_kpr,
+            period_rating=_period_rating,
+            period_adr=_period_adr,
             today_opp_rank=today_opp_rank,
             today_is_lan=today_is_lan,
             book_implied_prob=book_implied,
@@ -1975,10 +1979,27 @@ def build_result_embed(
         _cap_line = ""
         if _caps:
             _cap_line = f"\n• **Tier caps:** pre-cap {_pre_cap}/10 · " + "; ".join(_caps[:3])
+        # Quality-of-Kill (eco-adjustment)
+        _q_mult  = result.get("quality_multiplier")
+        _q_label = result.get("quality_label")
+        _q_det   = result.get("quality_details") or {}
+        _q_line  = ""
+        if _q_mult and _q_mult != 1.0 and _q_label:
+            _r_delta = _q_det.get("rating_delta")
+            _dpk     = _q_det.get("dmg_per_kill")
+            _q_extra = []
+            if _r_delta is not None:
+                _q_extra.append(f"RatingΔ `{_r_delta:+.3f}`")
+            if _dpk is not None:
+                _q_extra.append(f"dmg/kill `{_dpk:.0f}`")
+            _q_line = f"\n• **Quality of Kill:** {_q_label}" + (
+                f"  ·  " + " · ".join(_q_extra) if _q_extra else ""
+            )
         robust_val = (
             f"• **Trimmed Avg:** `{_trim_avg:.1f}`  ·  **MAD-σ:** `{_sig_mad:.1f}`  ·  **IQR:** {_iqr_str}\n"
             f"• **Sample-shrink:** {_shrink_note}\n"
             f"• **Sub-signals:** {_vote_line}"
+            f"{_q_line}"
             f"{_cap_line}"
         )
         embed.add_field(name="🛡️ ROBUSTNESS", value=robust_val, inline=False)

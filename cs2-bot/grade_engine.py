@@ -563,6 +563,8 @@ def run_lines_table(
     period_kpr: float | None,
     step: float = 1.0,
     spread: int = 3,
+    period_rating: float | None = None,
+    period_adr: float | None = None,
 ) -> list[dict]:
     """
     Run simulation for base_line ± spread * step increments.
@@ -583,6 +585,8 @@ def run_lines_table(
                 likely_maps=likely_maps,
                 rank_gap=rank_gap,
                 period_kpr=period_kpr,
+                period_rating=period_rating,
+                period_adr=period_adr,
             )
         except Exception as e:
             logger.warning(f"[lines_table] sim failed for line {lv}: {e}")

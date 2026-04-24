@@ -162,6 +162,81 @@ def _weighted_mean_var(values: list, weights: list) -> tuple[float, float]:
 # fit_negative_binomial removed (NB model deprecated — empirical only)
 
 
+def compute_kill_quality_multiplier(
+    period_kpr: float | None,
+    period_rating: float | None,
+    period_adr: float | None,
+) -> tuple[float, str, dict]:
+    """
+    April 2026 overhaul — Doc 1 #1: Quality-of-Kill (eco-adjustment) multiplier.
+
+    Detects stat-padding against eco rounds WITHOUT new HLTV scraping by
+    cross-checking three already-collected period metrics:
+
+      1. Rating-vs-KPR divergence:
+         HLTV's Rating 2.1 is a regression-based all-in-one impact score
+         (multikills, opening kills, clutches, traded deaths, KAST, ADR).
+         Eco-padded kills add to KPR but barely move Rating because they
+         lack opening-duel weight, multikill weight, and impact weight.
+         Empirical baseline (Apr-2026 calibration on top-30 HLTV rifling
+         cohort): expected_rating ≈ 0.44 + 0.86 × KPR. Players above this
+         line are converting kills into impact; those below are padding.
+
+      2. Damage-per-kill (ADR / KPR / rounds_per_map proxy):
+         Pure eco kills register ~85-100 dmg before the kill (low-HP
+         opponents, no armor). Quality kills against full buys land in
+         the 115-135 dmg/kill band. We use ADR ÷ KPR as a sample-stable
+         proxy for dmg-per-kill. <100 = soft, >120 = hard.
+
+      3. Both signals are blended; the combined quality_score maps to a
+         multiplier in [0.93, 1.05]. We cap downside at -7% and upside
+         at +5% so a single noisy 90-day window can never wipe out or
+         double a projection.
+
+    Returns (multiplier, label, details_dict).
+    """
+    if not period_kpr or not period_rating or period_kpr <= 0:
+        return 1.0, "➖ Neutral (insufficient data)", {}
+
+    # Signal 1 — Rating vs expected from KPR
+    expected_rating = 0.44 + 0.86 * period_kpr
+    rating_delta = period_rating - expected_rating  # +0.05 elite, -0.05 padded
+
+    # Signal 2 — ADR per kill (only if ADR present and KPR > 0)
+    adr_factor = 0.0
+    dmg_per_kill = None
+    if period_adr and period_adr > 0:
+        # ADR per kill = (ADR × 1 round) / (KPR × 1 round) = ADR / KPR
+        dmg_per_kill = period_adr / period_kpr
+        # Center at 110 dmg/kill (typical), 1 unit ≈ 1 dmg/kill above center
+        # Each 10 dmg/kill shift = 0.05 quality score
+        adr_factor = (dmg_per_kill - 110.0) / 200.0   # ±0.10 typical range
+
+    # Composite: rating_delta is the dominant signal (0.7 weight)
+    quality_score = 0.7 * rating_delta + 0.3 * adr_factor
+
+    # Map to multiplier — asymmetric clamp (-7% downside, +5% upside)
+    raw_mult = 1.0 + quality_score * 0.6   # 0.10 score → ~6% shift
+    multiplier = max(0.93, min(1.05, raw_mult))
+
+    if multiplier >= 1.025:
+        label = f"🎯 HIGH (impactful kills, {multiplier:.3f}×)"
+    elif multiplier <= 0.975:
+        label = f"⚠️ LOW (eco-padded, {multiplier:.3f}×)"
+    else:
+        label = f"➖ Neutral ({multiplier:.3f}×)"
+
+    details = {
+        "rating": round(period_rating, 3),
+        "expected_rating": round(expected_rating, 3),
+        "rating_delta": round(rating_delta, 3),
+        "dmg_per_kill": round(dmg_per_kill, 1) if dmg_per_kill else None,
+        "quality_score": round(quality_score, 3),
+        "multiplier": round(multiplier, 3),
+    }
+    return multiplier, label, details
+
+
 def run_simulation(
     map_stats: list,
     line: float,
@@ -170,6 +245,8 @@ def run_simulation(
     likely_maps: list = None,
     rank_gap: int = None,
     period_kpr: float = None,
+    period_rating: float = None,
+    period_adr: float = None,
     today_opp_rank: int | None = None,
     today_is_lan: bool | None = None,
     book_implied_prob: float = BOOK_IMPLIED_PROB,
@@ -421,6 +498,25 @@ def run_simulation(
         trend_label = f"➡️ Neutral ({trend_pct:+.0f}% vs avg)"
 
     expected_total = blended_kpr * total_projected_rounds
+
+    # ── Quality-of-Kill multiplier (Apr 2026 overhaul, Doc 1 #1) ────────────
+    # Applies BEFORE the robust anchor / IQR / R2M shrinkage so all downstream
+    # logic sees the eco-adjusted projection. Critically: NOT applied to
+    # series_totals (those are facts — what the player actually delivered).
+    # The series_totals stay raw so historical hit-rate and IQR remain anchored
+    # to reality; only the forward projection is shifted.
+    quality_mult, quality_label, quality_details = compute_kill_quality_multiplier(
+        period_kpr=period_kpr,
+        period_rating=period_rating,
+        period_adr=period_adr,
+    )
+    if quality_mult != 1.0 and stat_type == "Kills":
+        _pre_quality = expected_total
+        expected_total = expected_total * quality_mult
+        logger.debug(
+            f"[sim] Quality-of-Kill: {_pre_quality:.2f} → {expected_total:.2f} "
+            f"(mult={quality_mult:.3f}, {quality_label})"
+        )
 
     # ── Robust anchor (R1+R2): trimmed-mean band + IQR clipping ─────────────
     # A single freak game can pull both the median and the mean noticeably.
@@ -755,7 +851,11 @@ def run_simulation(
         "trend_pct":              trend_pct,
         "trend_label":            trend_label,
         "recent_avg_kills":       recent_avg_kills,
-        "recent_n_maps":          recent_n,
+        "recent_n_maps":          len(recent_kpr_vals),
+        # --- Quality of Kill (Apr 2026 overhaul, Doc 1 #1) ---
+        "quality_multiplier":     quality_mult,
+        "quality_label":          quality_label,
+        "quality_details":        quality_details,
         # --- Line context ---
         "line_percentile":        line_percentile,
         # --- EV at standard -110 odds ---
