@@ -2069,6 +2069,14 @@ def _store_stat_val(result: dict, label: str, value_text: str) -> None:
         v = _flt(vt, 10.0, 250.0)
         if v:
             result['adr'] = v
+    elif 'rating 3' in label or label == 'rating3' or label == 'rating 3.0':
+        # HLTV Rating 3.0 — rolled out late 2024, headline rating on player
+        # stats pages.  Heavier weight on opening duels, multikills, and
+        # trade-impact than 2.1.  Stored alongside (not replacing) 2.1 so
+        # we can use both in the eco-quality multiplier.
+        v = _flt(vt, 0.2, 5.0)
+        if v:
+            result['rating_3'] = v
     elif 'rating 2' in label or (label == 'rating'):
         v = _flt(vt, 0.2, 5.0)
         if v:
@@ -2179,7 +2187,8 @@ def _parse_stats_page(html: str, slug: str) -> dict:
         ('kpr',    r'kills\s*/\s*round[^<]{0,80}?(\b0\.\d{2,3}\b)'),
         ('hs_pct', r'(?:headshots?\s*%|hs\s*%)[^<]{0,60}?(\d{1,2}\.?\d*)\s*%'),
         ('adr',    r'(?:damage\s*/\s*round|adr)[^<]{0,60}?(\d{2,3}\.?\d*)(?!\s*%)'),
-        ('rating', r'rating\s*2\.0[^<]{0,60}?(\d\.\d{2,3})'),
+        ('rating_3', r'rating\s*3\.0[^<]{0,60}?(\d\.\d{2,3})'),
+        ('rating',   r'rating\s*2\.[01][^<]{0,60}?(\d\.\d{2,3})'),
         ('kast',   r'\bkast\b[^<]{0,60}?(\d{2}\.?\d*)\s*%'),
         ('kd',     r'k/d\s*ratio[^<]{0,60}?(\d+\.\d{2})'),
     ]

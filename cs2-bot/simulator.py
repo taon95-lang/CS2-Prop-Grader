@@ -166,6 +166,7 @@ def compute_kill_quality_multiplier(
     period_kpr: float | None,
     period_rating: float | None,
     period_adr: float | None,
+    period_rating_3: float | None = None,
 ) -> tuple[float, str, dict]:
     """
     April 2026 overhaul — Doc 1 #1: Quality-of-Kill (eco-adjustment) multiplier.
@@ -174,33 +175,55 @@ def compute_kill_quality_multiplier(
     cross-checking three already-collected period metrics:
 
       1. Rating-vs-KPR divergence:
-         HLTV's Rating 2.1 is a regression-based all-in-one impact score
-         (multikills, opening kills, clutches, traded deaths, KAST, ADR).
+         HLTV's Rating is a regression-based all-in-one impact score.
          Eco-padded kills add to KPR but barely move Rating because they
          lack opening-duel weight, multikill weight, and impact weight.
-         Empirical baseline (Apr-2026 calibration on top-30 HLTV rifling
-         cohort): expected_rating ≈ 0.44 + 0.86 × KPR. Players above this
-         line are converting kills into impact; those below are padding.
 
-      2. Damage-per-kill (ADR / KPR / rounds_per_map proxy):
-         Pure eco kills register ~85-100 dmg before the kill (low-HP
-         opponents, no armor). Quality kills against full buys land in
-         the 115-135 dmg/kill band. We use ADR ÷ KPR as a sample-stable
-         proxy for dmg-per-kill. <100 = soft, >120 = hard.
+         We use BOTH Rating 3.0 (preferred — released late-2024, weights
+         opening duels and multikills more heavily) and Rating 2.1 (legacy
+         fallback) when available, with separate regression baselines:
 
-      3. Both signals are blended; the combined quality_score maps to a
-         multiplier in [0.93, 1.05]. We cap downside at -7% and upside
-         at +5% so a single noisy 90-day window can never wipe out or
-         double a projection.
+           Rating 3.0:  expected ≈ 0.42 + 0.94 × KPR  (steeper slope —
+                        impact actions weighted more heavily, so a high-KPR
+                        player who isn't impactful gets penalised harder)
+           Rating 2.1:  expected ≈ 0.44 + 0.86 × KPR  (calibrated on top-30
+                        HLTV rifling cohort)
+
+         When both ratings are present we average their deltas — this gives
+         a more stable signal than either alone (3.0 is newer/noisier in
+         small samples, 2.1 is older/well-calibrated). When only one is
+         present we use that one's baseline.
+
+      2. Damage-per-kill (ADR ÷ KPR proxy):
+         Eco kills register ~85-100 dmg before the kill (low-HP, no armor).
+         Quality kills against full buys land 115-135 dmg/kill. <100 soft,
+         >120 hard.
+
+      3. Combined quality_score → multiplier clamped [0.93, 1.05].
+         Asymmetric: -7% downside, +5% upside.
 
     Returns (multiplier, label, details_dict).
     """
-    if not period_kpr or not period_rating or period_kpr <= 0:
+    has_r3  = period_rating_3 and period_rating_3 > 0
+    has_r21 = period_rating   and period_rating   > 0
+    if not period_kpr or period_kpr <= 0 or not (has_r3 or has_r21):
         return 1.0, "➖ Neutral (insufficient data)", {}
 
-    # Signal 1 — Rating vs expected from KPR
-    expected_rating = 0.44 + 0.86 * period_kpr
-    rating_delta = period_rating - expected_rating  # +0.05 elite, -0.05 padded
+    # Signal 1 — Rating vs expected from KPR (use BOTH ratings when available)
+    rating_deltas = []
+    used_ratings  = []
+    if has_r3:
+        exp_r3 = 0.42 + 0.94 * period_kpr
+        d3     = period_rating_3 - exp_r3
+        rating_deltas.append(d3)
+        used_ratings.append(f"R3.0 {period_rating_3:.2f}/{exp_r3:.2f}")
+    if has_r21:
+        exp_r21 = 0.44 + 0.86 * period_kpr
+        d21     = period_rating - exp_r21
+        rating_deltas.append(d21)
+        used_ratings.append(f"R2.1 {period_rating:.2f}/{exp_r21:.2f}")
+    rating_delta = sum(rating_deltas) / len(rating_deltas)
+    expected_rating = period_kpr  # keep field for back-compat in details
 
     # Signal 2 — ADR per kill (only if ADR present and KPR > 0)
     adr_factor = 0.0
@@ -227,12 +250,13 @@ def compute_kill_quality_multiplier(
         label = f"➖ Neutral ({multiplier:.3f}×)"
 
     details = {
-        "rating": round(period_rating, 3),
-        "expected_rating": round(expected_rating, 3),
-        "rating_delta": round(rating_delta, 3),
-        "dmg_per_kill": round(dmg_per_kill, 1) if dmg_per_kill else None,
-        "quality_score": round(quality_score, 3),
-        "multiplier": round(multiplier, 3),
+        "rating":          round(period_rating, 3) if period_rating else None,
+        "rating_3":        round(period_rating_3, 3) if period_rating_3 else None,
+        "ratings_used":    used_ratings,            # ["R3.0 1.18/1.10", ...]
+        "rating_delta":    round(rating_delta, 3),
+        "dmg_per_kill":    round(dmg_per_kill, 1) if dmg_per_kill else None,
+        "quality_score":   round(quality_score, 3),
+        "multiplier":      round(multiplier, 3),
     }
     return multiplier, label, details
 
@@ -246,6 +270,7 @@ def run_simulation(
     rank_gap: int = None,
     period_kpr: float = None,
     period_rating: float = None,
+    period_rating_3: float = None,
     period_adr: float = None,
     today_opp_rank: int | None = None,
     today_is_lan: bool | None = None,
@@ -508,6 +533,7 @@ def run_simulation(
     quality_mult, quality_label, quality_details = compute_kill_quality_multiplier(
         period_kpr=period_kpr,
         period_rating=period_rating,
+        period_rating_3=period_rating_3,
         period_adr=period_adr,
     )
     if quality_mult != 1.0 and stat_type == "Kills":

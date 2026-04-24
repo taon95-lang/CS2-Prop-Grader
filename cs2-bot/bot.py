@@ -961,9 +961,10 @@ def _analyze_player(
                 f"reusing cached {rank_gap} from earlier teammate grade"
             )
 
-    _period_kpr    = (period_stats or {}).get("kpr")
-    _period_rating = (period_stats or {}).get("rating")
-    _period_adr    = (period_stats or {}).get("adr")
+    _period_kpr      = (period_stats or {}).get("kpr")
+    _period_rating   = (period_stats or {}).get("rating")
+    _period_rating_3 = (period_stats or {}).get("rating_3")
+    _period_adr      = (period_stats or {}).get("adr")
     try:
         sim_result = run_simulation(
             map_stats=map_stats,
@@ -974,6 +975,7 @@ def _analyze_player(
             rank_gap=rank_gap,
             period_kpr=_period_kpr,
             period_rating=_period_rating,
+            period_rating_3=_period_rating_3,
             period_adr=_period_adr,
             today_opp_rank=today_opp_rank,
             today_is_lan=today_is_lan,
@@ -1985,15 +1987,19 @@ def build_result_embed(
         _q_det   = result.get("quality_details") or {}
         _q_line  = ""
         if _q_mult and _q_mult != 1.0 and _q_label:
-            _r_delta = _q_det.get("rating_delta")
-            _dpk     = _q_det.get("dmg_per_kill")
+            _r_delta   = _q_det.get("rating_delta")
+            _dpk       = _q_det.get("dmg_per_kill")
+            _r_used    = _q_det.get("ratings_used") or []
             _q_extra = []
+            if _r_used:
+                # e.g. "R3.0 1.18/1.10 · R2.1 1.12/1.06"  (actual / expected)
+                _q_extra.append(" + ".join(_r_used))
             if _r_delta is not None:
-                _q_extra.append(f"RatingΔ `{_r_delta:+.3f}`")
+                _q_extra.append(f"avgΔ `{_r_delta:+.3f}`")
             if _dpk is not None:
                 _q_extra.append(f"dmg/kill `{_dpk:.0f}`")
             _q_line = f"\n• **Quality of Kill:** {_q_label}" + (
-                f"  ·  " + " · ".join(_q_extra) if _q_extra else ""
+                f"\n   ↳ " + " · ".join(_q_extra) if _q_extra else ""
             )
         robust_val = (
             f"• **Trimmed Avg:** `{_trim_avg:.1f}`  ·  **MAD-σ:** `{_sig_mad:.1f}`  ·  **IQR:** {_iqr_str}\n"
