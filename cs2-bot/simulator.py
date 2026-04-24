@@ -167,40 +167,48 @@ def compute_kill_quality_multiplier(
     period_rating: float | None,
     period_adr: float | None,
     period_rating_3: float | None = None,
+    recent_dpr: float | None = None,
+    recent_mk_per_rd: float | None = None,
+    recent_swing_per_rd: float | None = None,
 ) -> tuple[float, str, dict]:
     """
-    April 2026 overhaul — Doc 1 #1: Quality-of-Kill (eco-adjustment) multiplier.
+    Quality-of-Kill (eco-adjustment) multiplier.  April-2026 overhaul plus
+    the May-2026 expansion that adds DPR, multikill rate, and round-swing
+    as confirming signals.
 
-    Detects stat-padding against eco rounds WITHOUT new HLTV scraping by
-    cross-checking three already-collected period metrics:
+    Five signals, each producing a small "factor" in roughly [-0.20, +0.20],
+    combined into a quality_score → multiplier clamped [0.93, 1.05]:
 
-      1. Rating-vs-KPR divergence:
-         HLTV's Rating is a regression-based all-in-one impact score.
-         Eco-padded kills add to KPR but barely move Rating because they
-         lack opening-duel weight, multikill weight, and impact weight.
+      A) Rating 3.0 vs expected from KPR  (weight 0.55 — dominant)
+         Eco-padded kills boost KPR but barely move Rating 3.0 because the
+         3.0 formula heavily weights opening duels, multikills, and impact.
+         baseline:   expected ≈ 0.42 + 0.94 × KPR
+         factor:     (period_rating_3 - expected) clamped [-0.20, +0.20]
 
-         We use BOTH Rating 3.0 (preferred — released late-2024, weights
-         opening duels and multikills more heavily) and Rating 2.1 (legacy
-         fallback) when available, with separate regression baselines:
+      B) Damage-per-kill = ADR ÷ KPR  (weight 0.20)
+         Eco kills land ~85-100 dmg, full-buy kills 115-135.
+         baseline:   110 dmg/kill
+         factor:     (dpk - 110) / 200
 
-           Rating 3.0:  expected ≈ 0.42 + 0.94 × KPR  (steeper slope —
-                        impact actions weighted more heavily, so a high-KPR
-                        player who isn't impactful gets penalised harder)
-           Rating 2.1:  expected ≈ 0.44 + 0.86 × KPR  (calibrated on top-30
-                        HLTV rifling cohort)
+      C) Deaths-per-round (recent) — variance flag  (weight 0.10)
+         Lower DPR with same KPR ⇒ cleaner fragger, less variance in line.
+         Higher DPR ⇒ entry-style, kill bursts but more under-performance risk.
+         baseline:   0.65 deaths/round
+         factor:     (0.65 - dpr) / 0.5
 
-         When both ratings are present we average their deltas — this gives
-         a more stable signal than either alone (3.0 is newer/noisier in
-         small samples, 2.1 is older/well-calibrated). When only one is
-         present we use that one's baseline.
+      D) Multikill rate per round (recent)  (weight 0.10)
+         Bursty/clutch fragger → fatter right tail on kills line.
+         baseline:   0.20 multikills/round
+         factor:     (mk_rate - 0.20) / 0.6
 
-      2. Damage-per-kill (ADR ÷ KPR proxy):
-         Eco kills register ~85-100 dmg before the kill (low-HP, no armor).
-         Quality kills against full buys land 115-135 dmg/kill. <100 soft,
-         >120 hard.
+      E) HLTV Round Swing per round (recent)  (weight 0.05 — informational)
+         Positive swing ⇒ player wins their critical rounds, backs OVERs.
+         baseline:   +0.30 per round
+         factor:     (swing_per_rd - 0.30) / 2.5
 
-      3. Combined quality_score → multiplier clamped [0.93, 1.05].
-         Asymmetric: -7% downside, +5% upside.
+    Each signal contributes only when its underlying data is present;
+    weights are renormalized over the available signals so a missing
+    metric doesn't silently dilute the score.
 
     Returns (multiplier, label, details_dict).
     """
@@ -208,30 +216,52 @@ def compute_kill_quality_multiplier(
     if not period_kpr or period_kpr <= 0 or not has_r3:
         return 1.0, "➖ Neutral (no Rating 3.0)", {}
 
-    # Signal 1 — Rating 3.0 vs expected from KPR.
-    # Rating 2.1 is officially deprecated by HLTV — Rating 3.0 supersedes it
-    # entirely and incorporates every component 2.1 measured plus newer impact
-    # weighting. We use 3.0 only.
+    # ── Signal A: Rating 3.0 vs expected ──────────────────────────────────
     exp_r3       = 0.42 + 0.94 * period_kpr
     rating_delta = period_rating_3 - exp_r3
+    rating_delta_clamped = max(-0.20, min(0.20, rating_delta))
     used_ratings = [f"R3.0 {period_rating_3:.2f}/{exp_r3:.2f}"]
-    expected_rating = period_kpr  # keep field for back-compat in details
 
-    # Signal 2 — ADR per kill (only if ADR present and KPR > 0)
-    adr_factor = 0.0
+    # ── Signal B: ADR per kill ────────────────────────────────────────────
+    adr_factor = None
     dmg_per_kill = None
     if period_adr and period_adr > 0:
-        # ADR per kill = (ADR × 1 round) / (KPR × 1 round) = ADR / KPR
         dmg_per_kill = period_adr / period_kpr
-        # Center at 110 dmg/kill (typical), 1 unit ≈ 1 dmg/kill above center
-        # Each 10 dmg/kill shift = 0.05 quality score
-        adr_factor = (dmg_per_kill - 110.0) / 200.0   # ±0.10 typical range
+        adr_factor   = max(-0.20, min(0.20, (dmg_per_kill - 110.0) / 200.0))
 
-    # Composite: rating_delta is the dominant signal (0.7 weight)
-    quality_score = 0.7 * rating_delta + 0.3 * adr_factor
+    # ── Signal C: Deaths-per-round ────────────────────────────────────────
+    dpr_factor = None
+    if recent_dpr is not None and 0.20 <= recent_dpr <= 1.10:
+        dpr_factor = max(-0.20, min(0.20, (0.65 - recent_dpr) / 0.5))
+
+    # ── Signal D: Multikill rate ──────────────────────────────────────────
+    mk_factor = None
+    if recent_mk_per_rd is not None and 0.0 <= recent_mk_per_rd <= 1.0:
+        mk_factor = max(-0.20, min(0.20, (recent_mk_per_rd - 0.20) / 0.6))
+
+    # ── Signal E: Round Swing per round ───────────────────────────────────
+    swing_factor = None
+    if recent_swing_per_rd is not None and -3.0 <= recent_swing_per_rd <= 3.0:
+        swing_factor = max(-0.20, min(0.20, (recent_swing_per_rd - 0.30) / 2.5))
+
+    # ── Composite — weighted average over AVAILABLE signals only ──────────
+    base_weights = {
+        "rating": 0.55,
+        "adr":    0.20,
+        "dpr":    0.10,
+        "mk":     0.10,
+        "swing":  0.05,
+    }
+    contributions = [("rating", rating_delta_clamped, base_weights["rating"])]
+    if adr_factor   is not None: contributions.append(("adr",   adr_factor,   base_weights["adr"]))
+    if dpr_factor   is not None: contributions.append(("dpr",   dpr_factor,   base_weights["dpr"]))
+    if mk_factor    is not None: contributions.append(("mk",    mk_factor,    base_weights["mk"]))
+    if swing_factor is not None: contributions.append(("swing", swing_factor, base_weights["swing"]))
+    _w_total = sum(w for _, _, w in contributions)
+    quality_score = sum(f * w for _, f, w in contributions) / _w_total
 
     # Map to multiplier — asymmetric clamp (-7% downside, +5% upside)
-    raw_mult = 1.0 + quality_score * 0.6   # 0.10 score → ~6% shift
+    raw_mult   = 1.0 + quality_score * 0.6
     multiplier = max(0.93, min(1.05, raw_mult))
 
     if multiplier >= 1.025:
@@ -242,13 +272,23 @@ def compute_kill_quality_multiplier(
         label = f"➖ Neutral ({multiplier:.3f}×)"
 
     details = {
-        "rating":          round(period_rating, 3) if period_rating else None,
-        "rating_3":        round(period_rating_3, 3) if period_rating_3 else None,
-        "ratings_used":    used_ratings,            # ["R3.0 1.18/1.10", ...]
-        "rating_delta":    round(rating_delta, 3),
-        "dmg_per_kill":    round(dmg_per_kill, 1) if dmg_per_kill else None,
-        "quality_score":   round(quality_score, 3),
-        "multiplier":      round(multiplier, 3),
+        "rating":            round(period_rating, 3) if period_rating else None,
+        "rating_3":          round(period_rating_3, 3) if period_rating_3 else None,
+        "ratings_used":      used_ratings,
+        "rating_delta":      round(rating_delta, 3),
+        "dmg_per_kill":      round(dmg_per_kill, 1) if dmg_per_kill else None,
+        "recent_dpr":        round(recent_dpr, 3) if recent_dpr is not None else None,
+        "recent_mk_per_rd":  round(recent_mk_per_rd, 3) if recent_mk_per_rd is not None else None,
+        "recent_swing_per_rd": round(recent_swing_per_rd, 3) if recent_swing_per_rd is not None else None,
+        "factors": {
+            "rating": round(rating_delta_clamped, 3),
+            "adr":    round(adr_factor, 3)   if adr_factor   is not None else None,
+            "dpr":    round(dpr_factor, 3)   if dpr_factor   is not None else None,
+            "mk":     round(mk_factor, 3)    if mk_factor    is not None else None,
+            "swing":  round(swing_factor, 3) if swing_factor is not None else None,
+        },
+        "quality_score":     round(quality_score, 3),
+        "multiplier":        round(multiplier, 3),
     }
     return multiplier, label, details
 
@@ -522,11 +562,38 @@ def run_simulation(
     # series_totals (those are facts — what the player actually delivered).
     # The series_totals stay raw so historical hit-rate and IQR remain anchored
     # to reality; only the forward projection is shifted.
+    # ── EWMA aggregation of per-map DPR / MK rate / Round Swing ───────────
+    # Same half-life as KPR (5 maps).  Each metric is computed only when its
+    # source data is present in enough recent maps (≥3 to be meaningful).
+    _lam_q = 0.5 ** (1.0 / 5)
+    def _ewma_per_rd(values: list[tuple[float, float]]) -> float | None:
+        # values: list of (numerator, rounds) newest-first; returns weighted (num/rd).
+        if len(values) < 3:
+            return None
+        ws = [_lam_q ** i for i in range(len(values))]
+        num = sum(w * (n / r) for w, (n, r) in zip(ws, values) if r > 0)
+        den = sum(w for w, (_, r) in zip(ws, values) if r > 0)
+        return num / den if den else None
+
+    _dpr_pairs   = [(m["deaths"],      m["rounds"]) for m in map_stats
+                    if m.get("deaths") is not None and m.get("rounds")]
+    _mk_pairs    = [(m["mks"],         m["rounds"]) for m in map_stats
+                    if m.get("mks")    is not None and m.get("rounds")]
+    _swing_pairs = [(m["round_swing"], m["rounds"]) for m in map_stats
+                    if m.get("round_swing") is not None and m.get("rounds")]
+
+    recent_dpr          = _ewma_per_rd(_dpr_pairs)
+    recent_mk_per_rd    = _ewma_per_rd(_mk_pairs)
+    recent_swing_per_rd = _ewma_per_rd(_swing_pairs)
+
     quality_mult, quality_label, quality_details = compute_kill_quality_multiplier(
         period_kpr=period_kpr,
         period_rating=period_rating,
         period_rating_3=period_rating_3,
         period_adr=period_adr,
+        recent_dpr=recent_dpr,
+        recent_mk_per_rd=recent_mk_per_rd,
+        recent_swing_per_rd=recent_swing_per_rd,
     )
     if quality_mult != 1.0 and stat_type == "Kills":
         _pre_quality = expected_total

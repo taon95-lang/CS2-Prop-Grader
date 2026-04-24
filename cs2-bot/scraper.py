@@ -869,6 +869,83 @@ def _parse_map_stats_hs(
     return None, None
 
 
+def _parse_map_stats_mks(
+    html: str,
+    player_slug: str,
+    series_num: int = 0,
+    map_num: int = 0,
+) -> int | None:
+    """
+    Extract the multikill count (MKs) for a player from a per-map
+    /stats/matches/mapstatsid/ page.
+
+    HLTV's per-player row on this page has columns roughly:
+        Player | Op K-D | MKs | KAST | 1vsX | K (hs) | A (f) | D (t) | ADR | Swing | Rating
+    The MKs cell can be:
+        • A single integer count of multi-kill rounds in the map (e.g. "5")
+        • A breakdown string like "3/2/1/0" (2K/3K/4K/5K) — we sum it
+        • Empty / "-" for players with no multikills
+
+    Returns total multikill count (int) or None if not parsable.
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    slug_norm = re.sub(r'[^a-z0-9]', '', player_slug.lower())
+    ctx = f"Series {series_num} Map {map_num}"
+
+    stats_tables = (
+        soup.find_all(class_='stats-table') or
+        soup.find_all('table', class_=re.compile(r'stats', re.I)) or
+        soup.find_all('table')
+    )
+
+    for tbl in stats_tables:
+        rows = tbl.find_all('tr')
+        if len(rows) < 5:
+            continue
+        headers = rows[0].find_all(['th', 'td'])
+
+        # Locate MKs column by header.  Match "MKs", "MK", "Multi-kills".
+        mk_col = None
+        for ci, hdr in enumerate(headers):
+            ht = hdr.get_text(strip=True).lower().replace(' ', '')
+            if ht in ('mks', 'mk', 'multikills', 'multi-kills'):
+                mk_col = ci
+                break
+        if mk_col is None:
+            continue
+
+        # Find the player row and extract.
+        for tr in rows[1:]:
+            row_norm = re.sub(r'[^a-z0-9]', '', tr.get_text().lower())
+            if slug_norm not in row_norm:
+                continue
+            cells = tr.find_all('td')
+            if mk_col >= len(cells):
+                continue
+            raw = cells[mk_col].get_text(strip=True)
+            if not raw or raw in ('-', '–', '0'):
+                logger.debug(f"[MK][{ctx}] {player_slug!r}: cell={raw!r} → 0")
+                return 0
+            # Slash-separated breakdown (2K/3K/4K/5K)
+            if '/' in raw:
+                try:
+                    parts = [int(p.strip()) for p in raw.split('/') if p.strip().isdigit()]
+                    total = sum(parts)
+                    logger.debug(f"[MK][{ctx}] {player_slug!r}: cell={raw!r} → sum={total}")
+                    return total
+                except ValueError:
+                    pass
+            # Single integer
+            m = re.match(r'^(\d{1,2})$', raw)
+            if m:
+                val = int(m.group(1))
+                if 0 <= val <= 30:        # sanity bound — never more than ~30 multi-kill rounds in a map
+                    logger.debug(f"[MK][{ctx}] {player_slug!r}: cell={raw!r} → {val}")
+                    return val
+    logger.debug(f"[MK][{ctx}] no MKs column found for {player_slug!r}")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Step 1 — Player search
 # ---------------------------------------------------------------------------
@@ -1594,6 +1671,8 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
         deaths     = None
         player_row = None
 
+        mks = None    # NEW — per-map multikill count, populated by Strategy 0
+
         # ─ Strategy 0: Fetch per-map stats page and parse K(hs) column ─────────
         # Maps are zero-indexed here: map_num 1 → index 0, map_num 2 → index 1
         _stats_url = _mapstat_urls[map_num - 1] if map_num - 1 < len(_mapstat_urls) else None
@@ -1611,6 +1690,13 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
                         f"[parse_row] Strategy0 K(hs) map{map_num}: "
                         f"{kills}K {headshots}HS (from stats page)"
                     )
+                # NEW — pull MKs from the same already-fetched stats page (free)
+                mks = _parse_map_stats_mks(
+                    _stats_html, player_slug,
+                    series_num=series_num, map_num=map_num,
+                )
+                if mks is not None:
+                    logger.info(f"[parse_row] Strategy0 MKs map{map_num}: {mks}")
 
         # ─ Strategy A: Detailed-stats table (K (hs) header in match page HTML) ─
         if kills is None:
@@ -1822,6 +1908,7 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
         # The "16-7" in the eK-eD cell gives entry kills (16) and entry deaths (7).
         fk = None
         fd = None
+        round_swing = None     # NEW — HLTV's Swing column (impact-weighted round swing)
         if player_row is not None:
             _row_cells = player_row.find_all('td')
             # Find the data columns: skip the player name cell (which usually has no K-D pattern)
@@ -1833,6 +1920,35 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
                 if _ekd_m:
                     fk = int(_ekd_m.group(1))
                     fd = int(_ekd_m.group(2))
+
+            # ── NEW: Round Swing extraction ──────────────────────────────────
+            # The Swing cell follows eK-eD in HLTV's totalstats row.
+            # Format: signed float like "+5.2", "-3.1", "0.0".
+            # Locate by walking the row's cells AFTER the eK-eD cell.
+            try:
+                _ekd_idx = None
+                for _i, _c in enumerate(_row_cells):
+                    if re.match(r'^\d+[-–]\d+$', _c.get_text(strip=True)):
+                        if _ekd_idx is None:
+                            _ekd_idx = _i      # first match = K-D; we want the next K-D-like
+                            continue
+                        _ekd_idx = _i          # second match = eK-eD; Swing is the next cell
+                        break
+                if _ekd_idx is not None and _ekd_idx + 1 < len(_row_cells):
+                    _sw_txt = _row_cells[_ekd_idx + 1].get_text(strip=True)
+                    _sw_m = re.match(r'^([+-]?\d{1,3}\.?\d*)$', _sw_txt)
+                    if _sw_m:
+                        _sw_val = float(_sw_m.group(1))
+                        # Sanity bounds: Swing is per-map, realistically [-30, +30]
+                        if -30.0 <= _sw_val <= 30.0:
+                            round_swing = _sw_val
+            except Exception:
+                round_swing = None
+
+        # ── NEW: Deaths-per-round (DPR) — derived, no extra scraping ─────────
+        dpr = None
+        if deaths is not None and rounds_on_map > 0:
+            dpr = round(deaths / rounds_on_map, 4)
 
         maps_result.append({
             'map_name':      map_name,
@@ -1846,6 +1962,9 @@ def _parse_match_kills(html: str, player_slug: str, match_url: str = "", series_
             'survival_rate': survival_rate,
             'fk':            fk,
             'fd':            fd,
+            'dpr':           dpr,           # deaths / rounds (NEW)
+            'mks':           mks,           # multikills count from mapstats page (NEW)
+            'round_swing':   round_swing,   # HLTV Swing column value (NEW)
             'map_number':    map_num,
         })
         _hs_str = f" HS={headshots}" if headshots is not None else ""

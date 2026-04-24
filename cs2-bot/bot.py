@@ -1990,17 +1990,34 @@ def build_result_embed(
             _r_delta   = _q_det.get("rating_delta")
             _dpk       = _q_det.get("dmg_per_kill")
             _r_used    = _q_det.get("ratings_used") or []
-            _q_extra = []
+            _r_dpr     = _q_det.get("recent_dpr")
+            _r_mk      = _q_det.get("recent_mk_per_rd")
+            _r_swing   = _q_det.get("recent_swing_per_rd")
+            _factors   = _q_det.get("factors") or {}
+
+            # Top line — Rating 3.0 + dmg/kill (always shown when present)
+            _q_top = []
             if _r_used:
-                # e.g. "R3.0 1.18/1.10 · R2.1 1.12/1.06"  (actual / expected)
-                _q_extra.append(" + ".join(_r_used))
+                _q_top.append(" + ".join(_r_used))
             if _r_delta is not None:
-                _q_extra.append(f"avgΔ `{_r_delta:+.3f}`")
+                _q_top.append(f"Δ `{_r_delta:+.3f}`")
             if _dpk is not None:
-                _q_extra.append(f"dmg/kill `{_dpk:.0f}`")
-            _q_line = f"\n• **Quality of Kill:** {_q_label}" + (
-                f"\n   ↳ " + " · ".join(_q_extra) if _q_extra else ""
-            )
+                _q_top.append(f"dmg/kill `{_dpk:.0f}`")
+
+            # Bottom line — DPR / MK / Swing (only when each fired)
+            _q_bot = []
+            if _r_dpr is not None:
+                _q_bot.append(f"DPR `{_r_dpr:.2f}` (f `{_factors.get('dpr', 0):+.2f}`)")
+            if _r_mk is not None:
+                _q_bot.append(f"MK/rd `{_r_mk:.2f}` (f `{_factors.get('mk', 0):+.2f}`)")
+            if _r_swing is not None:
+                _q_bot.append(f"Swing/rd `{_r_swing:+.2f}` (f `{_factors.get('swing', 0):+.2f}`)")
+
+            _q_line = f"\n• **Quality of Kill:** {_q_label}"
+            if _q_top:
+                _q_line += f"\n   ↳ " + " · ".join(_q_top)
+            if _q_bot:
+                _q_line += f"\n   ↳ " + " · ".join(_q_bot)
         robust_val = (
             f"• **Trimmed Avg:** `{_trim_avg:.1f}`  ·  **MAD-σ:** `{_sig_mad:.1f}`  ·  **IQR:** {_iqr_str}\n"
             f"• **Sample-shrink:** {_shrink_note}\n"
