@@ -3340,6 +3340,48 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "05a36ac1-e7b4-4691-80da-53b6a05ec0d8",
+      "ts": 1777002036.82331,
+      "date": "2026-04-24",
+      "player": "faven",
+      "display": "Faven",
+      "line": 28.5,
+      "stat": "Kills",
+      "opponent": "acend",
+      "over_pct": 52.0,
+      "under_pct": 48.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 26.66,
+      "hist_median": 27.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "6d0c1bcc-d1a6-42a6-9f28-bf4e65d95dbb",
+      "ts": 1777002492.413794,
+      "date": "2026-04-24",
+      "player": "gr1ks",
+      "display": "Gr1ks",
+      "line": 31.0,
+      "stat": "Kills",
+      "opponent": "acend",
+      "over_pct": 62.5,
+      "under_pct": 37.5,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 31.78,
+      "hist_median": 32.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
