@@ -204,26 +204,17 @@ def compute_kill_quality_multiplier(
 
     Returns (multiplier, label, details_dict).
     """
-    has_r3  = period_rating_3 and period_rating_3 > 0
-    has_r21 = period_rating   and period_rating   > 0
-    if not period_kpr or period_kpr <= 0 or not (has_r3 or has_r21):
-        return 1.0, "➖ Neutral (insufficient data)", {}
+    has_r3 = period_rating_3 and period_rating_3 > 0
+    if not period_kpr or period_kpr <= 0 or not has_r3:
+        return 1.0, "➖ Neutral (no Rating 3.0)", {}
 
-    # Signal 1 — Rating vs expected from KPR.
-    # Rating 3.0 is the canonical successor and includes every component 2.1
-    # measured (KPR, survival, multikills, opening duels) plus newer impact
-    # weighting. When 3.0 is present, use it ALONE — averaging with the older
-    # 2.1 would just dilute the better signal. 2.1 is only a fallback for
-    # players whose HLTV page hasn't been updated to expose 3.0 yet.
-    used_ratings = []
-    if has_r3:
-        exp_r3       = 0.42 + 0.94 * period_kpr
-        rating_delta = period_rating_3 - exp_r3
-        used_ratings.append(f"R3.0 {period_rating_3:.2f}/{exp_r3:.2f}")
-    else:
-        exp_r21      = 0.44 + 0.86 * period_kpr
-        rating_delta = period_rating - exp_r21
-        used_ratings.append(f"R2.1 {period_rating:.2f}/{exp_r21:.2f} (fallback)")
+    # Signal 1 — Rating 3.0 vs expected from KPR.
+    # Rating 2.1 is officially deprecated by HLTV — Rating 3.0 supersedes it
+    # entirely and incorporates every component 2.1 measured plus newer impact
+    # weighting. We use 3.0 only.
+    exp_r3       = 0.42 + 0.94 * period_kpr
+    rating_delta = period_rating_3 - exp_r3
+    used_ratings = [f"R3.0 {period_rating_3:.2f}/{exp_r3:.2f}"]
     expected_rating = period_kpr  # keep field for back-compat in details
 
     # Signal 2 — ADR per kill (only if ADR present and KPR > 0)
