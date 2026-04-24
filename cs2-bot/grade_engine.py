@@ -1961,3 +1961,123 @@ def evaluate_potd(play: dict) -> dict:
 
     # STEP 5: FAILSAFE
     return {"potd": False, "tier": None, "units": 0, "reason": "Does not meet POTD criteria"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Slip / Parlay builder (cross-team, uncorrelated)
+# ─────────────────────────────────────────────────────────────────────────────
+import itertools as _itertools
+
+def build_slips(plays: list[dict], max_legs: int = 4) -> dict:
+    """
+    Build the best 2-, 3-, and 4-leg slips from a pool of graded plays.
+
+    plays = list of dicts with:
+      - player, team, match_id
+      - decision ("OVER"/"UNDER"/"NO BET")
+      - grade (int 1..10)
+      - edge_percent (float, in %)
+      - probability (float, 0..1)
+
+    Filters: decision != "NO BET", grade ≥ 7, edge ≥ 5%.
+    Correlation guard: at most one leg per team and per match.
+    Diversity bonus: 1.05× combined prob if mixed OVER + UNDER.
+    Score = combined_prob + (total_edge / 100). Picks highest score per leg size.
+
+    Returns dict: {"2_leg": {...}, "3_leg": {...}, "4_leg": {...}}
+                  (or {"slips": None, "reason": "..."} if not enough plays)
+    """
+    valid = [
+        p for p in plays
+        if p.get("decision") not in (None, "NO BET")
+           and (p.get("grade") or 0) >= 7
+           and (p.get("edge_percent") or 0) >= 5
+    ]
+    valid.sort(key=lambda x: x.get("edge_percent", 0), reverse=True)
+
+    # Performance guard: cap to top-25 by edge before exploding combinations.
+    # C(25, 4) = 12,650 — fast even on a Repl. C(60, 4) ≈ 488k would block the
+    # event loop for several seconds. Top-edge plays dominate scoring anyway.
+    if len(valid) > 25:
+        valid = valid[:25]
+
+    if len(valid) < 2:
+        return {"slips": None, "reason": "Not enough valid plays"}
+
+    results: dict = {}
+
+    for leg_size in range(2, max_legs + 1):
+        best_score = 0.0
+        best_combo = None
+
+        for combo in _itertools.combinations(valid, leg_size):
+            # Correlation filter — one per team, one per match
+            teams: set = set()
+            matches: set = set()
+            ok = True
+            for p in combo:
+                if p["team"] in teams or p["match_id"] in matches:
+                    ok = False
+                    break
+                teams.add(p["team"])
+                matches.add(p["match_id"])
+            if not ok:
+                continue
+
+            # Combined probability + diversity bonus
+            combined_prob = 1.0
+            total_edge = 0.0
+            decisions = []
+            for p in combo:
+                combined_prob *= p["probability"]
+                total_edge += p["edge_percent"]
+                decisions.append(p["decision"])
+            if len(set(decisions)) > 1:
+                combined_prob *= 1.05
+
+            score = combined_prob + (total_edge / 100.0)
+            if score > best_score:
+                best_score = score
+                best_combo = combo
+
+        if best_combo:
+            combined_prob = 1.0
+            total_edge = 0.0
+            decisions = []
+            for p in best_combo:
+                combined_prob *= p["probability"]
+                total_edge += p["edge_percent"]
+                decisions.append(p["decision"])
+            if len(set(decisions)) > 1:
+                combined_prob *= 1.05
+
+            if   leg_size == 2: units = 0.75
+            elif leg_size == 3: units = 0.5
+            else:               units = 0.25
+
+            if   combined_prob >= 0.38: confidence = "High"
+            elif combined_prob >= 0.28: confidence = "Medium"
+            else:                       confidence = "Low"
+
+            results[f"{leg_size}_leg"] = {
+                "legs": [
+                    {
+                        "player":   p["player"],
+                        "team":     p.get("team", "?"),
+                        "decision": p["decision"],
+                        "line":     p.get("line"),
+                        "stat":     p.get("stat"),
+                        "edge":     round(p["edge_percent"], 1),
+                        "grade":    p.get("grade"),
+                    }
+                    for p in best_combo
+                ],
+                "combined_probability": round(combined_prob, 3),
+                "total_edge":           round(total_edge, 1),
+                "recommended_units":    units,
+                "confidence":           confidence,
+            }
+        else:
+            results[f"{leg_size}_leg"] = {"legs": None, "reason": "No valid combo"}
+
+    return results

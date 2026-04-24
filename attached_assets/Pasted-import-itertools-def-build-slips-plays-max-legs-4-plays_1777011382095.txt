@@ -1,0 +1,139 @@
+import itertools
+
+def build_slips(plays, max_legs=4):
+    """
+    plays = list of dicts with:
+    - player
+    - team
+    - match_id
+    - decision ("OVER"/"UNDER")
+    - grade (int)
+    - edge_percent (float)
+    - probability (float)
+    """
+
+    # -----------------------------
+    # STEP 1: FILTER VALID PLAYS
+    # -----------------------------
+    valid = []
+    for p in plays:
+        if (
+            p["decision"] != "NO BET" and
+            p["grade"] >= 7 and
+            p["edge_percent"] >= 5
+        ):
+            valid.append(p)
+
+    # sort best plays first
+    valid.sort(key=lambda x: x["edge_percent"], reverse=True)
+
+    if len(valid) < 2:
+        return {"slips": None, "reason": "Not enough valid plays"}
+
+    results = {}
+
+    # -----------------------------
+    # STEP 2: LOOP LEG SIZES
+    # -----------------------------
+    for leg_size in range(2, max_legs + 1):
+
+        best_score = 0
+        best_combo = None
+
+        combos = itertools.combinations(valid, leg_size)
+
+        for combo in combos:
+
+            # -----------------------------
+            # STEP 3: CORRELATION FILTER
+            # -----------------------------
+            teams = set()
+            matches = set()
+            valid_combo = True
+
+            for p in combo:
+                if p["team"] in teams:
+                    valid_combo = False
+                if p["match_id"] in matches:
+                    valid_combo = False
+
+                teams.add(p["team"])
+                matches.add(p["match_id"])
+
+            if not valid_combo:
+                continue
+
+            # -----------------------------
+            # STEP 4: CALCULATE PROBABILITY
+            # -----------------------------
+            combined_prob = 1
+            total_edge = 0
+            decisions = []
+
+            for p in combo:
+                combined_prob *= p["probability"]
+                total_edge += p["edge_percent"]
+                decisions.append(p["decision"])
+
+            # diversity bonus (mix OVER + UNDER)
+            if len(set(decisions)) > 1:
+                combined_prob *= 1.05
+
+            # -----------------------------
+            # STEP 5: SCORE COMBO
+            # -----------------------------
+            score = combined_prob + (total_edge / 100)
+
+            if score > best_score:
+                best_score = score
+                best_combo = combo
+
+        # -----------------------------
+        # STEP 6: OUTPUT FORMAT
+        # -----------------------------
+        if best_combo:
+
+            combined_prob = 1
+            total_edge = 0
+
+            for p in best_combo:
+                combined_prob *= p["probability"]
+                total_edge += p["edge_percent"]
+
+            # unit sizing
+            if leg_size == 2:
+                units = 0.75
+            elif leg_size == 3:
+                units = 0.5
+            else:
+                units = 0.25
+
+            # confidence
+            if combined_prob >= 0.38:
+                confidence = "High"
+            elif combined_prob >= 0.28:
+                confidence = "Medium"
+            else:
+                confidence = "Low"
+
+            results[f"{leg_size}_leg"] = {
+                "legs": [
+                    {
+                        "player": p["player"],
+                        "decision": p["decision"],
+                        "edge": round(p["edge_percent"], 1)
+                    } for p in best_combo
+                ],
+                "combined_probability": round(combined_prob, 3),
+                "total_edge": round(total_edge, 1),
+                "recommended_units": units,
+                "confidence": confidence
+            }
+
+        else:
+            results[f"{leg_size}_leg"] = {
+                "legs": None,
+                "reason": "No valid combo"
+            }
+
+    return results

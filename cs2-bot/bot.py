@@ -29,6 +29,7 @@ from grade_engine import (
     determine_role,
     detect_dog_line,
     score_correlated_parlay,
+    build_slips,
 )
 from scraper import check_standin, get_recent_team_roster, search_team
 
@@ -136,6 +137,80 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
+
+
+# ─── Slip builder cache ────────────────────────────────────────────────────
+# In-memory ring buffer of recently-graded plays from the current session.
+# Populated by `_cache_play_for_slip()` after every successful !grade, !pp,
+# !parlay, !teamscan, etc. Consumed by the !slip command.
+import collections as _collections
+import time as _time
+SLIP_CACHE: "_collections.deque[dict]" = _collections.deque(maxlen=300)
+
+
+def _cache_play_for_slip(
+    player: str,
+    team: str | None,
+    opponent: str | None,
+    line: float,
+    stat: str,
+    sim_result: dict,
+) -> None:
+    """Push a normalized play dict into SLIP_CACHE for the slip builder."""
+    try:
+        rec = str(sim_result.get("recommendation", "") or "").upper()
+        decision = sim_result.get("decision") or "NO BET"
+        if "NO BET" in rec or "NO_BET" in rec:
+            decision = "NO BET"
+
+        # Parse grade int from "8/10 (label)"
+        grade_str = sim_result.get("grade") or ""
+        grade_int = 0
+        try:
+            if isinstance(grade_str, str) and "/" in grade_str:
+                grade_int = int(grade_str.split("/")[0].strip())
+        except Exception:
+            grade_int = 0
+
+        edge_val = sim_result.get("edge")
+        edge_pct = abs(float(edge_val)) if isinstance(edge_val, (int, float)) else 0.0
+
+        op = sim_result.get("over_prob")
+        up = sim_result.get("under_prob")
+        if decision == "OVER":
+            prob = (op / 100.0) if isinstance(op, (int, float)) else 0.5
+        elif decision == "UNDER":
+            prob = (up / 100.0) if isinstance(up, (int, float)) else 0.5
+        else:
+            prob = 0.5
+
+        team_norm = (team or "").strip().lower().replace(" ", "")
+        opp_norm  = (opponent or "").strip().lower().replace(" ", "")
+        # If either side is unknown, fall back to a unique match_id keyed on the
+        # player so unrelated "?vs?" plays don't collide and block each other in
+        # the slip's same-match correlation guard.
+        if team_norm and opp_norm:
+            match_id = "vs".join(sorted([team_norm, opp_norm]))
+        else:
+            match_id = f"unknown_{(player or '').lower().strip()}_{int(_time.time()*1000) % 1_000_000}"
+        # Cache-side team key: never let an empty team collapse into one bucket
+        team_for_cache = (team or "").strip() or f"?{(player or '').lower()}"
+
+        SLIP_CACHE.append({
+            "ts":           _time.time(),
+            "player":       player,
+            "team":         team_for_cache,
+            "opponent":     (opponent or "?").strip(),
+            "match_id":     match_id,
+            "line":         float(line),
+            "stat":         stat,
+            "decision":     decision,
+            "grade":        grade_int,
+            "edge_percent": edge_pct,
+            "probability":  prob,
+        })
+    except Exception as _e:
+        logger.warning(f"[slip_cache] skip — {_e}")
 
 
 @bot.event
@@ -432,6 +507,8 @@ async def grade_prop(ctx, player_name: str = None, line: str = None, *args):
                        baseline_match_id=_baseline_mid)
         except Exception as _ge:
             logger.warning(f"[grade] grades_db save failed: {_ge}")
+        # Cache for slip builder (best-effort)
+        _cache_play_for_slip(player_name, team_hint, opponent, line_val, stat_type, result)
     except Exception as e:
         logger.error(f"[grade] Embed failed ({type(e).__name__}): {e}", exc_info=True)
         await ctx.send(
@@ -3402,6 +3479,9 @@ async def cmd_pp(ctx, *, player_arg: str = ""):
                     save_grade(job["player"], job["line"], job["stat"], res, opponent=job.get("opponent"))
                 except Exception as _ge:
                     logger.warning(f"[pp] grades_db save failed for {job['player']}: {_ge}")
+                _team_for_cache = (job.get("item") or {}).get("player_team") or job.get("team")
+                _cache_play_for_slip(job["player"], _team_for_cache, job.get("opponent"),
+                                     job["line"], job["stat"], res)
             except Exception as _e:
                 logger.warning(f"[pp] Failed to send detail embed for {job['player']}: {_e}")
 
@@ -3982,6 +4062,9 @@ async def cmd_parlay(ctx, team_name: str = "", *, extra: str = ""):
                     save_grade(job["player"], job["line"], job["stat"], res, opponent=job.get("opponent"))
                 except Exception:
                     pass
+                _team_for_cache = (job.get("item") or {}).get("player_team") or team_name
+                _cache_play_for_slip(job["player"], _team_for_cache, job.get("opponent"),
+                                     job["line"], job["stat"], res)
         except Exception as exc:
             logger.warning(f"[parlay] Grade failed for {job['player']}: {exc}")
 
@@ -4042,6 +4125,159 @@ async def cmd_parlay(ctx, team_name: str = "", *, extra: str = ""):
         color=0x7289DA,
     )
     embed.set_footer(text="Correlated Parlay  ·  Esports Betting Guru  ·  EV+ Focus · Data-Driven  ·  Not financial advice")
+    await ctx.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# !slip — Cross-team slip builder (uncorrelated 2/3/4-leg combos)
+# ---------------------------------------------------------------------------
+
+@bot.command(name="slip", aliases=["slips", "buildslip"])
+async def cmd_slip(ctx, *args):
+    """
+    !slip [hours] [max_legs]    or    !slip clear
+
+    Build the best 2-, 3-, and 4-leg slips from your recently-graded plays
+    in this session. Filters out:
+      • NO BET / PASS plays
+      • Grade < 7
+      • Edge < 5%
+      • Multiple legs from the same team or same match
+
+    Defaults: window = 12 hours, max_legs = 4.
+
+    Examples:
+      !slip              ← last 12h of grades, up to 4-leg
+      !slip 6            ← last 6h
+      !slip 24 3         ← last 24h, max 3-leg
+      !slip clear        ← wipe the cache
+    """
+    # Handle "clear" subcommand
+    if args and args[0].lower() in ("clear", "reset", "wipe"):
+        n = len(SLIP_CACHE)
+        SLIP_CACHE.clear()
+        await ctx.send(embed=discord.Embed(
+            title="🧹 Slip cache cleared",
+            description=f"Removed {n} cached play(s).",
+            color=0x95A5A6,
+        ))
+        return
+
+    # Parse args
+    hours = 12.0
+    max_legs = 4
+    try:
+        if len(args) >= 1: hours    = max(0.5, float(args[0]))
+        if len(args) >= 2: max_legs = max(2, min(4, int(args[1])))
+    except ValueError:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Bad arguments",
+            description="Usage: `!slip [hours] [max_legs]`  e.g. `!slip 6 3`",
+            color=0xFF4136,
+        ))
+        return
+
+    # Filter cache by time window
+    cutoff = _time.time() - (hours * 3600)
+    pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+
+    if len(pool) < 2:
+        await ctx.send(embed=discord.Embed(
+            title="📭 Not enough plays cached",
+            description=(
+                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h**.\n"
+                f"Run `!grade`, `!pp`, `!parlay`, or `!teamscan` first to populate the cache, "
+                f"then come back to `!slip`."
+            ),
+            color=0xFFDC00,
+        ))
+        return
+
+    # Build slips
+    try:
+        slips = build_slips(pool, max_legs=max_legs)
+    except Exception as exc:
+        logger.error(f"[slip] build_slips failed: {exc}", exc_info=True)
+        await ctx.send(embed=discord.Embed(
+            title="❌ Slip build failed", description=str(exc)[:200], color=0xFF4136,
+        ))
+        return
+
+    # Handle "Not enough valid plays" sentinel
+    if isinstance(slips, dict) and slips.get("slips") is None and "reason" in slips:
+        # Show diagnostic — how many were filtered out and why
+        n_no_bet = sum(1 for p in pool if p.get("decision") == "NO BET")
+        n_low_g  = sum(1 for p in pool if (p.get("grade") or 0) < 7 and p.get("decision") != "NO BET")
+        n_low_e  = sum(1 for p in pool
+                       if (p.get("edge_percent") or 0) < 5
+                       and (p.get("grade") or 0) >= 7
+                       and p.get("decision") != "NO BET")
+        await ctx.send(embed=discord.Embed(
+            title="📭 Slip Builder — Not enough valid plays",
+            description=(
+                f"Pool size: **{len(pool)}** in last **{hours:.0f}h**\n"
+                f"  • NO BET filtered: `{n_no_bet}`\n"
+                f"  • Grade < 7 filtered: `{n_low_g}`\n"
+                f"  • Edge < 5% filtered: `{n_low_e}`\n\n"
+                f"_Need ≥2 graded plays meeting all 3 gates to build a slip._"
+            ),
+            color=0xFFDC00,
+        ))
+        return
+
+    # Build the embed — one section per leg size
+    desc_parts: list[str] = [
+        f"Pool: **{len(pool)}** play(s) from last **{hours:.0f}h** · "
+        f"Filters: grade ≥ 7, edge ≥ 5%, no NO BET, one leg per team/match\n"
+    ]
+
+    leg_emoji = {2: "🥈", 3: "🥇", 4: "🏆"}
+    for size in range(2, max_legs + 1):
+        slot = slips.get(f"{size}_leg") or {}
+        emoji = leg_emoji.get(size, "🎯")
+
+        if not slot.get("legs"):
+            desc_parts.append(
+                f"\n{emoji} **{size}-Leg Slip** — _{slot.get('reason', 'no valid combo')}_"
+            )
+            continue
+
+        cp    = slot["combined_probability"]
+        te    = slot["total_edge"]
+        units = slot["recommended_units"]
+        conf  = slot["confidence"]
+        conf_emoji = "🟢" if conf == "High" else ("🟡" if conf == "Medium" else "🔴")
+
+        leg_lines = []
+        for leg in slot["legs"]:
+            sign = "✅" if leg["decision"] == "OVER" else "❌"
+            ln   = leg.get("line")
+            st   = leg.get("stat") or "Kills"
+            tm   = leg.get("team") or "?"
+            line_str = f"`{ln} {st}`" if ln is not None else f"`{st}`"
+            leg_lines.append(
+                f"  {sign} **{leg['player']}** ({tm}) {line_str} — "
+                f"G{leg.get('grade','?')} · edge `{leg['edge']}%`"
+            )
+
+        desc_parts.append(
+            f"\n{emoji} **{size}-Leg Slip** — {conf_emoji} {conf} confidence · "
+            f"`{units}u`\n"
+            f"Combined prob: `{cp*100:.1f}%`  ·  Total edge: `+{te}%`\n"
+            + "\n".join(leg_lines)
+        )
+
+    embed = discord.Embed(
+        title="🎰 Slip Builder — Best Cross-Match Combos",
+        description="\n".join(desc_parts),
+        color=0x9B59B6,
+    )
+    embed.set_footer(
+        text=(
+            "Slip Builder · Diversity bonus 1.05× for OVER+UNDER mix · "
+            "Score = combined_prob + total_edge/100 · Not financial advice"
+        )
+    )
     await ctx.send(embed=embed)
 
 
