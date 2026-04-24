@@ -64,18 +64,9 @@ def save_grade(
 
     now = datetime.now(timezone.utc)
 
-    # AUTO NO BET detection — score<50 cap or grade≤3 from post-sim caps
+    # AUTO NO BET detection — only fires when post-sim caps explicitly NO-BET'd
     _vt_caps = ((sim_result.get("vote_tally") or {}).get("caps_applied") or [])
-    _grade_str_for_check = str(sim_result.get("grade", ""))
-    _grade_num_match = 0
-    try:
-        _grade_num_match = int(_grade_str_for_check.split("/")[0].strip())
-    except Exception:
-        pass
-    _auto_no_bet = (
-        any("AUTO NO BET" in c for c in _vt_caps)
-        or (_grade_num_match and _grade_num_match <= 3)
-    )
+    _auto_no_bet = any("AUTO NO BET" in c for c in _vt_caps)
     if _auto_no_bet:
         _saved_rec = "NO_BET"
     else:

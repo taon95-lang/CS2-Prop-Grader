@@ -1576,6 +1576,11 @@ def _analyze_player(
         if _m and _line is not None:
             _gnum_old = int(_m.group(1))
             _glabel   = _m.group(2)
+            # hit_rate stored as percentage in sim_result; post-caps wants 0..1
+            _hr_pct  = sim_result.get("hit_rate")
+            _hr_unit = (_hr_pct / 100.0) if isinstance(_hr_pct, (int, float)) else None
+            _s_std   = sim_result.get("stability_std")
+
             _gnum_new, _new_caps = _post_caps(
                 grade_num=_gnum_old,
                 decision=_decision,
@@ -1587,23 +1592,44 @@ def _analyze_player(
                 stat_type=_stat_type,
                 weighted_score_total=_ws.get("total"),
                 weighted_ceiling_pct=_ws.get("ceiling_pct"),
+                hit_rate=_hr_unit,
+                stability_std=_s_std if isinstance(_s_std, (int, float)) else None,
             )
-            if _new_caps and _gnum_new < _gnum_old:
-                if "(capped)" not in _glabel:
-                    _glabel = f"{_glabel} (capped)"
-                _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
-                # Auto NO BET override when score < 50 forced grade to ≤3
-                _is_no_bet = any("AUTO NO BET" in c for c in _new_caps) or _gnum_new <= 3
+            # Distinguish NO BET (score-gated, drops to ≤3) from FORCE UNDER (raises to ≥7)
+            _is_no_bet  = any("AUTO NO BET" in c for c in _new_caps) and _gnum_new <= 3
+            _is_forced  = any(c.startswith("FORCE UNDER") for c in _new_caps)
+            _grade_changed = _gnum_new != _gnum_old
+
+            if _new_caps and _grade_changed:
                 if _is_no_bet:
+                    if "(capped)" not in _glabel:
+                        _glabel = f"{_glabel} (capped)"
+                    _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
                     sim_result["grade"] = _new_grade_str
                     sim_result["recommendation"] = (
                         f"🚫 NO BET — {_new_grade_str} "
                         f"(was {_decision} {_gnum_old}/10)"
                     )
-                else:
+                elif _is_forced and _gnum_new > _gnum_old:
+                    # FORCE UNDER bumped grade up — relabel as Strong/Forced
+                    _glabel = "Forced UNDER (3 triggers)"
+                    _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
+                    sim_result["grade"] = _new_grade_str
+                    sim_result["recommendation"] = f"❌ UNDER — {_new_grade_str} 🔻"
+                elif _gnum_new < _gnum_old:
+                    if "(capped)" not in _glabel:
+                        _glabel = f"{_glabel} (capped)"
+                    _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
                     _sign = "✅" if _decision == "OVER" else "❌"
                     sim_result["grade"] = _new_grade_str
                     sim_result["recommendation"] = f"{_sign} {_decision} — {_new_grade_str}"
+                _vt = sim_result.get("vote_tally") or {}
+                _existing = list(_vt.get("caps_applied") or [])
+                _existing.extend(_new_caps)
+                _vt["caps_applied"] = _existing
+                sim_result["vote_tally"] = _vt
+            elif _new_caps:
+                # Caps appended without grade change (e.g. FORCE fired but g already ≥7)
                 _vt = sim_result.get("vote_tally") or {}
                 _existing = list(_vt.get("caps_applied") or [])
                 _existing.extend(_new_caps)
@@ -1704,18 +1730,10 @@ def build_result_embed(
     used_fb   = result.get("used_fallback", False)
     is_lock   = result.get("is_lock", False)
 
-    # AUTO NO BET detection — score<50 cap or grade≤3 from post-sim caps
+    # AUTO NO BET detection — only fires when post-sim caps explicitly NO-BET'd
+    # (asymmetric score gates: OVER<65 or UNDER<55 or UNDER<65 without confirmations)
     _vt_caps = ((result.get("vote_tally") or {}).get("caps_applied") or [])
-    _grade_str_for_check = str(result.get("grade", ""))
-    _grade_num_match = 0
-    try:
-        _grade_num_match = int(_grade_str_for_check.split("/")[0].strip())
-    except Exception:
-        pass
-    auto_no_bet = (
-        any("AUTO NO BET" in c for c in _vt_caps)
-        or (_grade_num_match and _grade_num_match <= 3)
-    )
+    auto_no_bet = any("AUTO NO BET" in c for c in _vt_caps)
     if auto_no_bet:
         color = 0x808080  # gray for NO BET
 
@@ -4196,6 +4214,20 @@ async def cmd_kelly(ctx, prob: str = None, payout: str = None):
 # !result  — log an actual stat total against a graded prop
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Recommendation classification helpers (NO_BET / PASS are non-directional)
+# ---------------------------------------------------------------------------
+def _is_skip_rec(rec: str) -> bool:
+    """Recommendations that should NOT count as wins/losses (no bet placed)."""
+    r = (rec or "").upper().strip()
+    return r in ("NO_BET", "NOBET", "PASS", "—", "?", "")
+
+def _is_directional_rec(rec: str) -> bool:
+    """True only for OVER / UNDER recommendations."""
+    r = (rec or "").upper().strip()
+    return r in ("OVER", "UNDER")
+
+
 @bot.command(name="result")
 async def cmd_result(ctx, player: str = None, actual: str = None):
     """
@@ -4246,10 +4278,20 @@ async def cmd_result(ctx, player: str = None, actual: str = None):
     outcome_label = outcome.upper() if outcome else "?"
 
     # Did the bot's recommendation match the outcome?
+    is_skip = _is_skip_rec(rec)
     bot_correct = (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under")
-    correct_icon = "✅" if bot_correct else ("❌" if rec != "PASS" else "—")
-
-    color = 0x2ECC71 if bot_correct else (0xFF4136 if rec != "PASS" else 0x95A5A6)
+    if is_skip:
+        correct_icon = "—"
+        result_text  = "N/A (no bet)"
+        color        = 0x95A5A6
+    elif bot_correct:
+        correct_icon = "✅"
+        result_text  = "HIT"
+        color        = 0x2ECC71
+    else:
+        correct_icon = "❌"
+        result_text  = "MISS"
+        color        = 0xFF4136
 
     embed = discord.Embed(
         title=f"{outcome_icon} Result Logged — {entry['display']}",
@@ -4260,8 +4302,7 @@ async def cmd_result(ctx, player: str = None, actual: str = None):
     embed.add_field(name="Outcome",  value=outcome_label,     inline=True)
     embed.add_field(name="Bot Pick", value=rec,               inline=True)
     embed.add_field(name="Opponent", value=opp,               inline=True)
-    embed.add_field(name="Result",   value=f"{correct_icon} {'HIT' if bot_correct else ('MISS' if rec != 'PASS' else 'N/A')}",
-                    inline=True)
+    embed.add_field(name="Result",   value=f"{correct_icon} {result_text}", inline=True)
 
     await ctx.send(embed=embed)
 
@@ -4329,13 +4370,13 @@ async def cmd_results(ctx, when: str = "today"):
             status = "⏳"
             actual_str = "—"
             pending += 1
+        elif _is_skip_rec(rec):
+            status = "—"
+            actual_str = str(actual)
         elif (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under"):
             status = "✅"
             actual_str = str(actual)
             correct += 1
-        elif rec == "PASS":
-            status = "—"
-            actual_str = str(actual)
         else:
             status = "❌"
             actual_str = str(actual)
@@ -4422,15 +4463,18 @@ async def cmd_calibration(ctx, days: str = "30"):
             p = float(p)
         except (TypeError, ValueError):
             continue
-        # If bot leaned UNDER, calibrate against under-side probability
+        # Calibration only includes directional bets — skip NO_BET / PASS
         rec = (e.get("recommendation") or "").upper()
+        if _is_skip_rec(rec):
+            continue
         if rec == "UNDER":
             p_pred = 100.0 - p
             hit = (outcome == "under")
-        else:
-            # Treat OVER and PASS as over-side predictions for calibration
+        elif rec == "OVER":
             p_pred = p
             hit = (outcome == "over")
+        else:
+            continue  # unknown recommendation — exclude from calibration
         resolved.append({
             "p_pred": p_pred,
             "hit": hit,
@@ -4607,7 +4651,7 @@ async def cmd_fetchresults(ctx, when: str = "today"):
         updated = record_result(player, actual, entry_id=entry["id"])
         if updated:
             found += 1
-            if rec == "PASS":
+            if _is_skip_rec(rec):
                 icon = "—"
             elif (rec == "OVER" and outcome == "over") or (rec == "UNDER" and outcome == "under"):
                 icon = "✅"

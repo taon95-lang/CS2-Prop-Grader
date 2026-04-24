@@ -1072,23 +1072,28 @@ def apply_post_simulation_caps(
     stat_type: str = "Kills",
     weighted_score_total: float | None = None,
     weighted_ceiling_pct: float | None = None,
+    hit_rate: float | None = None,        # 0..1 over-side conversion
+    stability_std: float | None = None,   # series σ
 ) -> tuple[int, list[str]]:
     """
     Caps applied AFTER simulation, using info that wasn't available at sim time.
-    Implements:
-      - Doc 1 (long para): both-scenarios-fail → cap at 6 on OVERS.
-      - Doc 1 (long para): "overs only when score is strong (75+) … and
-        ceiling is high"  →  weighted-score gate.
-            OVER  + score < 75 → cap 7
-            OVER  + score < 65 → cap 6
-            UNDER + score < 70 → cap 7
-            Elite (9-10) requires score ≥ 80 AND ceiling sub-component ≥ 60%
-            of its 25-pt max (i.e. ceiling_pct ≥ 60).
-      - Doc 2 #7: Role + Map Pool gate.
-        * Plain Rifler + Mixed/Unknown map pool → cap at 7 (no convergence
-          on style or map fit, no elite tier).
-        * Elite tiers (9-10) require strong role (AWPer / Entry / Star Rifler /
-          Support) AND a non-mixed map pool fit.
+
+    Asymmetric score gates (April 2026):
+      OVER  — strict: score ≥ 65 required (else AUTO NO BET).
+      UNDER — flexible: score ≥ 55 allowed IF all 3 confirmation triggers fire:
+                (a) both scenarios below line
+                (b) projection gap ≥ -10% vs line
+                (c) hit rate ≤ 40%   (i.e. under-conversion ≥ 60%)
+              UNDER score < 55 → AUTO NO BET regardless.
+              UNDER score 55-65 without confirmations → AUTO NO BET.
+              UNDER score ≥ 65 → allowed on score alone.
+
+    FORCE UNDER trigger:
+      When all 3 UNDER confirmations fire AND variance is not extreme (σ ≤ 9),
+      force grade to a minimum of 7/10 (overrides earlier caps).
+
+    Other gates retained: both-scenarios-fail OVER cap, ceiling sub-component
+    requirement for elite, role + map-pool gate.
 
     Only applies to Kills props.
     """
@@ -1109,18 +1114,45 @@ def apply_post_simulation_caps(
         if short_proj < line and normal_proj < line:
             cap(6, f"both scenarios below line ({short_proj:.1f}/{normal_proj:.1f}<{line})")
 
-    # Doc 1: 100-point weighted score gate
+    # ── UNDER confirmation triggers (used by both score-gate and FORCE) ──────
+    _both_fail = (
+        short_proj is not None and normal_proj is not None
+        and short_proj < line and normal_proj < line
+    )
+    _proj_for_gap = (
+        min(short_proj, normal_proj)
+        if (short_proj is not None and normal_proj is not None) else None
+    )
+    _gap_pct = (
+        ((_proj_for_gap - line) / line * 100.0)
+        if (_proj_for_gap is not None and line and line > 0) else 0.0
+    )
+    _gap_supports = (_proj_for_gap is not None and _gap_pct <= -10.0)
+    _hr_supports  = (hit_rate is not None and hit_rate <= 0.40)
+    _all_under_triggers = bool(_both_fail and _gap_supports and _hr_supports)
+    _variance_extreme   = bool(stability_std is not None and stability_std > 9.0)
+
+    # Asymmetric 100-point weighted score gate
     if weighted_score_total is not None:
         ws = weighted_score_total
-        # Auto NO BET — overrides everything below
-        if ws < 50:
-            cap(3, f"AUTO NO BET — 100-pt score {ws:.0f}<50")
-        elif decision == "OVER":
-            if   ws < 65: cap(6, f"100-pt score {ws:.0f}<65")
+        if decision == "OVER":
+            # OVER strict — require score ≥ 65, else NO BET
+            if   ws < 65: cap(3, f"AUTO NO BET — OVER score {ws:.0f}<65 (strict)")
             elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
             elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")
         else:  # UNDER
-            if   ws < 60: cap(6, f"100-pt score {ws:.0f}<60")
+            # UNDER flexible — require ≥ 55 absolute floor, ≥ 65 OR confirmations
+            if ws < 55:
+                cap(3, f"AUTO NO BET — UNDER score {ws:.0f}<55")
+            elif ws < 65:
+                if not _all_under_triggers:
+                    _missing = []
+                    if not _both_fail:    _missing.append("both-fail")
+                    if not _gap_supports: _missing.append(f"gap≥-10% (got {_gap_pct:.0f}%)")
+                    if not _hr_supports:  _missing.append(f"HR≤40% (got {(hit_rate or 0)*100:.0f}%)")
+                    cap(3, f"AUTO NO BET — UNDER {ws:.0f}<65 missing {','.join(_missing)}")
+                else:
+                    cap(7, f"UNDER {ws:.0f}<65 with confirmation → cap 7")
             elif ws < 70: cap(7, f"100-pt score {ws:.0f}<70")
             elif ws < 78 and g >= 9: cap(8, f"score {ws:.0f}<78 for elite")
         # Ceiling-component requirement for elite tiers
@@ -1145,6 +1177,22 @@ def apply_post_simulation_caps(
             cap(8, f"elite needs strong role (got {role_tag or '—'})")
         if neutral_pool:
             cap(8, "elite needs favorable map pool")
+
+    # ── FORCE UNDER min 7/10 — applied LAST so it overrides earlier caps ─────
+    # Triggers (all required): both scenarios fail + projection ≤ -10% vs line
+    # + hit rate ≤ 40%. Skipped when variance is extreme (σ > 9), and ALSO
+    # skipped when an AUTO NO BET cap fired (absolute score floor of 55 wins).
+    _no_bet_fired = any("AUTO NO BET" in c for c in caps)
+    if (decision == "UNDER"
+            and _all_under_triggers
+            and not _variance_extreme
+            and not _no_bet_fired
+            and g < 7):
+        caps.append(
+            f"FORCE UNDER {g}→7 — all 3 triggers "
+            f"(gap {_gap_pct:.0f}%, HR {(hit_rate or 0)*100:.0f}%, both<line)"
+        )
+        g = 7
 
     return g, caps
 

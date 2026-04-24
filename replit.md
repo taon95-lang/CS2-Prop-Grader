@@ -87,6 +87,13 @@ The `!grade` embed has a compact professional layout:
 - `build_verdict_reason()` — One-line reasoning for the call
 - `run_lines_table()` — Multi-line probability table for ±3 lines
 
+### Recommendation taxonomy (April 2026)
+- `OVER` / `UNDER` — directional bet, counts in W/L tally and calibration
+- `PASS` — soft skip (insufficient signal)
+- `NO_BET` — hard skip from AUTO NO BET cap or asymmetric score gate; non-directional
+- Reporting helpers in `bot.py`: `_is_skip_rec()` and `_is_directional_rec()` — used by `!result`, `!results`, `!calibration`, `!fetchresults` so NO_BET / PASS are excluded from win/loss math instead of being mis-counted as OVER losses
+- `settle_backlog.py` already buckets non-directional recs into `passes_w_outcome`
+
 ### Workflow
 - **Name:** `Elite CS2 Prop Grader Bot`
 - **Command:** `cd cs2-bot && python3 bot.py`
