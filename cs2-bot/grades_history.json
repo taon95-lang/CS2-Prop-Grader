@@ -3487,6 +3487,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "44395eef-afc3-4a31-bcb6-7e942c0f3777",
+      "ts": 1777015417.205798,
+      "date": "2026-04-24",
+      "player": "kaluber",
+      "display": "kaluber",
+      "line": 26.0,
+      "stat": "Kills",
+      "opponent": "big",
+      "over_pct": 72.0,
+      "under_pct": 28.0,
+      "grade": "7/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "auto_no_bet": false,
+      "sim_median": 29.97,
+      "hist_median": 32.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

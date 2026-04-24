@@ -492,6 +492,57 @@ def compute_semantic_risk_flags(sim_result: dict, variance: dict) -> list[str]:
     return keys
 
 
+def defense_phrase(comb_pct: float | int | None) -> str:
+    """
+    Convert a defensive multiplier % (negative = suppression) into a soft
+    qualitative descriptor instead of a clinical number like "-12% defense".
+
+    Tiers (based on absolute suppression strength):
+      ≥ 7%  → "moderate defensive resistance"
+      ≥ 3%  → "slight output suppression risk"
+      < 3%  → "neutral defensive matchup"
+    """
+    p = abs(comb_pct or 0)
+    if p >= 7:
+        return "moderate defensive resistance"
+    if p >= 3:
+        return "slight output suppression risk"
+    return "neutral defensive matchup"
+
+
+def play_value_label(edge_pct: float | None, prob: float | None) -> str:
+    """
+    Classify a directional play's value tier from edge% and bet-side probability.
+
+      edge ≥ 10 AND prob ≥ 0.60  → "VALUE PLAY"
+      edge ≥ 6                   → "PLAYABLE"
+      else                       → "MARGINAL"
+    """
+    edge = edge_pct or 0
+    p    = prob or 0
+    if edge >= 10 and p >= 0.60:
+        return "VALUE PLAY"
+    if edge >= 6:
+        return "PLAYABLE"
+    return "MARGINAL"
+
+
+def score_strength_label(score: float | None) -> str:
+    """
+    Convert a 0-100 weighted score into a strength bucket.
+
+      ≥ 80 → "ELITE"
+      ≥ 70 → "STRONG"
+      ≥ 60 → "SOLID"
+      else → "LOW"
+    """
+    s = score or 0
+    if s >= 80: return "ELITE"
+    if s >= 70: return "STRONG"
+    if s >= 60: return "SOLID"
+    return "LOW"
+
+
 def adjust_for_risk(result, decision_obj):
     """
     Downgrade the displayed confidence tier based on risk flags.
@@ -1693,8 +1744,8 @@ def build_analysis_blurb(
             )
         elif comb_pct <= -7 and decision in ("OVER",):
             context = (
-                f"{opp_name_d}'s defensive structure suppresses output by {abs(comb_pct):.0f}% "
-                f"on average, which is the main headwind for this OVER."
+                f"{opp_name_d} brings {defense_phrase(comb_pct)}, "
+                f"the main headwind for this OVER."
                 + (f" He's cleared {h2h_clrs}/{h2h_n} times H2H." if h2h_n >= 2 else "")
             )
         elif comb_pct >= 6 and decision in ("OVER",):
@@ -1705,8 +1756,8 @@ def build_analysis_blurb(
             )
         elif comb_pct <= -6 and decision in ("UNDER",):
             context = (
-                f"{opp_name_d} runs a disciplined defence ({def_prof}), "
-                f"suppressing kill volume by {abs(comb_pct):.0f}% — a key driver for this UNDER."
+                f"{opp_name_d} runs a disciplined defence ({def_prof}) with "
+                f"{defense_phrase(comb_pct)} — a key driver for this UNDER."
             )
         elif h2h_n >= 2:
             h2h_rate = h2h_clrs / h2h_n

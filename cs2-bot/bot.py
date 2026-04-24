@@ -32,6 +32,9 @@ from grade_engine import (
     build_slips,
     adjust_for_risk,
     compute_semantic_risk_flags,
+    defense_phrase,
+    play_value_label,
+    score_strength_label,
 )
 from scraper import check_standin, get_recent_team_roster, search_team
 
@@ -1110,13 +1113,13 @@ def _analyze_player(
 
         if _cur_dec == "OVER":
             # Veto OVER if defense is very tough AND H2H rate is low
-            _deep_bearish = _comb_pct <= -12          # -12% or worse defensive suppression
+            _deep_bearish = _comb_pct <= -12          # strong defensive resistance threshold
             _h2h_bearish  = _h2h_rate is not None and _h2h_rate <= 0.40
             if _deep_bearish and _h2h_bearish:
                 sim_result["decision"] = "PASS"
                 sim_result["recommendation"] = (
                     f"⏸️ PASS — Historical edge vetoed by specific matchup: "
-                    f"defense {round(_comb_pct)}% · H2H {_h2h_clears}/{_h2h_n} cleared"
+                    f"{defense_phrase(_comb_pct)} · H2H {_h2h_clears}/{_h2h_n} cleared"
                 )
                 logger.info(
                     f"[matchup_veto] OVER→PASS: deep={round(_comb_pct)}% "
@@ -1131,7 +1134,7 @@ def _analyze_player(
                 sim_result["decision"] = "PASS"
                 sim_result["recommendation"] = (
                     f"⏸️ PASS — Historical edge vetoed by specific matchup: "
-                    f"defense {round(_comb_pct)}% · H2H {_h2h_clears}/{_h2h_n} cleared"
+                    f"open style favoring kills · H2H {_h2h_clears}/{_h2h_n} cleared"
                 )
                 logger.info(
                     f"[matchup_veto] UNDER→PASS: deep={round(_comb_pct)}% "
@@ -2102,9 +2105,20 @@ def build_result_embed(
     edge_sign = "+" if edge_pct >= 0 else ""
     fair_ln   = result.get("fair_line", result.get("sim_median", "N/A"))
 
+    # Value-tier + score-strength labels (directional plays only)
+    _ws_total = ((result.get("grade_pkg") or {}).get("weighted_score") or {}).get("total")
+    if decision == "OVER":
+        _bet_prob = (result.get("over_prob")  or 0) / 100.0
+    elif decision == "UNDER":
+        _bet_prob = (result.get("under_prob") or 0) / 100.0
+    else:
+        _bet_prob = 0.0
+    play_label  = play_value_label(abs(edge_pct), _bet_prob) if decision in ("OVER", "UNDER") else None
+    strength_lbl = score_strength_label(_ws_total)
+    tag_line = f"\nTag: `{play_label}` · Score: `{strength_lbl}`" if play_label else ""
+
     if auto_no_bet:
         # Score-based or cap-based hard skip — overrides directional recommendation
-        _ws_total = ((result.get("grade_pkg") or {}).get("weighted_score") or {}).get("total")
         _ws_str = f"score {_ws_total:.0f}/100" if isinstance(_ws_total, (int, float)) else "below threshold"
         _orig = decision if decision in ("OVER", "UNDER") else "—"
         final_rec_name  = "🚫 AUTO NO BET"
@@ -2114,13 +2128,13 @@ def build_result_embed(
         )
     elif is_lock:
         final_rec_name  = "🔒 LOCK"
-        final_rec_value = f"🔒 **LOCK — BET {proj_word}** `{line}`\n{unit_rec}  ·  Grade: `{grade_str}`  ·  Fair Line: `{fair_ln}`"
+        final_rec_value = f"🔒 **LOCK — BET {proj_word}** `{line}`\n{unit_rec}  ·  Grade: `{grade_str}`  ·  Fair Line: `{fair_ln}`{tag_line}"
     elif decision == "OVER":
         final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
-        final_rec_value = f"**✅ BET MORE** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`"
+        final_rec_value = f"**✅ BET MORE** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`{tag_line}"
     elif decision == "UNDER":
         final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
-        final_rec_value = f"**❌ BET LESS** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`"
+        final_rec_value = f"**❌ BET LESS** — {grade_str}\n{unit_rec}  ·  Fair Line: `{fair_ln}`{tag_line}"
     else:
         final_rec_name  = "🎯 FINAL BET RECOMMENDATION"
         final_rec_value = f"**⏸️ NO BET** — Signals too mixed for a confident call\n{unit_rec}"
