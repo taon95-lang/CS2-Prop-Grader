@@ -1592,9 +1592,18 @@ def _analyze_player(
                 if "(capped)" not in _glabel:
                     _glabel = f"{_glabel} (capped)"
                 _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
-                _sign = "✅" if _decision == "OVER" else "❌"
-                sim_result["grade"] = _new_grade_str
-                sim_result["recommendation"] = f"{_sign} {_decision} — {_new_grade_str}"
+                # Auto NO BET override when score < 50 forced grade to ≤3
+                _is_no_bet = any("AUTO NO BET" in c for c in _new_caps) or _gnum_new <= 3
+                if _is_no_bet:
+                    sim_result["grade"] = _new_grade_str
+                    sim_result["recommendation"] = (
+                        f"🚫 NO BET — {_new_grade_str} "
+                        f"(was {_decision} {_gnum_old}/10)"
+                    )
+                else:
+                    _sign = "✅" if _decision == "OVER" else "❌"
+                    sim_result["grade"] = _new_grade_str
+                    sim_result["recommendation"] = f"{_sign} {_decision} — {_new_grade_str}"
                 _vt = sim_result.get("vote_tally") or {}
                 _existing = list(_vt.get("caps_applied") or [])
                 _existing.extend(_new_caps)
@@ -1694,6 +1703,21 @@ def build_result_embed(
     stat_unit = result.get("stat_type", stat_type)
     used_fb   = result.get("used_fallback", False)
     is_lock   = result.get("is_lock", False)
+
+    # AUTO NO BET detection — score<50 cap or grade≤3 from post-sim caps
+    _vt_caps = ((result.get("vote_tally") or {}).get("caps_applied") or [])
+    _grade_str_for_check = str(result.get("grade", ""))
+    _grade_num_match = 0
+    try:
+        _grade_num_match = int(_grade_str_for_check.split("/")[0].strip())
+    except Exception:
+        pass
+    auto_no_bet = (
+        any("AUTO NO BET" in c for c in _vt_caps)
+        or (_grade_num_match and _grade_num_match <= 3)
+    )
+    if auto_no_bet:
+        color = 0x808080  # gray for NO BET
 
     deep        = result.get("deep") or {}
     opp_display = deep.get("opponent_display") if deep and not deep.get("error") else None
@@ -1883,7 +1907,17 @@ def build_result_embed(
     edge_sign = "+" if edge_pct >= 0 else ""
     fair_ln   = result.get("fair_line", result.get("sim_median", "N/A"))
 
-    if is_lock:
+    if auto_no_bet:
+        # Score-based or cap-based hard skip — overrides directional recommendation
+        _ws_total = ((result.get("grade_pkg") or {}).get("weighted_score") or {}).get("total")
+        _ws_str = f"score {_ws_total:.0f}/100" if isinstance(_ws_total, (int, float)) else "below threshold"
+        _orig = decision if decision in ("OVER", "UNDER") else "—"
+        final_rec_name  = "🚫 AUTO NO BET"
+        final_rec_value = (
+            f"**🚫 NO BET** — {grade_str}\n"
+            f"100-pt {_ws_str} → auto-skip enforced (was {_orig})"
+        )
+    elif is_lock:
         final_rec_name  = "🔒 LOCK"
         final_rec_value = f"🔒 **LOCK — BET {proj_word}** `{line}`\n{unit_rec}  ·  Grade: `{grade_str}`  ·  Fair Line: `{fair_ln}`"
     elif decision == "OVER":

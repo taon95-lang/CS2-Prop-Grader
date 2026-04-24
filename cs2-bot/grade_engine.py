@@ -927,17 +927,19 @@ _WS_WEIGHTS = {
 }
 
 def _ws_label(total: float) -> tuple[str, str]:
-    if total >= 85: return "🟢 ELITE",    "Conviction play — all signals align"
-    if total >= 75: return "✅ STRONG",   "Strong play — supports elite tiers"
-    if total >= 65: return "🟡 LEAN",     "Playable lean — needs price"
-    if total >= 50: return "⚪ MARGINAL", "Marginal — skip unless price is plus"
-    return "🔴 SKIP", "Weak score — do not bet"
+    if total >= 85: return "🟢 ELITE",     "Conviction play — all signals align"
+    if total >= 75: return "✅ STRONG",    "Strong play — supports elite tiers"
+    if total >= 65: return "🟡 LEAN",      "Playable lean — needs price"
+    if total >= 50: return "⚪ MARGINAL",  "Marginal — skip unless price is plus"
+    return "🚫 NO BET", "Below threshold — auto-skip enforced"
 
 
 def _level_to_unit(level: str, invert: bool = False) -> float:
-    """HIGH/MEDIUM/LOW level → 0..1 unit score, optionally inverted."""
-    table = {"HIGH": 1.0, "MEDIUM": 0.55, "LOW": 0.15}
-    base = table.get((level or "MEDIUM").upper(), 0.55)
+    """HIGH/MEDIUM/LOW level → 0..1 unit score, optionally inverted.
+    MEDIUM centred at 0.5 so OVER and UNDER are symmetric (no built-in bias).
+    """
+    table = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.0}
+    base = table.get((level or "MEDIUM").upper(), 0.5)
     return (1.0 - base) if invert else base
 
 
@@ -974,28 +976,41 @@ def compute_weighted_score_100(
     direction = decision if decision in {"OVER", "UNDER"} else "OVER"
     is_over   = direction == "OVER"
 
-    # ── 1. Ceiling frequency (25 pts) ────────────────────────────────────────
+    # ── 1. Ceiling frequency (25 pts) — HARSHER ──────────────────────────────
+    # Higher bars (line+5 / line+10) and peak weighted more (it's harder to fake).
+    # Multiplicative penalty: if peak threshold has never been hit, ceiling capped
+    # at 0.45 — a player who never spikes can't earn full ceiling credit.
     if series_totals:
         n = len(series_totals)
         if is_over:
-            clear_pct = sum(1 for x in series_totals if x >= line + 3) / n
-            peak_pct  = sum(1 for x in series_totals if x >= line + 8) / n
-            detail_str = f"{clear_pct*100:.0f}% ≥ line+3, {peak_pct*100:.0f}% ≥ line+8"
+            clear_pct = sum(1 for x in series_totals if x >= line + 5)  / n
+            peak_pct  = sum(1 for x in series_totals if x >= line + 10) / n
+            detail_str = f"{clear_pct*100:.0f}% ≥ line+5, {peak_pct*100:.0f}% ≥ line+10"
         else:
-            clear_pct = sum(1 for x in series_totals if x <= line - 3) / n
-            peak_pct  = sum(1 for x in series_totals if x <= line - 8) / n
-            detail_str = f"{clear_pct*100:.0f}% ≤ line-3, {peak_pct*100:.0f}% ≤ line-8"
-        ceiling_score = 0.5 * clear_pct + 0.5 * peak_pct
+            clear_pct = sum(1 for x in series_totals if x <= line - 5)  / n
+            peak_pct  = sum(1 for x in series_totals if x <= line - 10) / n
+            detail_str = f"{clear_pct*100:.0f}% ≤ line-5, {peak_pct*100:.0f}% ≤ line-10"
+        ceiling_score = 0.35 * clear_pct + 0.65 * peak_pct
+        # Hard cap when peak threshold never hit (player has no real ceiling)
+        if peak_pct < 0.10:
+            ceiling_score = min(ceiling_score, 0.45)
     else:
         ceiling_score = 0.0
         detail_str = "no series data"
 
-    # ── 2. Hit rate (20 pts) ─────────────────────────────────────────────────
+    # ── 2. Hit rate (20 pts) — PENALIZES HR ≤ 50% ────────────────────────────
     # hit_rate is over-side conversion (0..1). For UNDER, invert.
+    # Coinflip (50%) and below = active penalty. Neutral pivot moved to 55%
+    # so that 50% itself yields a small negative (-4 pts).
+    # 75%+ → full credit (+20). 25% or worse → -20 pts.
     hr = hit_rate if is_over else (1.0 - hit_rate)
-    # Map: 0.50→0.0, 0.60→0.5, 0.75→1.0
-    hr_score = max(0.0, min(1.0, (hr - 0.50) / 0.25))
+    if hr >= 0.55:
+        hr_score = min(1.0, (hr - 0.55) / 0.20)        # 55→0, 75→1.0
+    else:
+        hr_score = -min(1.0, (0.55 - hr) / 0.30)       # 55→0, 50→-0.17, 25→-1.0
     hr_detail = f"{hr*100:.0f}% {'over' if is_over else 'under'} conversion"
+    if hr <= 0.50:
+        hr_detail += " ⚠️ penalty"
 
     # ── 3. Multi-kill (15 pts) ──────────────────────────────────────────────
     mk_level   = multikill.get("level", "MEDIUM")
@@ -1007,7 +1022,7 @@ def compute_weighted_score_100(
     rs_score   = _level_to_unit(rs_level, invert=not is_over)
     rs_detail  = f"{rs_level} round swing"
 
-    # ── 5. Match-length risk (12 pts) ───────────────────────────────────────
+    # ── 5. Match-length risk (12 pts) — STOMP HARSHER ───────────────────────
     pr = projected_rounds or 44
     if is_over:
         # Long maps + competitive odds = high score
@@ -1016,11 +1031,13 @@ def compute_weighted_score_100(
         elif pr >= 42:                       length_score = 0.65
         elif pr >= 40:                       length_score = 0.40
         else:                                length_score = 0.15
+        # Stomp condition cripples OVER match-length score (was 0.20 → 0.05)
         if stomp_via_rank or favorite_prob >= 0.72:
-            length_score = min(length_score, 0.20)
+            length_score = min(length_score, 0.05)
         elif favorite_prob >= 0.65:
-            length_score = min(length_score, 0.50)
+            length_score = min(length_score, 0.30)
         ml_detail = f"~{pr} rds, fav {favorite_prob*100:.0f}%"
+        if stomp_via_rank: ml_detail += " 🚨 stomp"
     else:
         # Short maps benefit UNDERS
         if   pr <= 38:                       length_score = 1.00
@@ -1029,30 +1046,42 @@ def compute_weighted_score_100(
         elif pr <= 44:                       length_score = 0.40
         else:                                length_score = 0.15
         if stomp_via_rank or favorite_prob >= 0.72:
-            length_score = max(length_score, 0.85)   # stomp favors UNDER
+            length_score = max(length_score, 0.90)   # stomp favors UNDER
         ml_detail = f"~{pr} rds, fav {favorite_prob*100:.0f}%"
+        if stomp_via_rank: ml_detail += " ✅ stomp helps"
 
-    # ── 6. Role (8 pts) ─────────────────────────────────────────────────────
+    # ── 6. Role (8 pts) — SYMMETRIC (no OVER/UNDER bias) ────────────────────
+    # Both directions can hit 1.0 max for their best-fit role.
     role  = (role_tag or "").lower()
     if is_over:
         role_score = {
-            "awper": 1.00, "entry fragger": 0.95, "star rifler": 1.00,
-            "support": 0.55, "rifler": 0.45,
+            "awper":         1.00,
+            "star rifler":   1.00,
+            "entry fragger": 0.95,
+            "support":       0.40,
+            "rifler":        0.40,
         }.get(role, 0.50)
     else:
-        # Plain Rifler / Support are UNDER-friendly (low ceiling)
+        # Mirror — role types that fade well get full credit on UNDER
         role_score = {
-            "awper": 0.50, "entry fragger": 0.30, "star rifler": 0.30,
-            "support": 0.85, "rifler": 0.80,
-        }.get(role, 0.55)
+            "awper":         0.40,
+            "star rifler":   0.40,
+            "entry fragger": 0.45,
+            "support":       1.00,
+            "rifler":        1.00,
+        }.get(role, 0.50)
     role_detail = f"{role_tag or '—'}"
 
-    # ── 7. Consistency (8 pts) ──────────────────────────────────────────────
+    # ── 7. Consistency (8 pts) — TIGHTER, ALLOWS NEGATIVE ───────────────────
+    # σ ≤ 3 → full credit; σ ≥ 9 → -0.5 (active penalty for chaotic players).
     s = stability_std or 0.0
-    if   s <= 4:  cons_score = 1.00
-    elif s >= 9:  cons_score = 0.20
-    else:         cons_score = max(0.20, 1.00 - (s - 4) / 5.0 * 0.80)
+    if   s <= 3:  cons_score = 1.00
+    elif s <= 5:  cons_score = 0.65
+    elif s <= 7:  cons_score = 0.30
+    elif s <= 9:  cons_score = 0.00
+    else:         cons_score = -0.50
     cons_detail = f"σ={s:.1f}"
+    if cons_score < 0: cons_detail += " ⚠️ penalty"
 
     # ── Assemble ─────────────────────────────────────────────────────────────
     raw = {

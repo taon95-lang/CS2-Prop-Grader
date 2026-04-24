@@ -1112,7 +1112,10 @@ def apply_post_simulation_caps(
     # Doc 1: 100-point weighted score gate
     if weighted_score_total is not None:
         ws = weighted_score_total
-        if decision == "OVER":
+        # Auto NO BET — overrides everything below
+        if ws < 50:
+            cap(3, f"AUTO NO BET — 100-pt score {ws:.0f}<50")
+        elif decision == "OVER":
             if   ws < 65: cap(6, f"100-pt score {ws:.0f}<65")
             elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
             elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")

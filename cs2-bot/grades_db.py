@@ -63,6 +63,24 @@ def save_grade(
     db = _load()
 
     now = datetime.now(timezone.utc)
+
+    # AUTO NO BET detection — score<50 cap or grade≤3 from post-sim caps
+    _vt_caps = ((sim_result.get("vote_tally") or {}).get("caps_applied") or [])
+    _grade_str_for_check = str(sim_result.get("grade", ""))
+    _grade_num_match = 0
+    try:
+        _grade_num_match = int(_grade_str_for_check.split("/")[0].strip())
+    except Exception:
+        pass
+    _auto_no_bet = (
+        any("AUTO NO BET" in c for c in _vt_caps)
+        or (_grade_num_match and _grade_num_match <= 3)
+    )
+    if _auto_no_bet:
+        _saved_rec = "NO_BET"
+    else:
+        _saved_rec = sim_result.get("decision") or sim_result.get("recommendation")
+
     entry = {
         "id":           str(uuid.uuid4()),
         "ts":           now.timestamp(),
@@ -76,7 +94,8 @@ def save_grade(
         "under_pct":    sim_result.get("under_prob"),
         "grade":        sim_result.get("grade"),
         "grade_label":  sim_result.get("grade_label"),
-        "recommendation": sim_result.get("decision") or sim_result.get("recommendation"),
+        "recommendation": _saved_rec,
+        "auto_no_bet":  bool(_auto_no_bet),
         "sim_median":   sim_result.get("sim_median"),
         "hist_median":  sim_result.get("hist_median"),
         "actual":       None,
