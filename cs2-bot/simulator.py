@@ -381,16 +381,25 @@ def run_simulation(
             avg_kpr = mean(weighted)
             map_projection_note = f"Map-weighted ({', '.join(matched_maps)})"
 
-    # --- Recency Weighting (60% recent / 40% historical) ---
-    # kpr_values are ordered newest-first (scraper fetches results in reverse chron order)
-    # Take the most recent 4 map samples (~2 series) as "recent form"
+    # --- EWMA Recency Weighting (Apr 2026 overhaul, Doc 1 #2) ──────────────
+    # Replaces the previous "simple mean of last 2-4 maps" — which over-fit to
+    # tiny samples and let single hot/cold games dominate. EWMA with half-life
+    # 5 maps gives the last 5 maps ~45% of total weight, last 10 ~70%, last
+    # 20 ~95%. This captures genuine form shifts while staying anchored to
+    # the player's larger floor.
+    # kpr_values are newest-first.
     n_kpr = len(kpr_values)
-    recent_n = max(2, min(4, n_kpr // 3 + 1))
-    recent_kpr_vals = kpr_values[:recent_n] if n_kpr >= recent_n else kpr_values
-    recent_avg_kpr = mean(recent_kpr_vals)
+    if n_kpr >= 2:
+        EWMA_HALF_LIFE_MAPS = 5
+        _lam = 0.5 ** (1.0 / EWMA_HALF_LIFE_MAPS)   # ≈ 0.871
+        _weights = [_lam ** i for i in range(n_kpr)]
+        recent_avg_kpr = sum(w * v for w, v in zip(_weights, kpr_values)) / sum(_weights)
+    else:
+        recent_avg_kpr = mean(kpr_values) if kpr_values else 0.0
+    # Display sample (last 5) — embed shows what "recent" means to the user
+    recent_kpr_vals = kpr_values[:5]
 
-    # Blend: 60% recent form, 40% map-weighted (or overall) avg
-    # (was 70/30 — reduced because 2-4 map samples were over-weighting hot streaks)
+    # Blend: 60% EWMA recent / 40% map-weighted historical anchor
     blended_kpr = 0.60 * recent_avg_kpr + 0.40 * avg_kpr
 
     # If HLTV period stats provides an aggregate KPR (90-day), fold it in as a
@@ -702,6 +711,8 @@ def run_simulation(
         book_implied_prob=book_implied_prob,
         series_totals=series_totals,
         n_series=len(series_totals),
+        total_projected_rounds=total_projected_rounds,
+        recent_avg_kpr=recent_avg_kpr,
     )
 
     return {
@@ -777,6 +788,94 @@ def run_simulation(
     }
 
 
+def apply_tier_caps(
+    grade_num: int,
+    decision: str,
+    *,
+    hit_rate: float,
+    over_prob: float,
+    hist_median: float,
+    recent_avg_per_series: float,
+    line: float,
+    projected_rounds: int,
+    stomp_via_rank: bool,
+    favorite_prob: float,
+    stability_std: float,
+    sub_signal_alignment: int,   # 0-4: how many of s1-s4 agree with decision
+    stat_type: str = "Kills",
+) -> tuple:
+    """
+    April 2026 overhaul tier-cap stack — merged from Doc 1 (#1, #3, #5, #6) and
+    Doc 2 (#1-9). Each cap can ONLY lower the grade. The starting `grade_num`
+    is computed from edge-vs-book; these gates are then applied so that strong
+    edges still need supporting evidence to earn elite tiers.
+
+    Returns (post_cap_grade, list_of_cap_reasons).
+    """
+    caps = []
+    g = grade_num
+
+    def cap(new_max: int, reason: str):
+        nonlocal g
+        if g > new_max:
+            caps.append(f"{reason}→cap {new_max}")
+            g = new_max
+
+    side_prob = over_prob if decision == "OVER" else (1.0 - over_prob)
+    sp_pct = side_prob * 100
+    hr_pct = hit_rate * 100
+
+    # C1: Hit-rate hard filter (Doc 2 #4)
+    if   hr_pct < 50: cap(5, f"HR {hr_pct:.0f}%<50%")
+    elif hr_pct < 60: cap(6, f"HR {hr_pct:.0f}%<60%")
+    elif hr_pct < 65: cap(8, f"HR {hr_pct:.0f}%<65%")
+    elif hr_pct < 70: cap(9, f"HR {hr_pct:.0f}%<70%")
+
+    # C2: Stomp-risk veto on elite tiers (Doc 1 #3, Doc 2 #2)
+    # Stomp shortens maps → hurts OVERS only.  UNDERS benefit, so no cap there.
+    if decision == "OVER" and stat_type == "Kills":
+        if stomp_via_rank or favorite_prob >= 0.72:
+            cap(7, "stomp risk")
+        elif favorite_prob >= 0.65:
+            cap(8, f"medium stomp ({favorite_prob*100:.0f}% fav)")
+
+    # C3: Round-volume cap (Doc 1 #3, Doc 2 #6) — OVERS only
+    if decision == "OVER" and stat_type == "Kills" and projected_rounds:
+        if   projected_rounds < 40: cap(6, f"rounds {projected_rounds}<40")
+        elif projected_rounds < 42: cap(7, f"rounds {projected_rounds}<42")
+        elif projected_rounds < 44: cap(8, f"rounds {projected_rounds}<44")
+
+    # C4: Side-probability band (Doc 2 #5)
+    if   sp_pct < 55: cap(5, f"prob {sp_pct:.0f}%<55%")
+    elif sp_pct < 60: cap(6, f"prob {sp_pct:.0f}%<60%")
+    elif sp_pct < 65: cap(7, f"prob {sp_pct:.0f}%<65%")
+    elif sp_pct < 70: cap(9, f"prob {sp_pct:.0f}%<70%")
+
+    # C6: Median + recent-avg gap requirement for elite tiers (Doc 2 #1)
+    if decision == "OVER":
+        gap_med = hist_median - line
+        gap_rec = recent_avg_per_series - line
+    else:
+        gap_med = line - hist_median
+        gap_rec = line - recent_avg_per_series
+    if g >= 10 and (gap_med < 2.0 or gap_rec < 3.0):
+        cap(9, f"gap insufficient for 10 (med {gap_med:+.1f}, rec {gap_rec:+.1f})")
+    if g >= 9 and (gap_med < 1.5 or gap_rec < 2.5):
+        cap(8, f"gap insufficient for 9 (med {gap_med:+.1f}, rec {gap_rec:+.1f})")
+
+    # C7: Volatility cap (Doc 1 #6, Doc 2 #8)
+    if stability_std > 8.5:
+        cap(8, f"σ={stability_std:.1f}>8.5")
+
+    # C8: Multi-signal convergence requirement (Doc 1 #5, Doc 2 #3)
+    if g >= 10 and sub_signal_alignment < 4:
+        cap(9, f"convergence {sub_signal_alignment}/4")
+    if g >= 9 and sub_signal_alignment < 3:
+        cap(8, f"convergence {sub_signal_alignment}/4")
+
+    return g, caps
+
+
 def calculate_grade(
     edge: float,
     over_prob: float,
@@ -792,6 +891,8 @@ def calculate_grade(
     book_implied_prob: float = BOOK_IMPLIED_PROB,
     series_totals: list = None,
     n_series: int = 0,
+    total_projected_rounds: int = 0,
+    recent_avg_kpr: float = 0.0,
 ) -> tuple:
     """
     Evidence-stacking grade engine — v2.
@@ -964,15 +1065,35 @@ def calculate_grade(
         elif dir_edge_pct >= 0:  grade_num, edge_label = 5,  "Fair line"
         else:                    grade_num, edge_label = 4,  "Negative edge"
 
-        # Fix 4: Volatility cap — high-variance players cannot earn top grades.
-        # A volatile player (stability_std > 8) with two cold series is NOT
-        # an "Elite edge" regardless of the historical hit-rate.
-        if stability_std > 8.0 and cold_penalty < 0 and grade_num >= 9:
-            grade_num = 8
-            edge_label = "Strong edge (volatile)"
-        elif stability_std > 5.0 and cold_penalty < 0 and grade_num == 10:
-            grade_num = 9
-            edge_label = "Elite edge (volatile)"
+        # ── Apr 2026 overhaul: tier-cap stack (merged Doc 1 + Doc 2) ─────────
+        # Compute how many of the 4 sub-signals agree with the chosen direction
+        if decision == "OVER":
+            sub_align = sum(1 for s in (s1, s2, s3, s4) if s > 0)
+        else:
+            sub_align = sum(1 for s in (s1, s2, s3, s4) if s < 0)
+        # Recent-avg in per-series units (recent_avg_kpr × total_projected_rounds)
+        recent_avg_per_series = (recent_avg_kpr * total_projected_rounds) if recent_avg_kpr else hist_avg
+        pre_cap_grade = grade_num
+        grade_num, caps_applied = apply_tier_caps(
+            grade_num=grade_num,
+            decision=decision,
+            hit_rate=hit_rate,
+            over_prob=over_prob,
+            hist_median=hist_median,
+            recent_avg_per_series=recent_avg_per_series,
+            line=line,
+            projected_rounds=total_projected_rounds,
+            stomp_via_rank=stomp_via_rank,
+            favorite_prob=favorite_prob,
+            stability_std=stability_std,
+            sub_signal_alignment=sub_align,
+            stat_type=stat_type,
+        )
+        if caps_applied:
+            edge_label = f"{edge_label} (capped)"
+        vote_tally["caps_applied"] = caps_applied
+        vote_tally["pre_cap_grade"] = pre_cap_grade
+        vote_tally["sub_signal_alignment"] = sub_align
 
         grade_str = f"{grade_num}/10 ({edge_label})"
         sign = "✅" if decision == "OVER" else "❌"

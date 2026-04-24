@@ -1,0 +1,107 @@
+Critical Changes Needed
+1. Tighten Elite-Tier Requirements (9/10 and 10/10)
+Your current logic probably says:
+	•	“If avg > line by X amount → 10/10”
+It should say:
+	•	10/10 requires:
+	•	Recent avg ≥ line + 3 kills
+	•	Median ≥ line + 2 kills
+	•	Hit rate ≥ 70%
+	•	Stomp risk = LOW or NONE
+	•	Projected rounds ≥ 43
+	•	Over probability ≥ 65%
+	•	Edge ≥ +8%
+	•	9/10 requires:
+	•	Recent avg ≥ line + 2.5 kills
+	•	Median ≥ line + 1.5 kills
+	•	Hit rate ≥ 65%
+	•	Stomp risk = LOW or MEDIUM (but not HIGH)
+	•	Projected rounds ≥ 42
+	•	Over probability ≥ 62%
+	•	Edge ≥ +6%
+Right now you’re probably just looking at avg vs line and calling it elite.
+
+2. Add Hard Stomp-Risk Veto for 9/10 and 10/10
+If your bot flags:
+	•	High stomp risk → cap grade at 7/10 maximum
+	•	Medium stomp risk → cap at 8/10
+The Faven prop shows your bot can detect stomp risk (42 rounds projected, stomp risk flagged). But you need to make that block elite grades, not just mention it in the writeup.
+
+3. Require Multi-Signal Confirmation for Elite Grades
+A 10/10 should only fire when all of these agree:
+	•	✅ Recent avg > line
+	•	✅ Median > line
+	•	✅ Hit rate strong
+	•	✅ Projected rounds sufficient
+	•	✅ Over probability high
+	•	✅ Role favorable
+	•	✅ Map pool favorable
+	•	✅ No stomp risk
+Right now it looks like you’re giving 10/10 if just 2-3 signals align.
+
+4. Use Hit Rate as a Hard Filter
+Add this rule:
+	•	If hit rate < 60% → maximum grade = 6/10
+	•	If hit rate < 50% → maximum grade = 5/10 (no bet territory)
+
+5. Downgrade When Simulation Shows Coin-Flip
+Faven simulation:
+	•	Over: 52%
+	•	Under: 48%
+	•	Edge: +0.0%
+This is a no-bet. Your bot got it right.
+But add this rule across the board:
+	•	If over probability 50-55% → max grade = 5/10 (thin edge, skip)
+	•	If over probability 55-60% → max grade = 6/10 (playable only if desperate)
+	•	If over probability 60-65% → 7/10
+	•	If over probability 65-70% → 8-9/10
+	•	If over probability 70%+ → potential 10/10 (if other signals confirm)
+
+6. Add Round-Volume Penalty
+Faven projected 42 rounds — that’s borderline. If you project under 42 rounds, you should:
+	•	Subtract 1-2 points from the grade
+	•	Or hard-cap at 7/10
+Add this:
+	•	Projected rounds < 40 → cap at 6/10
+	•	Projected rounds 40-42 → cap at 7/10
+	•	Projected rounds 42-44 → cap at 8/10
+	•	Projected rounds 44+ → no cap (can be 9-10 if other signals fire)
+
+7. Role + Map Pool Must Confirm
+Your bot shows:
+	•	Role: ⚡ Rifler
+	•	Map Pool: ➖ Neutral
+If role is neutral/weak AND map pool is neutral/weak → cap at 7/10 max, even if stats look good.
+Elite grades (9-10) should require:
+	•	Role = ⚡ Rifler, 🎯 Entry, or 🔫 AWPer
+	•	Map Pool = ✅ Favorable or 🔥 Strong
+
+
+High variance = inconsistent outcomes. If σ > 8.5:
+	•	Cap at 8/10 maximum
+Why? Because even if the avg/median look good, the player is too volatile to trust with a 10/10.
+
+9. Require Positive Edge for 8+ Grades
+Faven edge: +0.0%
+That’s a perfect no-bet. But make sure:
+	•	8/10 requires edge ≥ +4%
+	•	9/10 requires edge ≥ +6%
+	•	10/10 requires edge ≥ +8%
+If edge is near zero, grade should be 5/10 or lower (skip).
+
+10. Review Your “Player Mismatch” Logic
+The bot flagged:
+⚠️ PLAYER MISMATCH — Could not find Faven on the hinted team. Stats shown are for faven (big).
+This might be throwing off some grades. Make sure:
+	•	Player ID matching is tight
+	•	You’re not grading the wrong player
+	•	Team context is correctly pulled
+
+
+What to Keep (Your Bot Does Well)
+✅ 7/10 tier logic — 6W-2L (75%) is elite. Whatever you’re doing there, keep it.
+✅ Grade C / No Bet filtering — Faven is a perfect example of a correct skip.
+✅ Simulation engine — The Monte Carlo setup is solid. Just need to use the outputs better.
+✅ Stomp risk detection — You’re flagging it. Just need to make it veto elite grades.
+✅ Round projection — 42 rounds for Faven is reasonable given context.
+

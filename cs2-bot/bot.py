@@ -1969,10 +1969,17 @@ def build_result_embed(
         _vote_line  = f"`{_ov}🟢/{_uv}🔴` → {_vote_arrow}"
         if _pass_reason:
             _vote_line += f"  ·  ⏸️ {_pass_reason}"
+        # Tier-cap reasons (Apr 2026 overhaul)
+        _caps = _votes.get("caps_applied") or []
+        _pre_cap = _votes.get("pre_cap_grade")
+        _cap_line = ""
+        if _caps:
+            _cap_line = f"\n• **Tier caps:** pre-cap {_pre_cap}/10 · " + "; ".join(_caps[:3])
         robust_val = (
             f"• **Trimmed Avg:** `{_trim_avg:.1f}`  ·  **MAD-σ:** `{_sig_mad:.1f}`  ·  **IQR:** {_iqr_str}\n"
             f"• **Sample-shrink:** {_shrink_note}\n"
             f"• **Sub-signals:** {_vote_line}"
+            f"{_cap_line}"
         )
         embed.add_field(name="🛡️ ROBUSTNESS", value=robust_val, inline=False)
 
