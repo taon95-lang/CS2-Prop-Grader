@@ -1074,23 +1074,29 @@ def apply_post_simulation_caps(
     weighted_ceiling_pct: float | None = None,
     hit_rate: float | None = None,        # 0..1 over-side conversion
     stability_std: float | None = None,   # series σ
+    under_prob: float | None = None,      # 0..1 under-side simulator probability
 ) -> tuple[int, list[str]]:
     """
     Caps applied AFTER simulation, using info that wasn't available at sim time.
 
-    Asymmetric score gates (April 2026):
+    Asymmetric score gates (April 2026, refined):
       OVER  — strict: score ≥ 65 required (else AUTO NO BET).
-      UNDER — flexible: score ≥ 55 allowed IF all 3 confirmation triggers fire:
-                (a) both scenarios below line
-                (b) projection gap ≥ -10% vs line
-                (c) hit rate ≤ 40%   (i.e. under-conversion ≥ 60%)
-              UNDER score < 55 → AUTO NO BET regardless.
-              UNDER score 55-65 without confirmations → AUTO NO BET.
-              UNDER score ≥ 65 → allowed on score alone.
+      UNDER — flexible:
+        IF all 4 confirmation triggers fire:
+              (a) both scenarios below line
+              (b) projection gap ≤ -10% vs line
+              (c) hit rate ≤ 40%   (under conversion ≥ 60%)
+              (d) simulator under_prob ≥ 60%
+            → no AUTO NO BET; FORCE MIN GRADE = 6/10 at end (overrides caps).
+        ELSE IF score < 50 → AUTO NO BET.
+        ELSE 50 ≤ score < 65: allowed only with the original 3-trigger
+              confirmation set (a)+(b)+(c); else AUTO NO BET. Capped at 7.
+        ELSE score ≥ 65 → allowed on score alone.
 
-    FORCE UNDER trigger:
-      When all 3 UNDER confirmations fire AND variance is not extreme (σ ≤ 9),
-      force grade to a minimum of 7/10 (overrides earlier caps).
+    FORCE UNDER MIN 6 (4-trigger): bumps grade to a minimum of 6/10 when
+      (a)+(b)+(c)+(d) fire and σ ≤ 9. (The legacy 3-trigger FORCE MIN 7
+      was removed in the April 2026 refinement — it bumped grades without
+      requiring simulator agreement on under_prob.)
 
     Other gates retained: both-scenarios-fail OVER cap, ceiling sub-component
     requirement for elite, role + map-pool gate.
@@ -1129,8 +1135,10 @@ def apply_post_simulation_caps(
     )
     _gap_supports = (_proj_for_gap is not None and _gap_pct <= -10.0)
     _hr_supports  = (hit_rate is not None and hit_rate <= 0.40)
-    _all_under_triggers = bool(_both_fail and _gap_supports and _hr_supports)
-    _variance_extreme   = bool(stability_std is not None and stability_std > 9.0)
+    _under_prob_supports = (under_prob is not None and under_prob >= 0.60)
+    _all_under_triggers   = bool(_both_fail and _gap_supports and _hr_supports)
+    _all_under_triggers_4 = bool(_all_under_triggers and _under_prob_supports)
+    _variance_extreme     = bool(stability_std is not None and stability_std > 9.0)
 
     # Asymmetric 100-point weighted score gate
     if weighted_score_total is not None:
@@ -1141,18 +1149,23 @@ def apply_post_simulation_caps(
             elif ws < 75: cap(7, f"100-pt score {ws:.0f}<75")
             elif ws < 80 and g >= 9: cap(8, f"score {ws:.0f}<80 for elite")
         else:  # UNDER
-            # UNDER flexible — require ≥ 55 absolute floor, ≥ 65 OR confirmations
-            if ws < 55:
-                cap(3, f"AUTO NO BET — UNDER score {ws:.0f}<55")
+            if _all_under_triggers_4:
+                # 4-trigger path — NEVER NO BET, force min 6 enforced at end.
+                # Apply only the upper score caps (≥ 65 tier ladder).
+                if   ws < 70: cap(7, f"UNDER 4-trigger, score {ws:.0f}<70 → cap 7")
+                elif ws < 78 and g >= 9: cap(8, f"score {ws:.0f}<78 for elite")
+            elif ws < 50:
+                cap(3, f"AUTO NO BET — UNDER score {ws:.0f}<50")
             elif ws < 65:
+                # 50 ≤ ws < 65 — needs original 3-trigger confirmations
                 if not _all_under_triggers:
                     _missing = []
                     if not _both_fail:    _missing.append("both-fail")
-                    if not _gap_supports: _missing.append(f"gap≥-10% (got {_gap_pct:.0f}%)")
+                    if not _gap_supports: _missing.append(f"gap≤-10% (got {_gap_pct:.0f}%)")
                     if not _hr_supports:  _missing.append(f"HR≤40% (got {(hit_rate or 0)*100:.0f}%)")
                     cap(3, f"AUTO NO BET — UNDER {ws:.0f}<65 missing {','.join(_missing)}")
                 else:
-                    cap(7, f"UNDER {ws:.0f}<65 with confirmation → cap 7")
+                    cap(7, f"UNDER {ws:.0f}<65 with 3-trigger confirmation → cap 7")
             elif ws < 70: cap(7, f"100-pt score {ws:.0f}<70")
             elif ws < 78 and g >= 9: cap(8, f"score {ws:.0f}<78 for elite")
         # Ceiling-component requirement for elite tiers
@@ -1178,21 +1191,25 @@ def apply_post_simulation_caps(
         if neutral_pool:
             cap(8, "elite needs favorable map pool")
 
-    # ── FORCE UNDER min 7/10 — applied LAST so it overrides earlier caps ─────
-    # Triggers (all required): both scenarios fail + projection ≤ -10% vs line
-    # + hit rate ≤ 40%. Skipped when variance is extreme (σ > 9), and ALSO
-    # skipped when an AUTO NO BET cap fired (absolute score floor of 55 wins).
-    _no_bet_fired = any("AUTO NO BET" in c for c in caps)
+    # ── FORCE UNDER floor — applied LAST so it overrides earlier caps ──────
+    # 4-trigger FORCE → min 6/10. Requires all 4 confirmations (the original
+    # 3 PLUS simulator under_prob ≥ 60%). The 4-trigger score-gate path
+    # never fires AUTO NO BET, so no _no_bet_fired suppression is needed —
+    # but we still gate on extreme variance (σ > 9).
+    # NOTE: legacy 3-trigger FORCE MIN 7 was removed — the previous version
+    # bumped grades without requiring simulator agreement on under_prob,
+    # which violated the strict-gate philosophy. The new 4-trigger floor is
+    # stricter (4 conditions) and more conservative (min 6 instead of 7).
     if (decision == "UNDER"
-            and _all_under_triggers
+            and _all_under_triggers_4
             and not _variance_extreme
-            and not _no_bet_fired
-            and g < 7):
+            and g < 6):
         caps.append(
-            f"FORCE UNDER {g}→7 — all 3 triggers "
-            f"(gap {_gap_pct:.0f}%, HR {(hit_rate or 0)*100:.0f}%, both<line)"
+            f"FORCE UNDER {g}→6 — all 4 triggers "
+            f"(gap {_gap_pct:.0f}%, HR {(hit_rate or 0)*100:.0f}%, "
+            f"under_prob {(under_prob or 0)*100:.0f}%, both<line)"
         )
-        g = 7
+        g = 6
 
     return g, caps
 

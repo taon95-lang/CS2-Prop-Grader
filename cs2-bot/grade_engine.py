@@ -1013,9 +1013,20 @@ def compute_weighted_score_100(
         hr_detail += " ⚠️ penalty"
 
     # ── 3. Multi-kill (15 pts) ──────────────────────────────────────────────
-    mk_level   = multikill.get("level", "MEDIUM")
-    mk_score   = _level_to_unit(mk_level, invert=not is_over)
-    mk_detail  = f"{mk_level} multi-kill"
+    # OVER: standard scale (HIGH=1.0, MED=0.5, LOW=0.0).
+    # UNDER (April 2026): MK does NOT reduce score — floored at 0.5 (neutral).
+    #   LOW MK still earns the full positive signal (1.0 inverted), but
+    #   HIGH/MEDIUM MK is reported only as a variance flag, not a penalty.
+    mk_level = multikill.get("level", "MEDIUM")
+    if is_over:
+        mk_score  = _level_to_unit(mk_level, invert=False)
+        mk_detail = f"{mk_level} multi-kill"
+    else:
+        mk_unit   = _level_to_unit(mk_level, invert=True)   # LOW→1, MED→0.5, HIGH→0
+        mk_score  = max(0.5, mk_unit)                       # floor: never penalize
+        mk_detail = f"{mk_level} multi-kill"
+        if mk_level.upper() == "HIGH":
+            mk_detail += " ⚠️ variance flag (no penalty on UNDER)"
 
     # ── 4. Round swing (12 pts) ─────────────────────────────────────────────
     rs_level   = round_swing.get("level", "MEDIUM")

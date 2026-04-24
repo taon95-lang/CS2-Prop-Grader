@@ -1580,6 +1580,9 @@ def _analyze_player(
             _hr_pct  = sim_result.get("hit_rate")
             _hr_unit = (_hr_pct / 100.0) if isinstance(_hr_pct, (int, float)) else None
             _s_std   = sim_result.get("stability_std")
+            # under_prob stored as percentage 0..100; post-caps wants 0..1
+            _up_pct  = sim_result.get("under_prob")
+            _up_unit = (_up_pct / 100.0) if isinstance(_up_pct, (int, float)) else None
 
             _gnum_new, _new_caps = _post_caps(
                 grade_num=_gnum_old,
@@ -1594,6 +1597,7 @@ def _analyze_player(
                 weighted_ceiling_pct=_ws.get("ceiling_pct"),
                 hit_rate=_hr_unit,
                 stability_std=_s_std if isinstance(_s_std, (int, float)) else None,
+                under_prob=_up_unit,
             )
             # Distinguish NO BET (score-gated, drops to ≤3) from FORCE UNDER (raises to ≥7)
             _is_no_bet  = any("AUTO NO BET" in c for c in _new_caps) and _gnum_new <= 3
@@ -1611,8 +1615,8 @@ def _analyze_player(
                         f"(was {_decision} {_gnum_old}/10)"
                     )
                 elif _is_forced and _gnum_new > _gnum_old:
-                    # FORCE UNDER bumped grade up — relabel as Strong/Forced
-                    _glabel = "Forced UNDER (3 triggers)"
+                    # FORCE UNDER bumped grade up to min 6/10 (4 triggers)
+                    _glabel = "Forced UNDER (4 triggers)"
                     _new_grade_str = f"{_gnum_new}/10 ({_glabel})"
                     sim_result["grade"] = _new_grade_str
                     sim_result["recommendation"] = f"❌ UNDER — {_new_grade_str} 🔻"

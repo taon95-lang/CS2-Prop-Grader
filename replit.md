@@ -94,6 +94,20 @@ The `!grade` embed has a compact professional layout:
 - Reporting helpers in `bot.py`: `_is_skip_rec()` and `_is_directional_rec()` — used by `!result`, `!results`, `!calibration`, `!fetchresults` so NO_BET / PASS are excluded from win/loss math instead of being mis-counted as OVER losses
 - `settle_backlog.py` already buckets non-directional recs into `passes_w_outcome`
 
+### UNDER score gate (April 2026, refined)
+Located in `simulator.py::apply_post_simulation_caps`:
+- **4-trigger FORCE MIN 6/10** when ALL fire: (a) both scenarios below line + (b) projection gap ≤ -10% + (c) hit rate ≤ 40% + (d) simulator under_prob ≥ 60%. Floor enforced at end (overrides earlier caps), gated by σ ≤ 9.
+- **ELSE IF score < 50** → AUTO NO BET (lowered from 55).
+- **50 ≤ score < 65** → needs original 3-trigger confirmation set (a)+(b)+(c); else AUTO NO BET. Capped at 7.
+- **score ≥ 65** → allowed on score alone.
+- Legacy 3-trigger FORCE MIN 7 was removed (lacked simulator agreement check; bumped grades too aggressively).
+- OVER unchanged: strict ≥ 65 score gate, else AUTO NO BET.
+
+### MK (multi-kill) scoring asymmetry
+In `grade_engine.py::compute_weighted_score_100`:
+- OVER: standard scale (HIGH=15/15, MEDIUM=7.5/15, LOW=0/15).
+- UNDER: floored at neutral 0.5 — HIGH MK no longer penalizes (was 0/15, now 7.5/15) and is reported only as a variance flag in the detail line. LOW MK still earns full 15/15 (positive UNDER signal).
+
 ### Workflow
 - **Name:** `Elite CS2 Prop Grader Bot`
 - **Command:** `cd cs2-bot && python3 bot.py`
