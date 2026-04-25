@@ -4054,6 +4054,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "02bc44e5-69c1-4335-a909-3d978b3fe3d2",
+      "ts": 1777084010.78796,
+      "date": "2026-04-25",
+      "player": "kisserek",
+      "display": "kisserek",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "inner circle",
+      "over_pct": 50.0,
+      "under_pct": 50.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 30.8,
+      "hist_median": 37.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

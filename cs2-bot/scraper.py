@@ -1141,20 +1141,50 @@ def search_player_v2(
                 del _PLAYER_ID_CACHE[key]
 
     # 2. Live HLTV search
+    # Strategy: try direct first (fast, free). If it returns an empty/garbage
+    # page (CloudFlare interstitial that contains random famous-player links
+    # but no real match for our query), retry through ScraperAPI which always
+    # returns the canonical search-results page.
     url = f"{HLTV_BASE}/search?query={name}"
+
+    def _parse_candidates(_html: str) -> dict[str, str]:
+        seen_local: dict[str, str] = {}
+        for pid, slug in re.findall(r'/player/(\d+)/([\w-]+)', _html):
+            if pid not in seen_local:
+                seen_local[pid] = slug
+        return seen_local
+
+    def _best_score_of(cands: dict[str, str]) -> int:
+        if not cands:
+            return -1
+        return max(_score_player_match(name, pid, slug) for pid, slug in cands.items())
+
     html = _fetch(url)
-    if not html:
-        return None
+    seen: dict[str, str] = _parse_candidates(html) if html else {}
 
-    matches = re.findall(r'/player/(\d+)/([\w-]+)', html)
-    if not matches:
-        logger.warning(f"[search] No player found for '{name}'")
-        return None
+    # Direct returned nothing useful — retry via ScraperAPI before giving up.
+    # _SEARCH_VIA_SCRAPERAPI_THRESHOLD: substring match scores 100; below that
+    # is positional-character overlap which is essentially noise for unique
+    # nicknames. If the best direct match scores under 100, the page is almost
+    # certainly a CF interstitial and the real player is on a different page.
+    if _best_score_of(seen) < 100:
+        logger.warning(
+            f"[search] Direct search returned no real match for '{name}' "
+            f"(best score={_best_score_of(seen)}) — retrying via ScraperAPI"
+        )
+        sa_html = _fetch_via_scraperapi(url, referer=HLTV_BASE)
+        if sa_html:
+            sa_seen = _parse_candidates(sa_html)
+            if _best_score_of(sa_seen) > _best_score_of(seen):
+                logger.info(
+                    f"[search] ScraperAPI fallback found {len(sa_seen)} candidates "
+                    f"(best score={_best_score_of(sa_seen)}) — using these"
+                )
+                seen = sa_seen
 
-    seen: dict[str, str] = {}
-    for pid, slug in matches:
-        if pid not in seen:
-            seen[pid] = slug
+    if not seen:
+        logger.warning(f"[search] No player found for '{name}' (direct + ScraperAPI both empty)")
+        return None
 
     # Score all candidates by name similarity, best first.
     # Tiebreaker: higher player_id wins — HLTV assigns IDs sequentially so a
@@ -1168,6 +1198,22 @@ def search_player_v2(
     )
 
     if not scored:
+        return None
+
+    # Hard confidence floor: refuse to grade if no candidate is at least a
+    # substring match (score ≥ 100). Anything below that is HLTV returning
+    # generic results unrelated to the query, and silently picking the
+    # closest junk match (e.g. "shock" → Karrigan score=0) was a recurring
+    # source of "estimated stats" fallbacks and wasted ScraperAPI credits.
+    _SEARCH_MIN_SCORE = 100
+    top_real_score = scored[0][2]
+    if top_real_score < _SEARCH_MIN_SCORE:
+        logger.warning(
+            f"[search] Refusing low-confidence match for '{name}' — "
+            f"best candidate {scored[0][1]} (id={scored[0][0]}) scored "
+            f"{top_real_score}, below threshold {_SEARCH_MIN_SCORE}. "
+            f"Player likely doesn't exist on HLTV under this nickname."
+        )
         return None
 
     best_pid, best_slug, best_score = None, None, -1
