@@ -177,6 +177,144 @@ def _norm_team_for_dedup(raw: str | None) -> str:
     return s or "?"
 
 
+def _db_plays_in_window(hours: float) -> list[dict]:
+    """
+    Load plays from the persistent grades_history.json into the same shape
+    that SLIP_CACHE entries use, for the last `hours` hours.
+
+    Why: SLIP_CACHE is in-memory only and is wiped on every bot restart.
+    Users still expect their previously-graded plays to be available to
+    !slip / !autoslip, since those plays are saved to disk via save_grade().
+
+    Field mapping (DB → cache shape):
+      display       → player
+      (none)        → team           ("" → normalizer turns it into "?")
+      opponent      → opponent
+      line, stat    → line, stat
+      recommendation→ decision       (NO_BET → "NO BET")
+      grade (1-10)  → grade (numeric) and letter_grade (A/B/C/D)
+      over_pct      → over_prob (0–100)
+      under_pct     → under_prob
+      ts            → ts
+
+    edge_percent is approximated as |max(over_pct, under_pct) - 50| because
+    PrizePicks lines are roughly 50/50 implied; this is a conservative
+    estimate good enough for the strict ≥6% gate.
+
+    Team handling: the persistent DB never stored team data, and we can't
+    recover it after the fact without re-scraping. To keep DB-loaded plays
+    usable in slips, we assign each one a UNIQUE per-player team key like
+    'dbplay_<player>'. The downside is that two DB plays from the same
+    actual team won't be blocked by the same-team filter — but the
+    alternative is shipping zero slips from history, which is worse for
+    the user. (Fresh in-memory cache plays still use the safer
+    collapse-to-'?' behavior, since the scraper had a chance to detect
+    team and we don't want to silently mask its failures there.)
+    """
+    try:
+        # We want anything in the window — including pending / NO_BET — and let
+        # the slip builder's gates filter. Use a generous lookback (hours/24 + 1
+        # days) on top of get_recent_entries which is days-based.
+        days_lookback = max(1, int((hours / 24.0) + 1.0))
+        recent = get_recent_entries(days=days_lookback)
+    except Exception as exc:
+        logger.warning(f"[slip] failed to load grades_db: {exc}")
+        return []
+
+    cutoff = _time.time() - (hours * 3600.0)
+    out: list[dict] = []
+    for e in recent:
+        ts = float(e.get("ts") or 0.0)
+        if ts < cutoff:
+            continue
+
+        # Map recommendation → decision token used by the slip builder
+        raw_rec = str(e.get("recommendation") or "").upper()
+        if "NO" in raw_rec:           # NO_BET, NO BET
+            decision = "NO BET"
+        elif "OVER" in raw_rec:
+            decision = "OVER"
+        elif "UNDER" in raw_rec:
+            decision = "UNDER"
+        else:
+            decision = "NO BET"
+
+        # Numeric grade (1-10) → letter grade for the strict A/B gate.
+        # The persistent DB stores grade in the same shape that sim_result
+        # returns it: usually the string "N/10" (e.g. "8/10"), occasionally
+        # a bare int. Parse both forms.
+        g_raw = e.get("grade")
+        grade_int = 0
+        if isinstance(g_raw, (int, float)):
+            grade_int = int(g_raw)
+        elif isinstance(g_raw, str):
+            try:
+                grade_int = int(g_raw.split("/", 1)[0].strip())
+            except (ValueError, AttributeError):
+                grade_int = 0
+        if   grade_int >= 9: letter = "A"
+        elif grade_int >= 7: letter = "B"
+        elif grade_int >= 5: letter = "C"
+        else:                letter = "D"
+
+        op = e.get("over_pct")
+        up = e.get("under_pct")
+        over_pct  = float(op) if isinstance(op, (int, float)) else 0.0
+        under_pct = float(up) if isinstance(up, (int, float)) else 0.0
+        # Approximate edge from the larger side (~50% implied)
+        edge_pct = max(0.0, max(over_pct, under_pct) - 50.0)
+
+        # Unique-per-player team key so two DB plays don't collide in the
+        # same-team filter (see docstring above for the trade-off).
+        import re as _re
+        player_norm = _re.sub(
+            r"[^a-z0-9]",
+            "",
+            (e.get("display") or e.get("player") or "x").lower(),
+        ) or "x"
+        out.append({
+            "ts":           ts,
+            "player":       e.get("display") or e.get("player") or "?",
+            "team":         f"dbplay_{player_norm}",
+            "opponent":     (e.get("opponent") or "?").strip() or "?",
+            "line":         float(e.get("line") or 0.0),
+            "stat":         e.get("stat") or "kills",
+            "decision":     decision,
+            "grade":        grade_int,
+            "letter_grade": letter,
+            "edge_percent": edge_pct,
+            "over_prob":    over_pct,
+            "under_prob":   under_pct,
+            "_source":      "db",
+        })
+    return out
+
+
+def _merge_pools(memory_pool: list[dict], db_pool: list[dict]) -> list[dict]:
+    """
+    Merge the in-memory SLIP_CACHE pool with DB-loaded plays.
+    Dedup key: (lower(player), round(line, 2), lower(stat)).
+    Prefer the in-memory entry when both exist (it has team + real edge).
+    """
+    seen: dict[tuple, dict] = {}
+    for p in memory_pool:
+        key = (
+            str(p.get("player") or "").lower(),
+            round(float(p.get("line") or 0.0), 2),
+            str(p.get("stat") or "").lower(),
+        )
+        seen[key] = p
+    for p in db_pool:
+        key = (
+            str(p.get("player") or "").lower(),
+            round(float(p.get("line") or 0.0), 2),
+            str(p.get("stat") or "").lower(),
+        )
+        if key not in seen:
+            seen[key] = p
+    return list(seen.values())
+
+
 def _cache_play_for_slip(
     player: str,
     team: str | None,
@@ -4318,15 +4456,20 @@ async def cmd_slip(ctx, *args):
         ))
         return
 
-    # Filter cache by time window
+    # Filter cache by time window, then merge with persistent grades_db so
+    # plays graded before the last bot restart still show up here.
     cutoff = _time.time() - (hours * 3600)
-    pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+    mem_pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+    db_pool  = _db_plays_in_window(hours)
+    pool = _merge_pools(mem_pool, db_pool)
+    n_from_db = len(pool) - len(mem_pool)
 
     if len(pool) < 2:
         await ctx.send(embed=discord.Embed(
             title="📭 Not enough plays cached",
             description=(
-                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h**.\n"
+                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h** "
+                f"(memory: {len(mem_pool)}, history file: {len(db_pool)}).\n"
                 f"Run `!grade`, `!pp`, `!parlay`, or `!teamscan` first to populate the cache, "
                 f"then come back to `!slip`."
             ),
@@ -4351,7 +4494,12 @@ async def cmd_slip(ctx, *args):
         raw_team = p.get("team") or ""
         norm_team = _norm_team_for_dedup(raw_team)
         # Display: keep original if known, else show '?'
-        disp_team = raw_team.strip() if raw_team and not str(raw_team).startswith("?") else "?"
+        # Display team: hide the synthetic 'dbplay_*' marker used for
+        # DB-loaded plays (those have no real team data) — show '?' instead.
+        if raw_team and not str(raw_team).startswith("?") and not str(raw_team).startswith("dbplay_"):
+            disp_team = raw_team.strip()
+        else:
+            disp_team = "?"
         adapted_pool.append({
             "player":     p.get("player") or "?",
             "team":       norm_team,         # used by no-same-team filter
@@ -4492,15 +4640,20 @@ async def cmd_autoslip(ctx, *args):
         ))
         return
 
-    # Filter cache by time window
+    # Filter cache by time window, then merge with persistent grades_db so
+    # plays graded before the last bot restart still show up here.
     cutoff = _time.time() - (hours * 3600)
-    pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+    mem_pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+    db_pool  = _db_plays_in_window(hours)
+    pool = _merge_pools(mem_pool, db_pool)
+    n_from_db = len(pool) - len(mem_pool)
 
     if len(pool) < 2:
         await ctx.send(embed=discord.Embed(
             title="📭 Not enough plays cached",
             description=(
-                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h**.\n"
+                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h** "
+                f"(memory: {len(mem_pool)}, history file: {len(db_pool)}).\n"
                 f"Run `!grade`, `!pp`, `!parlay`, or `!teamscan` first to populate "
                 f"the cache, then come back to `!autoslip`."
             ),
@@ -4520,7 +4673,12 @@ async def cmd_autoslip(ctx, *args):
         up = float(p.get("under_prob") or 0.0)
         raw_team = p.get("team") or ""
         norm_team = _norm_team_for_dedup(raw_team)
-        disp_team = raw_team.strip() if raw_team and not str(raw_team).startswith("?") else "?"
+        # Hide the synthetic 'dbplay_*' marker used for DB-loaded plays
+        # (no real team data) — show '?' instead.
+        if raw_team and not str(raw_team).startswith("?") and not str(raw_team).startswith("dbplay_"):
+            disp_team = raw_team.strip()
+        else:
+            disp_team = "?"
         adapted_pool.append({
             "player":     p.get("player") or "?",
             "team":       norm_team,         # used by no-same-team filter
