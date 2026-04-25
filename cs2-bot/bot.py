@@ -1900,6 +1900,40 @@ def _fmt_comp(comps: dict, key: str, lbl: str) -> str | None:
     return f"`{lbl}` {s}{p}%"
 
 
+def build_final_summary(props: list[dict]) -> str:
+    """
+    Build a clean one-line-per-prop final summary block.
+
+    Each prop dict needs:
+      player, line, opponent, over_prob, under_prob, grade, decision
+
+    Decision is one of OVER / UNDER / NO BET / PASS — for OVER/UNDER we show
+    that side's probability; otherwise we show whichever side is stronger.
+    """
+    output = ["🏁 FINAL PROP SUMMARY (Maps 1+2)\n"]
+    for p in props:
+        decision = p.get("decision", "PASS")
+        over_p   = float(p.get("over_prob")  or 0.0)
+        under_p  = float(p.get("under_prob") or 0.0)
+
+        if decision == "OVER":
+            pct = over_p
+        elif decision == "UNDER":
+            pct = under_p
+        else:
+            pct = max(over_p, under_p)
+
+        line = (
+            f"{p.get('player','?')} vs {p.get('opponent','?')} | "
+            f"Line: {p.get('line','?')} | "
+            f"{decision} {pct:.1f}% | "
+            f"Grade: {p.get('grade','?')}"
+        )
+        output.append(line)
+
+    return "\n".join(output)
+
+
 def build_result_embed(
     player_name: str, line: float, stat_type: str, result: dict
 ) -> discord.Embed:
@@ -4171,6 +4205,29 @@ async def cmd_parlay(ctx, team_name: str = "", *, extra: str = ""):
     )
     embed.set_footer(text="Correlated Parlay  ·  Esports Betting Guru  ·  EV+ Focus · Data-Driven  ·  Not financial advice")
     await ctx.send(embed=embed)
+
+    # ── Final clean one-line-per-prop summary (across ALL graded legs) ───
+    summary_props: list[dict] = []
+    for r in graded:
+        if "error" in r:
+            continue
+        job = r.get("_job", {})
+        summary_props.append({
+            "player":     job.get("player", "?"),
+            "line":       job.get("line", "?"),
+            "opponent":   job.get("opponent", "") or opponent_name or "?",
+            "over_prob":  r.get("over_prob",  0.0),
+            "under_prob": r.get("under_prob", 0.0),
+            "grade":      r.get("grade", "?"),
+            "decision":   r.get("decision", "PASS"),
+        })
+
+    if summary_props:
+        summary_text = build_final_summary(summary_props)
+        # Discord 2000-char message limit — chunk if needed
+        for chunk_start in range(0, len(summary_text), 1900):
+            chunk = summary_text[chunk_start : chunk_start + 1900]
+            await ctx.send(f"```\n{chunk}\n```")
 
 
 # ---------------------------------------------------------------------------
