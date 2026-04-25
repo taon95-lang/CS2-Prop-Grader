@@ -1247,8 +1247,22 @@ def search_player_v2(
             return None   # Caller will try roster lookup or raise RuntimeError
 
     elif opp_hint_norm:
-        # Try each candidate; pick first whose match history includes the opponent
-        for pid, slug, score in scored:
+        # Only consider candidates whose NAME actually matches the query
+        # (score ≥ 100 = substring/exact match). Without this filter, a
+        # famous unrelated player whose history happens to contain the
+        # opponent slug as a substring (e.g. Karrigan's FaZe history vs
+        # Inner Circle in qualifiers) would beat a real but lower-history
+        # name match like the actual "shock" player.
+        name_matches = [(pid, slug, sc) for pid, slug, sc in scored if sc >= _SEARCH_MIN_SCORE]
+        if not name_matches:
+            logger.warning(
+                f"[search] No name-matching candidates ≥{_SEARCH_MIN_SCORE} for '{name}'"
+            )
+            return None
+
+        # Try each name-matching candidate; pick first whose match history
+        # also includes the opponent — that's the strongest signal.
+        for pid, slug, score in name_matches:
             if _player_has_opponent_in_history(pid, opp_hint_norm):
                 best_pid, best_slug, best_score = pid, slug, score
                 logger.info(
@@ -1262,11 +1276,28 @@ def search_player_v2(
                     f"has NO matches vs '{opponent_hint}'"
                 )
         if best_pid is None:
+            # No name-matching candidate also has the opponent in history.
+            # Among the name-matching candidates, prefer the one with an
+            # upcoming match (active player) over inactive ones. This handles
+            # the common case where the opponent is a tier-3 team the player
+            # has never faced before but is about to.
             logger.warning(
-                f"[search] No candidate with matches vs '{opponent_hint}' — "
-                f"falling back to best name match"
+                f"[search] No name-match candidate has history vs '{opponent_hint}' — "
+                f"selecting active candidate by upcoming-match check"
             )
-            best_pid, best_slug, best_score = scored[0]
+            for pid, slug, sc in name_matches:
+                if _player_has_upcoming_match(pid):
+                    best_pid, best_slug, best_score = pid, slug, sc
+                    logger.info(
+                        f"[search] Active candidate selected: slug={slug} (id={pid})")
+                    break
+            if best_pid is None:
+                # Final fallback: highest-scored name match (already sorted desc)
+                best_pid, best_slug, best_score = name_matches[0]
+                logger.info(
+                    f"[search] No active candidate — using best name match: "
+                    f"slug={best_slug} (id={best_pid})"
+                )
 
     else:
         # No hints at all.  When multiple candidates share the same top name
