@@ -999,14 +999,33 @@ def _score_player_match(name: str, pid: str, slug: str) -> int:
     return sum(1 for a, b in zip(name_lower, slug_lower) if a == b)
 
 
-def _player_has_opponent_in_history(pid: str, opponent_norm: str) -> bool:
+def _player_has_opponent_in_history(
+    pid: str,
+    opponent_norm: str,
+    slug_hint: str | None = None,
+) -> bool:
     """
-    Fetch /results?player={pid} and return True if any match slug contains
-    the normalised opponent name.  Used to validate we have the right player
-    when the team name isn't known but the opponent is.
+    Return True if the player's profile lists the opponent in any match link
+    (upcoming OR past). This is player-specific data — unlike /matches?player=
+    which actually returns the global upcoming-matches page ignoring the
+    filter, the /player/{pid}/{slug} profile page lists only that player's
+    own matches & schedule, making it a reliable disambiguation signal.
+
+    Used when the team name isn't known but the opponent is (e.g. !grade
+    where the user passes only "shock vs Inner Circle").
+
+    The slug_hint speeds up the URL build; if absent we fall back to "_".
+    HLTV redirects /player/{pid}/{anything} to the canonical slug, so the
+    slug value in the URL doesn't have to be exact.
     """
-    html = _fetch(f"{HLTV_BASE}/results?player={pid}")
+    slug = slug_hint or "_"
+    html = _fetch(f"{HLTV_BASE}/player/{pid}/{slug}")
     if not html:
+        # Refuse to degrade to /results?player= or /matches?player= here —
+        # both endpoints return the GLOBAL page (filter is silently ignored),
+        # so any "match" against the opponent norm would be a false positive
+        # that mis-resolves the player. Better to return False (no evidence)
+        # and let the caller fall back to score-based tiebreaking.
         return False
     slugs = re.findall(r'/matches/\d+/([\w-]+)', html)
     return any(opponent_norm in re.sub(r'[^a-z0-9]', '', s) for s in slugs)
@@ -1127,7 +1146,7 @@ def search_player_v2(
                 return pid, slug, display
         elif opp_hint_norm:
             # Validate via match history: does this player have games vs the opponent?
-            if _player_has_opponent_in_history(pid, opp_hint_norm):
+            if _player_has_opponent_in_history(pid, opp_hint_norm, slug_hint=slug):
                 logger.info(
                     f"[search] Cache hit (opponent verified): {display} "
                     f"(id={pid}) has matches vs '{opponent_hint}'"
@@ -1263,7 +1282,7 @@ def search_player_v2(
         # Try each name-matching candidate; pick first whose match history
         # also includes the opponent — that's the strongest signal.
         for pid, slug, score in name_matches:
-            if _player_has_opponent_in_history(pid, opp_hint_norm):
+            if _player_has_opponent_in_history(pid, opp_hint_norm, slug_hint=slug):
                 best_pid, best_slug, best_score = pid, slug, score
                 logger.info(
                     f"[search] Opponent-matched: slug={slug} (id={pid}) "
@@ -2713,8 +2732,21 @@ def get_player_stats_matches(
     logger.info(f"[stats_matches] Fetching {url}")
     html = _fetch(url)
     if not html:
-        logger.info(f"[stats_matches] No HTML returned for {player_slug} — likely blocked")
-        return None
+        # Direct fetch was blocked (typically all 6 curl_cffi profiles 403'd
+        # because HLTV's /stats/ subdomain is locked down). Retry through
+        # ScraperAPI which handles the CloudFlare challenge.
+        logger.warning(
+            f"[stats_matches] Direct fetch blocked for {player_slug} — "
+            f"retrying via ScraperAPI"
+        )
+        html = _fetch_via_scraperapi(url, referer=HLTV_BASE)
+        if not html:
+            logger.info(
+                f"[stats_matches] No HTML returned for {player_slug} — "
+                f"both direct and ScraperAPI blocked"
+            )
+            return None
+        logger.info(f"[stats_matches] ✅ Recovered via ScraperAPI for {player_slug}")
 
     soup = BeautifulSoup(html, "lxml")
     table = soup.find("table", {"class": "stats-table"})
@@ -2722,65 +2754,121 @@ def get_player_stats_matches(
         logger.info(f"[stats_matches] No stats-table found for {player_slug}")
         return None
 
-    # ── Detect column indices from header ──────────────────────────────────
+    # ── Header inspection (logged for debugging only) ──────────────────────
     thead = table.find("thead")
     header_cells = thead.find_all("th") if thead else []
     headers = [th.get_text(strip=True).lower() for th in header_cells]
-    n_headers = len(headers)
-    logger.info(f"[stats_matches] Headers ({n_headers}): {headers}")
+    logger.info(f"[stats_matches] Headers ({len(headers)}): {headers}")
 
-    map_col    = 1    # default — HLTV stats/matches typically: date|map|event|opponent|result|K(hs)|…
-    result_col = 3
-    khs_col    = 4
-
-    for i, h in enumerate(headers):
-        h_clean = h.strip()
-        if h_clean == "map" and map_col == 1:
-            map_col = i
-        if h_clean in ("result", "res") and result_col == 3:
-            result_col = i
-        # "k (hs)" or "k" column containing headshots
-        if ("k" in h_clean and "hs" in h_clean) or h_clean == "k":
-            khs_col = i
-
-    logger.info(
-        f"[stats_matches] col indices — map:{map_col} result:{result_col} k_hs:{khs_col}"
-    )
-
-    # ── Parse rows ─────────────────────────────────────────────────────────
     tbody = table.find("tbody")
     if not tbody:
         return None
-    all_rows = tbody.find_all("tr")
+    all_rows = [r for r in tbody.find_all("tr") if r.find_all("td")]
+    if not all_rows:
+        return None
 
-    # Each "full" row has n_headers tds (including date with rowspan).
-    # "Continuation" rows (covered by rowspan) have n_headers-1 tds — date cell absent.
-    # Strategy: when a row has fewer tds than the full width, all column indices shift -1.
+    # ── Content-aware column detection ─────────────────────────────────────
+    # HLTV's stats-table layout has shifted: header count (9: date|player team|
+    # opponent|t1|t2|map|k - d|+/-|rating) does NOT match actual cell count
+    # (7) because t1/t2 scores are embedded in the team cells as "TEAM(NN)".
+    # Header-index lookup is unreliable; detect columns by content of the
+    # first valid row instead.
+    DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+    TEAM_RE = re.compile(r"^.+?\((\d{1,2})\)$")          # e.g. "SINNERS(13)"
+    KD_RE   = re.compile(r"^(\d{1,3})\s*-\s*(\d{1,3})$") # e.g. "21 - 18"
+    # 3-letter map abbreviations HLTV uses
+    MAP_ABBR = {
+        "mrg": "mirage", "inf": "inferno", "nuke": "nuke", "d2": "dust2",
+        "anc": "ancient", "ovp": "overpass", "vrt": "vertigo", "trn": "train",
+        "tra": "train",
+    }
+
+    def _is_map_text(t: str) -> str | None:
+        tl = t.lower()
+        if tl in _CS2_MAPS_SET:
+            return tl
+        if tl in MAP_ABBR:
+            return MAP_ABBR[tl]
+        return None
+
+    date_col = team_col = opp_col = map_col = kd_col = -1
+
+    # Probe up to first 5 rows to find a row that contains all field types
+    for probe_row in all_rows[:5]:
+        pcells = probe_row.find_all("td")
+        d_c = t_c = o_c = m_c = k_c = -1
+        for j, c in enumerate(pcells):
+            txt = c.get_text(strip=True)
+            if d_c == -1 and DATE_RE.match(txt):
+                d_c = j
+            elif _is_map_text(txt) is not None and m_c == -1:
+                m_c = j
+            elif KD_RE.match(txt) and k_c == -1:
+                a, b = (int(x) for x in KD_RE.match(txt).groups())
+                if 3 <= a <= 80 and 3 <= b <= 80:   # plausible kills/deaths
+                    k_c = j
+            elif TEAM_RE.match(txt):
+                if t_c == -1:
+                    t_c = j
+                elif o_c == -1:
+                    o_c = j
+        if m_c >= 0 and k_c >= 0:
+            date_col, team_col, opp_col, map_col, kd_col = d_c, t_c, o_c, m_c, k_c
+            break
+
+    if map_col < 0 or kd_col < 0:
+        logger.info(
+            f"[stats_matches] Could not auto-detect map/kd columns for {player_slug}"
+        )
+        return None
+
+    logger.info(
+        f"[stats_matches] Detected cols — date:{date_col} team:{team_col} "
+        f"opp:{opp_col} map:{map_col} k-d:{kd_col}"
+    )
+
+    # ── Parse rows ─────────────────────────────────────────────────────────
     parsed_maps: list[dict] = []
-    match_counter = 0
 
     for row in all_rows:
         cells = row.find_all("td")
-        if not cells:
-            continue
-
-        # Determine col offset — continuation rows lack the date/leading cell
-        offset = 0
-        if n_headers > 0 and len(cells) < n_headers:
-            # Missing leading column(s) — shift indices left by the difference
-            offset = -(n_headers - len(cells))
 
         def _get(col_idx: int) -> str:
-            idx = col_idx + offset
-            if 0 <= idx < len(cells):
-                return cells[idx].get_text(strip=True)
+            if 0 <= col_idx < len(cells):
+                return cells[col_idx].get_text(strip=True)
             return ""
 
-        # Detect new series start: full row restores the date cell
-        if len(cells) >= n_headers or n_headers == 0:
-            match_counter += 1
+        # Map name
+        map_name = _is_map_text(_get(map_col))
+        if not map_name:
+            # Fallback: scan every cell
+            for c in cells:
+                map_name = _is_map_text(c.get_text(strip=True))
+                if map_name:
+                    break
+        if not map_name:
+            continue
 
-        # Also try to extract a real match ID from any embedded link
+        # Kills from "K - D" cell (e.g. "21 - 18")
+        kd_text = _get(kd_col)
+        kd_m = KD_RE.match(kd_text)
+        kills = deaths = None
+        if kd_m:
+            kills, deaths = int(kd_m.group(1)), int(kd_m.group(2))
+        if kills is None:
+            # Fallback scan
+            for c in cells:
+                ct = c.get_text(strip=True)
+                m = KD_RE.match(ct)
+                if m:
+                    a, b = int(m.group(1)), int(m.group(2))
+                    if 3 <= a <= 80 and 3 <= b <= 80:
+                        kills, deaths = a, b
+                        break
+        if kills is None:
+            continue
+
+        # Try real match-id link if present (older layout sometimes still exposes it)
         real_match_id: str | None = None
         for cell in cells:
             a = cell.find("a", href=re.compile(r"/matches/\d+/"))
@@ -2790,59 +2878,39 @@ def get_player_stats_matches(
                     real_match_id = m.group(1)
                     break
 
-        # Map name
-        map_name = _get(map_col).lower()
-        if map_name not in _CS2_MAPS_SET:
-            # Try every cell for a map name
-            map_name = next(
-                (c.get_text(strip=True).lower()
-                 for c in cells
-                 if c.get_text(strip=True).lower() in _CS2_MAPS_SET),
-                None,
-            )
-        if not map_name:
-            continue
+        # Rounds — derive from team cells "TEAM(NN)" pattern
+        rounds = None
+        t1_score = t2_score = None
+        if team_col >= 0:
+            tm = TEAM_RE.match(_get(team_col))
+            if tm:
+                t1_score = int(tm.group(1))
+        if opp_col >= 0:
+            om = TEAM_RE.match(_get(opp_col))
+            if om:
+                t2_score = int(om.group(1))
+        if t1_score is not None and t2_score is not None:
+            r = t1_score + t2_score
+            if 16 <= r <= 50:
+                rounds = r
+        if rounds is None:
+            # Last resort: kills + deaths approximate rounds (loose)
+            rounds = kills + deaths if (kills + deaths) >= 16 else 22
 
-        # Rounds from result ("16 - 12", "W (16:12)", etc.)
-        result_text = _get(result_col)
-        nums = re.findall(r"\d+", result_text[:25])
-        if len(nums) >= 2:
-            rounds = sum(int(n) for n in nums[:2])
-            if rounds < 16 or rounds > 50:   # sanity check
-                rounds = 22
-        else:
-            rounds = 22
-
-        # Kills and headshots from "K (hs)" cell
-        k_hs_text = _get(khs_col)
-        k_match = re.search(r"(\d+)\s*\((\d+)\)", k_hs_text)
-        if k_match:
-            kills     = int(k_match.group(1))
-            headshots = int(k_match.group(2))
-        else:
-            # Fallback: scan every cell for "N (M)" pattern
-            kills = headshots = None
-            for cell in cells:
-                ct = cell.get_text(strip=True)
-                m2 = re.search(r"(\d+)\s*\((\d+)\)", ct)
-                if m2:
-                    kills     = int(m2.group(1))
-                    headshots = int(m2.group(2))
-                    break
-            if kills is None:
-                # Last resort: parse a plain integer from khs cell
-                k_only = re.search(r"(\d+)", k_hs_text)
-                kills = int(k_only.group(1)) if k_only else None
-            if kills is None:
-                continue
-
-        mid_str = real_match_id or f"sm{match_counter:04d}"
+        # Series key: prefer real match_id; otherwise (date, opponent_team_name).
+        # The new HLTV layout has no per-row match link, so two maps from the
+        # same series share (date, opponent) — that's our grouping key.
+        date_text = _get(date_col).strip()
+        opp_text = _get(opp_col).strip()
+        # Strip "(NN)" score suffix from opponent for stable grouping
+        opp_team_only = re.sub(r"\(\d+\)$", "", opp_text).strip().lower()
+        series_key = real_match_id or f"{date_text}|{opp_team_only}"
 
         parsed_maps.append({
-            "match_id":  mid_str,
+            "match_id":  series_key,
             "map_name":  map_name,
             "kills":     kills,
-            "headshots": headshots,
+            "headshots": None,   # not available in new layout
             "rounds":    rounds,
         })
 
@@ -2854,13 +2922,31 @@ def get_player_stats_matches(
         f"[stats_matches] Parsed {len(parsed_maps)} raw map rows for {player_slug}"
     )
 
-    # ── Group into series (consecutive maps sharing the same match_id) ─────
-    # Preserve order (newest first from HLTV) — group by match_id runs.
+    # ── Group into series (consecutive maps sharing the same series_key) ───
+    # When match-id is absent we fall back to "(date|opponent)" as the series
+    # key (see series_key construction above). Edge case: if a player faces
+    # the same opponent twice in one day (back-to-back BO3s) those 4-6 maps
+    # would collapse into one over-sized "series" and the BO3-truncation
+    # below would silently drop maps from the second match. Detect groups
+    # with >3 maps and split them into 2-map BO3 chunks (CS2 BO3s have at
+    # most 3 maps; any 4th map of the same key implies a new series).
     from itertools import groupby as _groupby
 
     series_list: list[list[dict]] = []
     for _mid, group in _groupby(parsed_maps, key=lambda x: x["match_id"]):
-        series_list.append(list(group))
+        gmaps = list(group)
+        # Real numeric match-ids are trustworthy — keep as-is.
+        if gmaps and gmaps[0]["match_id"].isdigit():
+            series_list.append(gmaps)
+            continue
+        # Synthetic (date|opp) key: defensively split any group >3 maps
+        # into 3-map chunks. This preserves Maps 1&2 of every back-to-back
+        # series instead of dropping them silently.
+        if len(gmaps) > 3:
+            for i in range(0, len(gmaps), 3):
+                series_list.append(gmaps[i : i + 3])
+        else:
+            series_list.append(gmaps)
 
     # ── Build map_stats output ─────────────────────────────────────────────
     is_hs = stat_type.lower() in ("headshots", "hs")

@@ -4075,6 +4075,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "5d0baa48-cf23-4860-9ff5-b870ded73698",
+      "ts": 1777084868.177569,
+      "date": "2026-04-25",
+      "player": "shock",
+      "display": "shock",
+      "line": 26.5,
+      "stat": "Kills",
+      "opponent": "inner circle",
+      "over_pct": 60.0,
+      "under_pct": 40.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 30.3,
+      "hist_median": 31.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
