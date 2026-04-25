@@ -4418,6 +4418,111 @@ async def cmd_slip(ctx, *args):
 
 
 # ---------------------------------------------------------------------------
+# !autoslip — raw value-weighted slip output (top-N, configurable)
+# ---------------------------------------------------------------------------
+
+@bot.command(name="autoslip", aliases=["auto", "as", "topslips"])
+async def cmd_autoslip(ctx, *args):
+    """
+    !autoslip [hours] [top_n] [max_legs]
+
+    Auto-build the top-N value-weighted slips from your recently-graded
+    plays. Same strict gates as !slip (A/B grade, prob ≥ 65%, edge ≥ 6%,
+    no NO BET, no same team) but shows raw text output with the top N
+    slips (not just one per leg-size).
+
+    Defaults: hours = 24, top_n = 5, max_legs = 4.
+
+    Examples:
+      !autoslip              ← last 24h, top 5 slips, up to 4-leg
+      !autoslip 12           ← last 12h
+      !autoslip 24 10        ← last 24h, top 10 slips
+      !autoslip 24 10 3      ← last 24h, top 10, 2- and 3-leg only
+    """
+    # Parse args
+    hours    = 24.0
+    top_n    = 5
+    max_legs = 4
+    try:
+        if len(args) >= 1: hours    = max(0.5, float(args[0]))
+        if len(args) >= 2: top_n    = max(1, min(25, int(args[1])))
+        if len(args) >= 3: max_legs = max(2, min(4, int(args[2])))
+    except ValueError:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Bad arguments",
+            description=(
+                "Usage: `!autoslip [hours] [top_n] [max_legs]`\n"
+                "Example: `!autoslip 24 10 4`"
+            ),
+            color=0xFF4136,
+        ))
+        return
+
+    # Filter cache by time window
+    cutoff = _time.time() - (hours * 3600)
+    pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+
+    if len(pool) < 2:
+        await ctx.send(embed=discord.Embed(
+            title="📭 Not enough plays cached",
+            description=(
+                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h**.\n"
+                f"Run `!grade`, `!pp`, `!parlay`, or `!teamscan` first to populate "
+                f"the cache, then come back to `!autoslip`."
+            ),
+            color=0xFFDC00,
+        ))
+        return
+
+    # Adapt cache → build_and_format_slips contract
+    adapted_pool = []
+    for p in pool:
+        op = float(p.get("over_prob") or 0.0)
+        up = float(p.get("under_prob") or 0.0)
+        adapted_pool.append({
+            "player":     p.get("player") or "?",
+            "team":       p.get("team") or "?",
+            "line":       p.get("line"),
+            "opponent":   p.get("opponent") or "?",
+            "over_prob":  op,
+            "under_prob": up,
+            "edge":       float(p.get("edge_percent") or 0.0),
+            "grade":      p.get("letter_grade") or "?",
+            "decision":   p.get("decision") or "NO BET",
+        })
+    adapted_pool.sort(
+        key=lambda x: max(x["over_prob"], x["under_prob"]), reverse=True
+    )
+    if len(adapted_pool) > 25:
+        adapted_pool = adapted_pool[:25]
+
+    # Build & format
+    try:
+        formatted = build_and_format_slips(
+            adapted_pool,
+            slip_sizes=list(range(2, max_legs + 1)),
+            top_n=top_n,
+        )
+    except Exception as exc:
+        logger.error(f"[autoslip] build_and_format_slips failed: {exc}", exc_info=True)
+        await ctx.send(embed=discord.Embed(
+            title="❌ Slip build failed", description=str(exc)[:200], color=0xFF4136,
+        ))
+        return
+
+    # Header line + raw text output, chunked to fit Discord's 2000-char limit
+    header = (
+        f"📊 Pool: **{len(pool)}** play(s) · last **{hours:.0f}h** · "
+        f"top **{top_n}** · up to **{max_legs}-leg**"
+    )
+    await ctx.send(header)
+
+    for i in range(0, len(formatted), 1900):
+        chunk = formatted[i : i + 1900]
+        await ctx.send(f"```\n{chunk}\n```")
+
+
+# ---------------------------------------------------------------------------
 # !ppstop — cancel an in-progress !pp grading run
 # ---------------------------------------------------------------------------
 
