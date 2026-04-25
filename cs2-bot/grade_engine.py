@@ -2070,68 +2070,114 @@ def evaluate_potd(play: dict) -> dict:
 import itertools
 
 
-def build_slips(props, slip_sizes=[2, 3, 4]):
+def build_and_format_slips(props, slip_sizes=[2, 3, 4], top_n=5):
     """
-    Build slips using STRICT GATES: A/B grade only, ≥65% best probability,
-    no NO-BET, and no two legs from the same team.
-
-    props must include:
+    props format REQUIRED:
     {
         "player": "",
-        "team": "",          # REQUIRED for filtering
+        "team": "",
         "line": 0,
         "opponent": "",
-        "over_prob": 0.0,    # percent (0-100)
-        "under_prob": 0.0,   # percent (0-100)
-        "grade": "A/B/C",    # letter
+        "over_prob": 0.0,
+        "under_prob": 0.0,
+        "edge": 0.0,              # edge vs line %
+        "grade": "A/B/C",
         "decision": "OVER/UNDER/NO BET"
     }
-
-    Returns: list of {"legs": tuple, "avg_prob": float, "size": int}
-             sorted best-first by avg_prob.
     """
 
-    # 🔒 Step 1: Filter playable props
+    def get_prob(p):
+        return p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
+
+    # -----------------------------
+    # STEP 1: FILTER PLAYABLE (6%+ EDGE)
+    # -----------------------------
     playable = []
     for p in props:
-        best_prob = max(p["over_prob"], p["under_prob"])
-
         if (
             p["decision"] != "NO BET" and
             p["grade"] in ["A", "B"] and
-            best_prob >= 65
+            get_prob(p) >= 65 and
+            p["edge"] >= 6   # 🔥 UPDATED EDGE FILTER
         ):
             playable.append(p)
 
     slips = []
 
-    # 🔒 Step 2: Build slips
+    # -----------------------------
+    # STEP 2: BUILD SLIPS
+    # -----------------------------
     for size in slip_sizes:
         for combo in itertools.combinations(playable, size):
 
             teams = [p["team"] for p in combo]
 
-            # 🚫 No same team rule
+            # 🚫 NO SAME TEAM RULE
             if len(set(teams)) != len(teams):
                 continue
 
-            # 📊 Score slip (average probability)
             probs = []
+            edges = []
+
             for p in combo:
-                if p["decision"] == "OVER":
-                    probs.append(p["over_prob"])
-                else:
-                    probs.append(p["under_prob"])
+                probs.append(get_prob(p))
+                edges.append(p["edge"])
 
             avg_prob = sum(probs) / len(probs)
+            avg_edge = sum(edges) / len(edges)
+
+            # 🔥 VALUE WEIGHTED SCORE
+            score = (avg_prob * 0.6) + (avg_edge * 0.4)
+
+            # 🔥 ELITE EDGE BOOST
+            if avg_edge >= 12:
+                score *= 1.1
 
             slips.append({
                 "legs": combo,
+                "score": score,
                 "avg_prob": avg_prob,
+                "avg_edge": avg_edge,
                 "size": size
             })
 
-    # 🔥 Sort best → worst
-    slips.sort(key=lambda x: x["avg_prob"], reverse=True)
+    # -----------------------------
+    # STEP 3: SORT BEST SLIPS
+    # -----------------------------
+    slips.sort(key=lambda x: x["score"], reverse=True)
 
-    return slips
+    # -----------------------------
+    # STEP 4: FORMAT OUTPUT
+    # -----------------------------
+    output = []
+    output.append("🔥 AUTO SLIPS (6%+ EDGE | No Same Team)\n")
+
+    if not slips:
+        output.append("❌ No valid slips found (filters too strict)")
+        return "\n".join(output)
+
+    for i, slip in enumerate(slips[:top_n], 1):
+        output.append(
+            f"Slip #{i} ({slip['size']} Leg) | "
+            f"Score: {slip['score']:.1f} | "
+            f"Avg Prob: {slip['avg_prob']:.1f}% | "
+            f"Avg Edge: +{slip['avg_edge']:.1f}%\n"
+        )
+
+        for leg in slip["legs"]:
+            decision_icon = "🟢 OVER" if leg["decision"] == "OVER" else "🔴 UNDER"
+            prob = get_prob(leg)
+
+            output.append(
+                f"  {leg['player']} ({leg['team']}) vs {leg['opponent']} | "
+                f"{decision_icon} {leg['line']} "
+                f"({prob:.1f}%) | Edge +{leg['edge']:.1f}% | Grade {leg['grade']}"
+            )
+
+        output.append("")
+
+    return "\n".join(output)
+
+
+# Backwards-compat alias so existing callers keep working
+build_slips = build_and_format_slips

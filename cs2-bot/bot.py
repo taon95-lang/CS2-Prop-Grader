@@ -29,7 +29,7 @@ from grade_engine import (
     determine_role,
     detect_dog_line,
     score_correlated_parlay,
-    build_slips,
+    build_and_format_slips,
     adjust_for_risk,
     compute_semantic_risk_flags,
     defense_phrase,
@@ -4255,7 +4255,11 @@ async def cmd_slip(ctx, *args):
       • NO BET / PASS plays filtered out
       • Letter grade must be A or B (numeric ≥ 7)
       • Best probability (over or under) must be ≥ 65%
-      • Multiple legs from the same team or same match are blocked
+      • Edge vs line must be ≥ 6%
+      • Multiple legs from the same team are blocked
+
+    Slips are scored by (avg_prob × 0.6) + (avg_edge × 0.4), with a 1.1×
+    boost when avg_edge ≥ 12%. Top 5 slips are shown.
 
     Defaults: window = 12 hours, max_legs = 4.
 
@@ -4306,9 +4310,9 @@ async def cmd_slip(ctx, *args):
         ))
         return
 
-    # ── Adapt cache entries to the build_slips() input contract ─────────
-    # build_slips expects: player, team, line, opponent, over_prob, under_prob,
-    #                      grade (letter A/B/C), decision (OVER/UNDER/NO BET).
+    # ── Adapt cache entries to the build_and_format_slips() input contract ─
+    # Required keys: player, team, line, opponent, over_prob, under_prob,
+    #                edge, grade (letter A/B/C), decision (OVER/UNDER/NO BET).
     # Performance guard: cap pool to top-25 by best probability before
     # exploding combinations.
     adapted_pool = []
@@ -4319,14 +4323,12 @@ async def cmd_slip(ctx, *args):
             "player":     p.get("player") or "?",
             "team":       p.get("team") or "?",
             "line":       p.get("line"),
-            "stat":       p.get("stat") or "Kills",
             "opponent":   p.get("opponent") or "?",
             "over_prob":  op,
             "under_prob": up,
+            "edge":       float(p.get("edge_percent") or 0.0),
             "grade":      p.get("letter_grade") or "?",
             "decision":   p.get("decision") or "NO BET",
-            "_grade_int": p.get("grade") or 0,   # kept for rendering
-            "_match_id":  p.get("match_id"),     # kept for de-corr below
         })
     adapted_pool.sort(
         key=lambda x: max(x["over_prob"], x["under_prob"]), reverse=True
@@ -4334,120 +4336,85 @@ async def cmd_slip(ctx, *args):
     if len(adapted_pool) > 25:
         adapted_pool = adapted_pool[:25]
 
-    # Build slips
+    # ── Pre-flight diagnostic: count how many would be filtered out ─────
+    def _pick_prob(p):
+        return p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
+
+    n_no_bet = sum(1 for p in adapted_pool if p["decision"] == "NO BET")
+    n_low_g  = sum(1 for p in adapted_pool
+                   if p["grade"] not in ("A", "B")
+                   and p["decision"] != "NO BET")
+    n_low_p  = sum(1 for p in adapted_pool
+                   if p["grade"] in ("A", "B")
+                   and p["decision"] != "NO BET"
+                   and _pick_prob(p) < 65)
+    n_low_e  = sum(1 for p in adapted_pool
+                   if p["grade"] in ("A", "B")
+                   and p["decision"] != "NO BET"
+                   and _pick_prob(p) >= 65
+                   and p["edge"] < 6)
+
+    # ── Build & format slips using the user's spec ──────────────────────
     try:
-        slips = build_slips(adapted_pool, slip_sizes=list(range(2, max_legs + 1)))
+        formatted = build_and_format_slips(
+            adapted_pool,
+            slip_sizes=list(range(2, max_legs + 1)),
+            top_n=5,
+        )
     except Exception as exc:
-        logger.error(f"[slip] build_slips failed: {exc}", exc_info=True)
+        logger.error(f"[slip] build_and_format_slips failed: {exc}", exc_info=True)
         await ctx.send(embed=discord.Embed(
             title="❌ Slip build failed", description=str(exc)[:200], color=0xFF4136,
         ))
         return
 
-    # ── Optional extra correlation guard: drop slips with two legs from the
-    # same match (e.g., two players on opposing sides of the same series).
-    # build_slips itself only blocks same-team; we layer match-level dedup here.
-    def _legs_from_distinct_matches(legs) -> bool:
-        seen = set()
-        for leg in legs:
-            mid = leg.get("_match_id")
-            if mid and mid in seen:
-                return False
-            if mid:
-                seen.add(mid)
-        return True
-
-    slips = [s for s in slips if _legs_from_distinct_matches(s["legs"])]
-
-    if not slips:
-        # Diagnostic — break down WHY nothing made the cut
-        n_no_bet = sum(1 for p in adapted_pool if p["decision"] == "NO BET")
-        n_low_g  = sum(1 for p in adapted_pool
-                       if p["grade"] not in ("A", "B")
-                       and p["decision"] != "NO BET")
-        n_low_p  = sum(1 for p in adapted_pool
-                       if p["grade"] in ("A", "B")
-                       and p["decision"] != "NO BET"
-                       and max(p["over_prob"], p["under_prob"]) < 65)
+    # ── No valid slips → show detailed gate breakdown ───────────────────
+    if "❌ No valid slips found" in formatted:
         await ctx.send(embed=discord.Embed(
             title="📭 Slip Builder — Not enough valid plays",
             description=(
                 f"Pool size: **{len(pool)}** in last **{hours:.0f}h**\n"
                 f"  • NO BET filtered: `{n_no_bet}`\n"
                 f"  • Grade not A/B filtered: `{n_low_g}`\n"
-                f"  • Best probability < 65% filtered: `{n_low_p}`\n\n"
-                f"_Need ≥2 graded plays meeting all 3 gates to build a slip._"
+                f"  • Best probability < 65% filtered: `{n_low_p}`\n"
+                f"  • Edge < 6% filtered: `{n_low_e}`\n\n"
+                f"_Need ≥2 graded plays meeting all 4 gates to build a slip._"
             ),
             color=0xFFDC00,
         ))
         return
 
-    # ── Render the top slip per leg-size from the flat sorted list ──────
-    best_per_size: dict = {}
-    for s in slips:
-        sz = s["size"]
-        if sz not in best_per_size:   # list is already sorted best→worst
-            best_per_size[sz] = s
-
-    desc_parts: list[str] = [
+    # ── Render — embed for emoji preservation, chunked at 4000 chars ────
+    header = (
         f"Pool: **{len(pool)}** play(s) from last **{hours:.0f}h** · "
-        f"Strict gates: grade A/B, best prob ≥ 65%, no NO BET, "
-        f"one leg per team/match\n"
-    ]
-
-    leg_emoji = {2: "🥈", 3: "🥇", 4: "🏆"}
-    for size in range(2, max_legs + 1):
-        emoji = leg_emoji.get(size, "🎯")
-        slot = best_per_size.get(size)
-
-        if not slot:
-            desc_parts.append(
-                f"\n{emoji} **{size}-Leg Slip** — _no valid combo at this size_"
-            )
-            continue
-
-        avg_prob = slot["avg_prob"]
-        if   size == 2: units = 0.75
-        elif size == 3: units = 0.5
-        else:           units = 0.25
-
-        if   avg_prob >= 75: confidence, conf_emoji = "High",   "🟢"
-        elif avg_prob >= 70: confidence, conf_emoji = "Medium", "🟡"
-        else:                confidence, conf_emoji = "Low",    "🔴"
-
-        leg_lines = []
-        for leg in slot["legs"]:
-            sign = "✅" if leg["decision"] == "OVER" else "❌"
-            ln   = leg.get("line")
-            st   = leg.get("stat") or "Kills"
-            tm   = leg.get("team") or "?"
-            gr   = leg.get("grade") or "?"
-            pick_prob = leg["over_prob"] if leg["decision"] == "OVER" else leg["under_prob"]
-            line_str = f"`{ln} {st}`" if ln is not None else f"`{st}`"
-            leg_lines.append(
-                f"  {sign} **{leg['player']}** ({tm}) {line_str} — "
-                f"Grade {gr} · `{pick_prob:.1f}%`"
-            )
-
-        desc_parts.append(
-            f"\n{emoji} **{size}-Leg Slip** — {conf_emoji} {confidence} confidence · "
-            f"`{units}u`\n"
-            f"Avg probability: `{avg_prob:.1f}%`\n"
-            + "\n".join(leg_lines)
-        )
-
-    embed = discord.Embed(
-        title="🎰 Slip Builder — Best Cross-Match Combos",
-        description="\n".join(desc_parts),
-        color=0x9B59B6,
+        f"Strict gates: grade A/B, best prob ≥ 65%, edge ≥ 6%, "
+        f"no NO BET, no same team\n\n"
     )
-    embed.set_footer(
-        text=(
-            "Slip Builder · Strict gates: A/B grade, best prob ≥ 65% · "
-            "Score = avg pick probability · Not financial advice"
+    full_body = header + formatted
+
+    # Embed description cap is 4096; chunk safely at 3900 to leave room.
+    if len(full_body) <= 3900:
+        embed = discord.Embed(
+            title="🎰 Slip Builder — Best Cross-Match Combos",
+            description=full_body,
+            color=0x9B59B6,
         )
-    )
-    await ctx.send(embed=embed)
+        embed.set_footer(
+            text=(
+                "Slip Builder · Score = (avg_prob × 0.6) + (avg_edge × 0.4) · "
+                "Elite-edge boost ×1.1 when avg_edge ≥ 12% · Not financial advice"
+            )
+        )
+        await ctx.send(embed=embed)
+    else:
+        # Long output — send header embed + chunked plain-text body
+        await ctx.send(embed=discord.Embed(
+            title="🎰 Slip Builder — Best Cross-Match Combos",
+            description=header,
+            color=0x9B59B6,
+        ))
+        for i in range(0, len(formatted), 1900):
+            await ctx.send(formatted[i : i + 1900])
 
 
 # ---------------------------------------------------------------------------

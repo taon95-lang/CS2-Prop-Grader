@@ -1,0 +1,109 @@
+import itertools
+
+def build_and_format_slips(props, slip_sizes=[2,3,4], top_n=5):
+    """
+    props format REQUIRED:
+    {
+        "player": "",
+        "team": "",
+        "line": 0,
+        "opponent": "",
+        "over_prob": 0.0,
+        "under_prob": 0.0,
+        "edge": 0.0,              # edge vs line %
+        "grade": "A/B/C",
+        "decision": "OVER/UNDER/NO BET"
+    }
+    """
+
+    def get_prob(p):
+        return p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
+
+    # -----------------------------
+    # STEP 1: FILTER PLAYABLE (6%+ EDGE)
+    # -----------------------------
+    playable = []
+    for p in props:
+        if (
+            p["decision"] != "NO BET" and
+            p["grade"] in ["A", "B"] and
+            get_prob(p) >= 65 and
+            p["edge"] >= 6   # 🔥 UPDATED EDGE FILTER
+        ):
+            playable.append(p)
+
+    slips = []
+
+    # -----------------------------
+    # STEP 2: BUILD SLIPS
+    # -----------------------------
+    for size in slip_sizes:
+        for combo in itertools.combinations(playable, size):
+
+            teams = [p["team"] for p in combo]
+
+            # 🚫 NO SAME TEAM RULE
+            if len(set(teams)) != len(teams):
+                continue
+
+            probs = []
+            edges = []
+
+            for p in combo:
+                probs.append(get_prob(p))
+                edges.append(p["edge"])
+
+            avg_prob = sum(probs) / len(probs)
+            avg_edge = sum(edges) / len(edges)
+
+            # 🔥 VALUE WEIGHTED SCORE
+            score = (avg_prob * 0.6) + (avg_edge * 0.4)
+
+            # 🔥 ELITE EDGE BOOST
+            if avg_edge >= 12:
+                score *= 1.1
+
+            slips.append({
+                "legs": combo,
+                "score": score,
+                "avg_prob": avg_prob,
+                "avg_edge": avg_edge,
+                "size": size
+            })
+
+    # -----------------------------
+    # STEP 3: SORT BEST SLIPS
+    # -----------------------------
+    slips.sort(key=lambda x: x["score"], reverse=True)
+
+    # -----------------------------
+    # STEP 4: FORMAT OUTPUT
+    # -----------------------------
+    output = []
+    output.append("🔥 AUTO SLIPS (6%+ EDGE | No Same Team)\n")
+
+    if not slips:
+        output.append("❌ No valid slips found (filters too strict)")
+        return "\n".join(output)
+
+    for i, slip in enumerate(slips[:top_n], 1):
+        output.append(
+            f"Slip #{i} ({slip['size']} Leg) | "
+            f"Score: {slip['score']:.1f} | "
+            f"Avg Prob: {slip['avg_prob']:.1f}% | "
+            f"Avg Edge: +{slip['avg_edge']:.1f}%\n"
+        )
+
+        for leg in slip["legs"]:
+            decision_icon = "🟢 OVER" if leg["decision"] == "OVER" else "🔴 UNDER"
+            prob = get_prob(leg)
+
+            output.append(
+                f"  {leg['player']} ({leg['team']}) vs {leg['opponent']} | "
+                f"{decision_icon} {leg['line']} "
+                f"({prob:.1f}%) | Edge +{leg['edge']:.1f}% | Grade {leg['grade']}"
+            )
+
+        output.append("")
+
+    return "\n".join(output)
