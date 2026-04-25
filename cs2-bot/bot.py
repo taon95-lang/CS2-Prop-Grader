@@ -153,6 +153,30 @@ import time as _time
 SLIP_CACHE: "_collections.deque[dict]" = _collections.deque(maxlen=300)
 
 
+def _norm_team_for_dedup(raw: str | None) -> str:
+    """
+    Normalize a team string for the slip builder's no-same-team check.
+    - Lowercase + strip + remove non-alphanumeric so 'Vitality', ' vitality ',
+      and 'Team Vitality' don't slip past the dedup as 'distinct teams'.
+    - Anything that ends up empty (truly unknown) collapses to a single '?'
+      bucket so all unknown-team plays conflict with each other (we'd rather
+      drop a slip than ship a same-team violation we can't verify).
+    """
+    import re
+    if not raw:
+        return "?"
+    s = str(raw).strip().lower()
+    # Treat the old fallback marker '?<player>' as just '?'
+    if s.startswith("?"):
+        return "?"
+    s = re.sub(r"[^a-z0-9]", "", s)
+    # Drop common prefix words that hide duplicates
+    for prefix in ("team",):
+        if s.startswith(prefix) and len(s) > len(prefix):
+            s = s[len(prefix):]
+    return s or "?"
+
+
 def _cache_play_for_slip(
     player: str,
     team: str | None,
@@ -4315,13 +4339,23 @@ async def cmd_slip(ctx, *args):
     #                edge, grade (letter A/B/C), decision (OVER/UNDER/NO BET).
     # Performance guard: cap pool to top-25 by best probability before
     # exploding combinations.
+    # NOTE: `team` is normalized via _norm_team_for_dedup() so the no-same-team
+    # check inside build_and_format_slips collapses 'Vitality'/' Vitality '/
+    # 'Team Vitality' to one bucket and forces unknown-team plays into a
+    # shared '?' bucket (so they conflict with each other instead of forming
+    # accidental same-team slips). The display string is preserved separately.
     adapted_pool = []
     for p in pool:
         op = float(p.get("over_prob") or 0.0)
         up = float(p.get("under_prob") or 0.0)
+        raw_team = p.get("team") or ""
+        norm_team = _norm_team_for_dedup(raw_team)
+        # Display: keep original if known, else show '?'
+        disp_team = raw_team.strip() if raw_team and not str(raw_team).startswith("?") else "?"
         adapted_pool.append({
             "player":     p.get("player") or "?",
-            "team":       p.get("team") or "?",
+            "team":       norm_team,         # used by no-same-team filter
+            "_disp_team": disp_team or "?",  # used only for rendering
             "line":       p.get("line"),
             "opponent":   p.get("opponent") or "?",
             "over_prob":  op,
@@ -4474,14 +4508,23 @@ async def cmd_autoslip(ctx, *args):
         ))
         return
 
-    # Adapt cache → build_and_format_slips contract
+    # Adapt cache → build_and_format_slips contract.
+    # Team is normalized via _norm_team_for_dedup() so the no-same-team
+    # filter inside build_and_format_slips correctly catches case/whitespace
+    # variants AND collapses unknown teams into a shared '?' bucket
+    # (preventing accidental same-team slips when the scraper couldn't
+    # detect a team name).
     adapted_pool = []
     for p in pool:
         op = float(p.get("over_prob") or 0.0)
         up = float(p.get("under_prob") or 0.0)
+        raw_team = p.get("team") or ""
+        norm_team = _norm_team_for_dedup(raw_team)
+        disp_team = raw_team.strip() if raw_team and not str(raw_team).startswith("?") else "?"
         adapted_pool.append({
             "player":     p.get("player") or "?",
-            "team":       p.get("team") or "?",
+            "team":       norm_team,         # used by no-same-team filter
+            "_disp_team": disp_team or "?",  # rendered to user
             "line":       p.get("line"),
             "opponent":   p.get("opponent") or "?",
             "over_prob":  op,
@@ -4495,6 +4538,29 @@ async def cmd_autoslip(ctx, *args):
     )
     if len(adapted_pool) > 25:
         adapted_pool = adapted_pool[:25]
+
+    # Pre-flight diagnostic so the user can see why N slips formed
+    def _pick_prob_a(pp):
+        return pp["over_prob"] if pp["decision"] == "OVER" else pp["under_prob"]
+    n_no_bet = sum(1 for p in adapted_pool if p["decision"] == "NO BET")
+    n_low_g  = sum(1 for p in adapted_pool
+                   if p["grade"] not in ("A", "B")
+                   and p["decision"] != "NO BET")
+    n_low_p  = sum(1 for p in adapted_pool
+                   if p["grade"] in ("A", "B")
+                   and p["decision"] != "NO BET"
+                   and _pick_prob_a(p) < 65)
+    n_low_e  = sum(1 for p in adapted_pool
+                   if p["grade"] in ("A", "B")
+                   and p["decision"] != "NO BET"
+                   and _pick_prob_a(p) >= 65
+                   and p["edge"] < 6)
+    n_passing = sum(1 for p in adapted_pool
+                    if p["decision"] != "NO BET"
+                    and p["grade"] in ("A", "B")
+                    and _pick_prob_a(p) >= 65
+                    and p["edge"] >= 6)
+    n_unknown_team = sum(1 for p in adapted_pool if p["team"] == "?")
 
     # Build & format
     try:
@@ -4510,10 +4576,25 @@ async def cmd_autoslip(ctx, *args):
         ))
         return
 
-    # Header line + raw text output, chunked to fit Discord's 2000-char limit
+    # ── Patch the formatted text: replace the normalized team in the
+    # rendered "Player (team) vs opponent" with the original display string.
+    # build_and_format_slips uses leg["team"] directly; we want users to see
+    # 'Vitality' not 'vitality' (and '?' instead of normalized fallbacks).
+    for p in adapted_pool:
+        if p["team"] != p["_disp_team"]:
+            # Best-effort replacement scoped to this player's line
+            old = f"{p['player']} ({p['team']})"
+            new = f"{p['player']} ({p['_disp_team']})"
+            formatted = formatted.replace(old, new)
+
+    # Header with diagnostic line so the user sees why the count is what it is
     header = (
         f"📊 Pool: **{len(pool)}** play(s) · last **{hours:.0f}h** · "
-        f"top **{top_n}** · up to **{max_legs}-leg**"
+        f"top **{top_n}** · up to **{max_legs}-leg**\n"
+        f"🔎 Passing all gates: **{n_passing}**  "
+        f"(NO BET: `{n_no_bet}` · grade not A/B: `{n_low_g}` · "
+        f"prob<65%: `{n_low_p}` · edge<6%: `{n_low_e}` · "
+        f"unknown team: `{n_unknown_team}`)"
     )
     await ctx.send(header)
 
