@@ -4842,6 +4842,129 @@ async def cmd_results(ctx, when: str = "today"):
 
 
 # ---------------------------------------------------------------------------
+# !summary — clean one-line-per-prop summary of all already-graded plays
+# ---------------------------------------------------------------------------
+
+@bot.command(name="summary", aliases=["summarize", "history", "graded"])
+async def cmd_summary(ctx, when: str = "today"):
+    """
+    Show a clean summary of every already-graded prop.
+
+    Usage:
+      !summary                 ← today's grades (default)
+      !summary today           ← today only
+      !summary yesterday       ← yesterday only
+      !summary week            ← last 7 days
+      !summary all             ← every saved grade
+      !summary 24              ← last N hours (numeric)
+      !summary pending         ← unresolved (no actual recorded yet)
+    """
+    from datetime import datetime, timezone, timedelta
+
+    when_lower = (when or "today").lower().strip()
+    now_utc    = datetime.now(timezone.utc)
+    today_str  = now_utc.strftime("%Y-%m-%d")
+
+    # ── Pick which entries to show ────────────────────────────────────────
+    if when_lower in ("today", "t"):
+        entries = get_entries_for_date(today_str)
+        scope_label = f"Today ({today_str})"
+    elif when_lower in ("yesterday", "y"):
+        y_str = (now_utc - timedelta(days=1)).strftime("%Y-%m-%d")
+        entries = get_entries_for_date(y_str)
+        scope_label = f"Yesterday ({y_str})"
+    elif when_lower in ("week", "w", "7d"):
+        entries = get_recent_entries(7)
+        scope_label = "Last 7 days"
+    elif when_lower in ("all", "everything", "*"):
+        entries = get_recent_entries(36500)   # effectively unbounded
+        scope_label = "All time"
+    elif when_lower in ("pending", "p", "open", "unresolved"):
+        entries = get_pending_entries()
+        scope_label = "Pending (unresolved)"
+    else:
+        # Numeric — interpret as hours window
+        try:
+            hrs = float(when_lower)
+            cutoff = (now_utc - timedelta(hours=hrs)).timestamp()
+            entries = [e for e in get_recent_entries(max(1, int(hrs / 24) + 1))
+                       if e.get("ts", 0) >= cutoff]
+            scope_label = f"Last {hrs:g}h"
+        except ValueError:
+            await ctx.send(embed=discord.Embed(
+                title="❌ Usage",
+                description=(
+                    "**Usage:** `!summary [today|yesterday|week|all|pending|<hours>]`\n"
+                    "Examples: `!summary`, `!summary week`, `!summary 12`, "
+                    "`!summary pending`"
+                ),
+                color=0xFF4136,
+            ))
+            return
+
+    if not entries:
+        await ctx.send(embed=discord.Embed(
+            title=f"📭 No graded props — {scope_label}",
+            description="Nothing graded in this window yet. Use `!grade`, `!pp`, or `!parlay` to add some.",
+            color=0xFFDC00,
+        ))
+        return
+
+    # ── Sort newest-first, then build summary props ──────────────────────
+    entries.sort(key=lambda e: e.get("ts", 0), reverse=True)
+
+    summary_props = []
+    for e in entries:
+        rec = (e.get("recommendation") or "PASS").upper()
+        # grades_db stores "NO_BET"; normalise to "NO BET" for display
+        if rec == "NO_BET":
+            rec = "NO BET"
+
+        summary_props.append({
+            "player":     e.get("display") or e.get("player") or "?",
+            "line":       f"{e.get('line', '?')} {e.get('stat', '')}".strip(),
+            "opponent":   e.get("opponent") or "?",
+            "over_prob":  e.get("over_pct")  or 0.0,
+            "under_prob": e.get("under_pct") or 0.0,
+            "grade":      e.get("grade") or "?",
+            "decision":   rec,
+        })
+
+    # ── Send a small header embed, then the chunked code-block summary ───
+    resolved   = sum(1 for e in entries if e.get("outcome"))
+    pending    = len(entries) - resolved
+    wins       = sum(1 for e in entries
+                     if e.get("outcome") and e.get("outcome") == _outcome_match(e.get("recommendation")))
+    losses     = resolved - wins
+
+    header = discord.Embed(
+        title=f"📋 Graded Props Summary — {scope_label}",
+        description=(
+            f"**{len(entries)}** total · **{pending}** pending · "
+            f"**{resolved}** resolved (W:{wins} L:{losses})"
+        ),
+        color=0x7289DA,
+    )
+    await ctx.send(embed=header)
+
+    summary_text = build_final_summary(summary_props)
+    # Discord 2000-char message cap → chunk
+    for chunk_start in range(0, len(summary_text), 1900):
+        chunk = summary_text[chunk_start : chunk_start + 1900]
+        await ctx.send(f"```\n{chunk}\n```")
+
+
+def _outcome_match(recommendation: str | None) -> str:
+    """Map a graded recommendation to the outcome string that means it hit."""
+    if not recommendation:
+        return ""
+    r = recommendation.upper()
+    if r == "OVER":  return "over"
+    if r == "UNDER": return "under"
+    return ""   # PASS / NO BET / NO_BET — never counts as a "hit"
+
+
+# ---------------------------------------------------------------------------
 # !calibration — bucket past predictions by confidence band, show actual hit rates
 # ---------------------------------------------------------------------------
 
