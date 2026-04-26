@@ -17,61 +17,42 @@ Pipeline:
 Required input fields per play:
   player, team, opponent, line
   over_prob, under_prob, edge       (all 0–100 percent floats)
-  variance      ('low'|'medium'|'high')
-  variance_num  (float, raw σ — used for adjusted_edge & coin-flip rule)
+  variance      ('low'|'medium'|'high')   ← canonical variance signal
   avg           (float, projected mean for the stat)
+  normal_map_proj (float, projected mean on a normal-length map)
   stomp         (bool)
   hit_rate      (0–100 percent float)
   short_map_proj (float, projected stat on shorter maps)
 
+Variance score (categorical → fixed numeric):
+  low  → 3
+  medium → 6
+  high → 10
+
 Edge handling:
-  adjusted_edge = max(0, edge − variance_num × 0.5)
+  adjusted_edge = edge − var_score × 0.5
   All edge gates (NO BET threshold, A grade, slip-build) use the
   ADJUSTED edge so high-variance plays are penalised. The raw `edge`
   is preserved on the play dict for display.
 
-Coin-flip-with-high-variance NO BET rule:
-  variance_num ≥ 9 AND |avg − line| < 2  →  forced NO BET.
+Hard NO BET filters (in order):
+  1. hit_rate < 40 AND variance == 'high'        → NO BET / NO VALUE
+  2. adjusted_edge < 6 OR pick prob < 55         → NO BET
+  3. var_score ≥ 9 AND |avg − line| < 2          → NO BET (coin-flip trap)
+  4. OVER + short-map fail + (high var OR stomp) → NO BET (fragile over)
+
+Value classification (independent of grade):
+  STRONG VALUE   — adjusted_edge ≥ 10 AND var_score ≤ 7
+  MODERATE VALUE — adjusted_edge ≥ 6
+  LOW VALUE      — otherwise
+  NO VALUE       — only set by hard-NO-BET filter (1) above
+
+Mispriced flag (diagnostic):
+  |normal_map_proj − line| ≥ 3 AND hit_rate ≥ 60
+  Surfaces "the line looks soft" plays without changing grade.
 """
 
 import itertools
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Value label (independent of A/B/NO BET grade; describes EDGE QUALITY)
-# ─────────────────────────────────────────────────────────────────────
-def get_value_label(p: dict, adjusted_edge: float, var_score: float) -> str:
-    """
-    Classifies a play by edge quality. Independent of the A/B/NO BET
-    grade — the grade encodes "should I bet this?" while this label
-    encodes "how clean is the edge?".
-
-    Buckets:
-      • NO CLEAR EDGE — volatile + projection sits on the line
-      • STRONG VALUE  — adjusted_edge ≥ 10 AND variance ≤ 7
-      • MODERATE VALUE — adjusted_edge ≥ 6
-      • NO VALUE       — otherwise
-
-    `normal_map_proj` is the projected stat over a normal-length map
-    (i.e. the simulator's projected mean for the player). Falls back
-    to `avg` and then `line` for plays missing the explicit field.
-    """
-    normal_proj = float(
-        p.get("normal_map_proj", p.get("avg", p["line"]))
-    )
-    line = float(p["line"])
-
-    # ❌ NOT value if volatile + close to line
-    if abs(normal_proj - line) < 2 and var_score >= 9:
-        return "NO CLEAR EDGE"
-
-    if adjusted_edge >= 10 and var_score <= 7:
-        return "STRONG VALUE"
-
-    if adjusted_edge >= 6:
-        return "MODERATE VALUE"
-
-    return "NO VALUE"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -84,28 +65,59 @@ def grade_prop(p: dict) -> dict:
     short_fail = p["short_map_proj"] < p["line"]
     stomp = bool(p.get("stomp", False))
 
-    # Adjusted edge — penalise high-variance plays. Used for ALL edge
-    # gates below; raw edge stays on the dict for display.
-    variance_num = float(p.get("variance_num", 6.0))
-    adjusted_edge = max(0.0, float(p["edge"]) - variance_num * 0.5)
-    value_label = get_value_label(p, adjusted_edge, variance_num)
+    # ── VARIANCE SCORE (categorical bucket → fixed numeric score) ────
+    var_score = {"low": 3, "medium": 6, "high": 10}.get(p["variance"], 6)
 
-    # ── NO BET filter (uses ADJUSTED edge) ───────────────────────────
+    # ── ADJUSTED EDGE ────────────────────────────────────────────────
+    adjusted_edge = p["edge"] - (var_score * 0.5)
+
+    # ── HARD NO BET: weak history + high variance ────────────────────
+    # If the model has weak hit-rate evidence (<40%) AND variance is
+    # high, no edge calculation can save it — refuse outright.
+    if p["hit_rate"] < 40 and p["variance"] == "high":
+        return {**p, "decision": "NO BET", "grade": "NO BET",
+                "value": "NO VALUE", "mispriced": False,
+                "adjusted_edge": adjusted_edge, "var_score": var_score}
+
+    # ── MISPRICED CHECK ──────────────────────────────────────────────
+    # Model disagrees with line by ≥3 AND historical hit-rate is
+    # reliable (≥60%). Pure diagnostic flag — does NOT change grade
+    # by itself, just surfaces "the line looks soft" plays.
+    normal_proj = float(p.get("normal_map_proj", p.get("avg", p["line"])))
+    mispriced = (
+        abs(normal_proj - float(p["line"])) >= 3
+        and p["hit_rate"] >= 60
+    )
+
+    # ── VALUE CLASSIFICATION ─────────────────────────────────────────
+    if adjusted_edge >= 10 and var_score <= 7:
+        value = "STRONG VALUE"
+    elif adjusted_edge >= 6:
+        value = "MODERATE VALUE"
+    else:
+        value = "LOW VALUE"
+
+    # Common return scaffold — every code path below carries these
+    extras = {
+        "value":         value,
+        "mispriced":     mispriced,
+        "adjusted_edge": adjusted_edge,
+        "var_score":     var_score,
+    }
+
+    # ── NO BET: adjusted edge / pick prob too low ────────────────────
     if adjusted_edge < 6 or prob < 55:
-        return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge, "value_label": value_label}
+        return {**p, "decision": "NO BET", "grade": "NO BET", **extras}
 
-    # NEW: coin-flip-with-high-variance trap
-    #   variance_num ≥ 9 AND |avg − line| < 2  →  forced NO BET
+    # ── NO BET: coin-flip-with-high-variance trap ────────────────────
+    # var_score ≥ 9 (i.e. high variance) AND |avg − line| < 2.
     avg = float(p.get("avg", p["line"]))
-    if variance_num >= 9 and abs(avg - float(p["line"])) < 2:
-        return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge, "value_label": value_label}
+    if var_score >= 9 and abs(avg - float(p["line"])) < 2:
+        return {**p, "decision": "NO BET", "grade": "NO BET", **extras}
 
-    # HARD FAIL: fragile overs (short-map fail + high variance OR stomp)
+    # ── NO BET: fragile overs (short-map fail + high var OR stomp) ──
     if decision == "OVER" and short_fail and (p["variance"] == "high" or stomp):
-        return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge, "value_label": value_label}
+        return {**p, "decision": "NO BET", "grade": "NO BET", **extras}
 
     grade = "B"
 
@@ -129,8 +141,7 @@ def grade_prop(p: dict) -> dict:
     if decision == "UNDER" and short_fail and grade == "B":
         grade = "A"
 
-    return {**p, "decision": decision, "grade": grade,
-            "adjusted_edge": adjusted_edge, "value_label": value_label}
+    return {**p, "decision": decision, "grade": grade, **extras}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -232,12 +243,14 @@ def format_for_discord(
                 if abs(adj_e - raw_e) >= 0.05 else
                 f"Edge: +{raw_e:.1f}%"
             )
-            value_str = p.get("value_label", "")
+            value_str = p.get("value", "")
             value_suffix = f" | {value_str}" if value_str else ""
+            mispriced_suffix = " · 💎 MISPRICED" if p.get("mispriced") else ""
             out.append(
                 f"{tag} {p['player']} vs {p['opponent']} | "
                 f"{p['decision']} {p['line']} | "
-                f"{prob:.0f}% | Grade: {grade_label} | {edge_str}{value_suffix}"
+                f"{prob:.0f}% | Grade: {grade_label} | "
+                f"{edge_str}{value_suffix}{mispriced_suffix}"
             )
         out.append("")
 
@@ -255,12 +268,13 @@ def format_for_discord(
             prob = leg["over_prob"] if leg["decision"] == "OVER" else leg["under_prob"]
             tag  = "🟢" if leg["decision"] == "OVER" else "🔴"
             team_show = leg.get(disp_team_key) or leg.get("team") or "?"
-            value_str = leg.get("value_label", "")
+            value_str = leg.get("value", "")
             value_suffix = f" · {value_str}" if value_str else ""
+            mispriced_suffix = " · 💎" if leg.get("mispriced") else ""
             out.append(
                 f"  {tag} {leg['player']} ({team_show}) vs {leg['opponent']} | "
                 f"{leg['decision']} {leg['line']} ({prob:.0f}%) | "
-                f"Grade {leg['grade']}{value_suffix}"
+                f"Grade {leg['grade']}{value_suffix}{mispriced_suffix}"
             )
     return "\n".join(out)
 
