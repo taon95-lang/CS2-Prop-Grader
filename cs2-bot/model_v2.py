@@ -53,11 +53,10 @@ Value classification (independent of grade):
   LOW VALUE      — otherwise
   NO VALUE       — only set by hard-NO-BET filter (1) above
 
-Elite/POTD block (post-classification):
+Value demotion (post-classification):
   If ANY profile penalty triggered (hit_rate<50, short_map<line,
-  stomp), the play cannot be POTD (potd=False) and any STRONG
-  VALUE label is demoted to MODERATE — elite status requires
-  a clean profile.
+  stomp), STRONG VALUE is demoted to MODERATE — STRONG status
+  requires a clean profile.
 
 Mispriced flag (diagnostic):
   |normal_map_proj − line| ≥ 3 AND hit_rate ≥ 60
@@ -66,36 +65,20 @@ Mispriced flag (diagnostic):
 Per-play status fields written by run_model's consistency pass
 (applied in order; later rules override earlier ones):
   score        — 0–100 confidence on the chosen direction (= prob)
-  potd         — Set by composite POTD rule. True only if ALL hold:
-                   can_bet (i.e. score ≥ 55, hit_rate ≥ 50,
-                            and EITHER projection > line)
-                   adjusted_edge   ≥ 10
-                   hit_rate        ≥ 65
-                   short_map_proj   > line
-                   normal_map_proj  > line
-                   variance        != 'high'
-                 Else False. Note: variance check is now part of
-                 POTD itself (was previously LOCK-only).
-  lock         — Set by LOCK rule. True only if potd AND
-                 variance != 'high'. Currently equivalent to potd
-                 since POTD already requires non-high variance.
+  can_bet      — Soft eligibility flag (always set). True if
+                 score ≥ 55 AND hit_rate ≥ 50 AND (short_map_proj
+                 > line OR normal_map_proj > line). Diagnostic
+                 only — does not gate any other field.
   final_label  — Set to 'NO BET' by MASTER FINAL FILTER when any
                  fail condition holds (else unset).
   bet_size     — 0 when MASTER FINAL FILTER fires (also set to 0
                  by Rule 2 NO BET, 0.5 by Rule 1 weak grade).
   confidence   — 0 when MASTER FINAL FILTER fires (else unset).
-  can_bet      — Soft eligibility flag (always set). True if
-                 score ≥ 55 AND hit_rate ≥ 50 AND (short_map_proj
-                 > line OR normal_map_proj > line). Looser than
-                 the master filter (OR between projections, not
-                 AND), so a play can have can_bet=True even when
-                 the master filter fires.
 
 MASTER FINAL FILTER (HARD OVERRIDE — runs last, authoritative):
   If score < 55 OR hit_rate < 50 OR short_map_proj < line
   OR normal_map_proj < line:
-      final_label = 'NO BET', bet_size = 0, confidence = 0,
-      potd = False, lock = False
+      final_label = 'NO BET', bet_size = 0, confidence = 0
 """
 
 import itertools
@@ -172,16 +155,14 @@ def grade_prop(p: dict) -> dict:
     else:
         value = "LOW VALUE"
 
-    # ── POTD / ELITE BLOCK ───────────────────────────────────────────
-    # If ANY of the three profile penalties were triggered above, the
-    # play cannot be Pick-Of-The-Day and any STRONG VALUE label is
-    # demoted to MODERATE — elite status requires a clean profile.
+    # ── VALUE DEMOTION (profile penalty) ─────────────────────────────
+    # If ANY of the three profile penalties triggered above, demote
+    # STRONG VALUE → MODERATE — STRONG status requires a clean profile.
     if (
         p["hit_rate"] < 50
         or p["short_map_proj"] < p["line"]
         or p.get("stomp")
     ):
-        p["potd"] = False
         if value == "STRONG VALUE":
             value = "MODERATE VALUE"
 
@@ -394,7 +375,7 @@ def run_model(
     # drift between grade / decision / value / sizing flags.
     #
     # Rule order matters:
-    #   1. Weak grade (C/D/F) → cap value at LOW, half size, no POTD
+    #   1. Weak grade (C/D/F) → cap value at LOW, half size
     #   2. NO BET           → zero size, value = NO PLAY, normalised
     #                          final_call + weighted-score label
     #   3. Hard block       → STRONG VALUE is reserved for grade A;
@@ -403,11 +384,10 @@ def run_model(
     #                          "STRONG" leg below A grade.
     for p in graded:
         # 0. CAN_BET (soft eligibility flag) ────────────────────────
-        # Computed first so the POTD rule below can reference it.
-        # Looser than the master filter — needs only ONE projection
-        # above the line (OR), not both. Always set on the play as
-        # a diagnostic field independent of POTD / LOCK / master.
-        can_bet = (
+        # Always set on the play as a diagnostic flag. Looser than
+        # the master filter — needs only ONE projection above the
+        # line (OR), not both.
+        p["can_bet"] = (
             p["score"]    >= 55
             and p["hit_rate"] >= 50
             and (
@@ -415,17 +395,14 @@ def run_model(
                 or p["normal_map_proj"] > p["line"]
             )
         )
-        p["can_bet"] = can_bet
 
         # 1. weak-grade cap
         if p["grade"] in ("C", "D", "F"):
-            p["potd"]     = False
             p["bet_size"] = 0.5
             p["value"]    = "LOW VALUE"
 
         # 2. NO BET normalisation
         if p["decision"] == "NO BET":
-            p["potd"]                 = False
             p["bet_size"]             = 0
             p["value"]                = "NO PLAY"
             p["final_call"]           = "NO BET"
@@ -435,30 +412,7 @@ def run_model(
         if p["grade"] != "A" and p.get("value") == "STRONG VALUE":
             p["value"] = "MODERATE VALUE"
 
-        # 4. POTD (single composite — authoritative) ────────────────
-        # POTD requires ALL of: can_bet, edge profile, history, both
-        # projections strictly above line, AND non-high variance.
-        # Variance check is now part of POTD itself (was previously
-        # only in LOCK), so high-variance plays cannot be POTD.
-        p["potd"] = (
-            can_bet
-            and p["adjusted_edge"]   >= 10
-            and p["hit_rate"]        >= 65
-            and p["short_map_proj"]   > p["line"]
-            and p["normal_map_proj"]  > p["line"]
-            and p["variance"]        != "high"
-        )
-
-        # 5. LOCK ───────────────────────────────────────────────────
-        # Lock = POTD AND not high-variance. Since POTD now already
-        # requires non-high variance, lock is currently equivalent
-        # to potd. Kept as an explicit field for downstream consumers.
-        if p["potd"] and p["variance"] != "high":
-            p["lock"] = True
-        else:
-            p["lock"] = False
-
-        # 6. MASTER FINAL FILTER (HARD OVERRIDE) ────────────────────
+        # 4. MASTER FINAL FILTER (HARD OVERRIDE) ────────────────────
         # Authoritative last word. Any single fragility signal
         # zeroes out the play regardless of what earlier rules set:
         # weak score (<55), weak history (<50), short-map fail, or
@@ -473,8 +427,6 @@ def run_model(
             p["final_label"] = "NO BET"
             p["bet_size"]    = 0
             p["confidence"]  = 0
-            p["potd"]        = False
-            p["lock"]        = False
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(

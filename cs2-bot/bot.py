@@ -273,6 +273,13 @@ def _db_plays_in_window(hours: float) -> list[dict]:
             "",
             (e.get("display") or e.get("player") or "x").lower(),
         ) or "x"
+        # HLTV-derived projected median from the simulator at grade time.
+        # Used by _to_v2_play as the real-data source for v2_avg and
+        # v2_short_map_proj when the explicit v2 fields aren't present
+        # (older entries predate the v2 cache fields).
+        sim_med = e.get("sim_median")
+        sim_med_val = float(sim_med) if isinstance(sim_med, (int, float)) else None
+
         out.append({
             "ts":           ts,
             "player":       e.get("display") or e.get("player") or "?",
@@ -286,6 +293,7 @@ def _db_plays_in_window(hours: float) -> list[dict]:
             "edge_percent": edge_pct,
             "over_prob":    over_pct,
             "under_prob":   under_pct,
+            "sim_median":   sim_med_val,
             "_source":      "db",
         })
     return out
@@ -4882,20 +4890,31 @@ def _to_v2_play(p: dict) -> dict:
     else:
         stomp = edge >= 25.0
 
-    # short_map_proj: stored at grade time, else neutral (= line, no fail)
+    # HLTV-derived sim median (set by _db_plays_in_window from grades_db
+    # `sim_median`, which is the simulator's projected mean at grade
+    # time using HLTV historical + matchup data). Used as the real-data
+    # fallback for avg / short_map_proj when explicit v2 fields are
+    # missing — replaces the old neutral `= line` fallback that made
+    # every disk-loaded play fail strict-> projection gates.
+    sim_med = p.get("sim_median")
+    sim_med_val = float(sim_med) if isinstance(sim_med, (int, float)) else None
+
+    # avg (projected mean): grade-time v2 cache → sim_median → line
+    avg = p.get("v2_avg")
+    if not isinstance(avg, (int, float)):
+        avg = sim_med_val if sim_med_val is not None else line
+
+    # short_map_proj: grade-time v2 cache → sim_median * 0.78 (same
+    # multiplier used at grade time when kpr is unavailable, see
+    # bot.py grade-time path) → line.
     smp = p.get("v2_short_map_proj")
     if not isinstance(smp, (int, float)):
-        smp = line
+        smp = (sim_med_val * 0.78) if sim_med_val is not None else line
 
     # variance_num (raw σ): stored at grade time, else map from string bucket
     vnum = p.get("v2_variance_num")
     if not isinstance(vnum, (int, float)):
         vnum = {"low": 3.0, "medium": 6.0, "high": 9.0}.get(variance, 6.0)
-
-    # avg (projected mean): stored at grade time, else neutral (= line)
-    avg = p.get("v2_avg")
-    if not isinstance(avg, (int, float)):
-        avg = line
 
     return {
         "player":          p.get("player") or "?",
