@@ -64,11 +64,15 @@ Mispriced flag (diagnostic):
 
 Per-play status fields written by run_model's consistency pass
 (applied in order; later rules override earlier ones):
-  score        — 0–100 confidence on the chosen direction (= prob)
+  score        — 0–100 CONFIDENCE on the chosen direction (= prob).
+                 Display-only signal — does NOT trigger or gate bets.
+                 Set to None when final_label == 'NO BET' so it is
+                 never shown as justification for an unqualified play.
   can_bet      — Soft eligibility flag (always set). True if
-                 score ≥ 55 AND hit_rate ≥ 50 AND (short_map_proj
-                 > line OR normal_map_proj > line). Diagnostic
-                 only — does not gate any other field.
+                 hit_rate ≥ 50 AND short_map_proj > line AND
+                 normal_map_proj > line. Score is intentionally
+                 excluded — score is confidence, not a bet trigger.
+                 Diagnostic only; does not gate any other field.
   final_label  — Set to 'NO BET' by MASTER FINAL FILTER when any
                  fail condition holds (else unset).
   bet_size     — 0 when MASTER FINAL FILTER fires (also set to 0
@@ -384,16 +388,14 @@ def run_model(
     #                          "STRONG" leg below A grade.
     for p in graded:
         # 0. CAN_BET (soft eligibility flag) ────────────────────────
-        # Always set on the play as a diagnostic flag. Looser than
-        # the master filter — needs only ONE projection above the
-        # line (OR), not both.
+        # Always set on the play as a diagnostic flag. SCORE DOES
+        # NOT TRIGGER BETS — score is confidence/display only.
+        # Eligibility = solid history AND both projections beat
+        # the line.
         p["can_bet"] = (
-            p["score"]    >= 55
-            and p["hit_rate"] >= 50
-            and (
-                p["short_map_proj"]  > p["line"]
-                or p["normal_map_proj"] > p["line"]
-            )
+            p["hit_rate"] >= 50
+            and p["short_map_proj"]  > p["line"]
+            and p["normal_map_proj"] > p["line"]
         )
 
         # 1. weak-grade cap
@@ -427,6 +429,15 @@ def run_model(
             p["final_label"] = "NO BET"
             p["bet_size"]    = 0
             p["confidence"]  = 0
+
+        # 5. SCORE ONLY USED FOR CONFIDENCE ─────────────────────────
+        # Score does not trigger bets — it's just a display-time
+        # confidence signal. Null it on NO BET so it can never be
+        # mistaken for justification of a play that didn't qualify.
+        # .get() is used because final_label is only set by the
+        # master filter above (plays that pass have no such field).
+        if p.get("final_label") == "NO BET":
+            p["score"] = None
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(
