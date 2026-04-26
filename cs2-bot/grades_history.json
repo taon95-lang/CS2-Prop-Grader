@@ -5566,6 +5566,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "71bf1672-44f9-4cd8-8709-5d9128dceef5",
+      "ts": 1777187672.003798,
+      "date": "2026-04-26",
+      "player": "tabsen",
+      "display": "tabsen",
+      "line": 25.5,
+      "stat": "Kills",
+      "opponent": "Sparta",
+      "over_pct": 50.0,
+      "under_pct": 50.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 24.67,
+      "hist_median": 20.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

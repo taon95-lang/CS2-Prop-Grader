@@ -173,6 +173,7 @@ def build_slips(props: list[dict], sizes=(2, 3, 4, 6)) -> list[dict]:
         p for p in props
         if p["decision"] != "NO BET"
         and p["grade"] in ("A", "B")
+        and p.get("value") in ("STRONG VALUE", "MODERATE VALUE")
         and get_prob(p) >= 60
         and get_adj_edge(p) >= 6   # ADJUSTED edge gate
     ]
@@ -297,6 +298,17 @@ def run_model(
     """
     graded = [grade_prop(dict(p)) for p in props]
     graded = limit_A_plays(graded, max_A=max_A)
+
+    # ── FORCE CONSISTENCY ────────────────────────────────────────────
+    # Ensure every NO BET play carries a flat, normalised final-call
+    # and weighted-score label so downstream consumers (display,
+    # exports, weighted-score machinery) never see drift between
+    # `decision` and the play's other status fields.
+    for p in graded:
+        if p["decision"] == "NO BET":
+            p["final_call"] = "NO BET"
+            p["weighted_score_label"] = "N/A"
+
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(
         graded, slips,
