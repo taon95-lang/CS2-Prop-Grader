@@ -62,6 +62,23 @@ Elite/POTD block (post-classification):
 Mispriced flag (diagnostic):
   |normal_map_proj − line| ≥ 3 AND hit_rate ≥ 60
   Surfaces "the line looks soft" plays without changing grade.
+
+Per-play status fields written by run_model's consistency pass:
+  score        — 0–100 confidence on the chosen direction (= prob)
+  final_label  — 'NO BET' when the output guard fires (else unset)
+  units        — 0 when the output guard fires (else unset)
+  potd         — True only if the strict elite filter passes:
+                   adjusted_edge ≥ 10
+                   hit_rate     ≥ 65
+                   short_map_proj  > line
+                   normal_map_proj > line
+                   score        ≥ 70
+                 Else False.
+  lock         — True only if potd AND variance != 'high'. Else False.
+
+Final output guard (forces NO BET output regardless of grade):
+  score < 55 OR hit_rate < 50 OR short_map_proj < line
+  OR normal_map_proj < line
 """
 
 import itertools
@@ -98,19 +115,30 @@ def grade_prop(p: dict) -> dict:
     if p.get("stomp"):
         adjusted_edge -= 3
 
+    # ── PLAY-LEVEL SCORE ─────────────────────────────────────────────
+    # Canonical 0–100 confidence on the chosen direction. For now
+    # equals `prob`; kept as a separate field so it can evolve into
+    # a richer composite later without breaking downstream rules.
+    score = prob
+
+    # Pin canonical `normal_map_proj` onto the play so all downstream
+    # consumers (consistency rules, exports) read the same value.
+    normal_proj = float(p.get("normal_map_proj", p.get("avg", p["line"])))
+    p["normal_map_proj"] = normal_proj
+
     # ── HARD NO BET: weak history + high variance ────────────────────
     # If the model has weak hit-rate evidence (<40%) AND variance is
     # high, no edge calculation can save it — refuse outright.
     if p["hit_rate"] < 40 and p["variance"] == "high":
         return {**p, "decision": "NO BET", "grade": "NO BET",
                 "value": "NO VALUE", "mispriced": False,
-                "adjusted_edge": adjusted_edge, "var_score": var_score}
+                "adjusted_edge": adjusted_edge, "var_score": var_score,
+                "score": score}
 
     # ── MISPRICED CHECK ──────────────────────────────────────────────
     # Model disagrees with line by ≥3 AND historical hit-rate is
     # reliable (≥60%). Pure diagnostic flag — does NOT change grade
     # by itself, just surfaces "the line looks soft" plays.
-    normal_proj = float(p.get("normal_map_proj", p.get("avg", p["line"])))
     mispriced = (
         abs(normal_proj - float(p["line"])) >= 3
         and p["hit_rate"] >= 60
@@ -146,6 +174,7 @@ def grade_prop(p: dict) -> dict:
         "mispriced":     mispriced,
         "adjusted_edge": adjusted_edge,
         "var_score":     var_score,
+        "score":         score,
     }
 
     # ── NO BET: adjusted edge / pick prob too low ────────────────────
@@ -373,6 +402,44 @@ def run_model(
         # 3. HARD BLOCK: no elite value on weak grades
         if p["grade"] != "A" and p.get("value") == "STRONG VALUE":
             p["value"] = "MODERATE VALUE"
+
+        # 4. FINAL OUTPUT GUARD ─────────────────────────────────────
+        # Any single fragility signal forces a hard NO BET output:
+        # weak score (<55), weak history (<50), short-map fail, or
+        # normal-map projection below the line.
+        if (
+            p["score"] < 55
+            or p["hit_rate"] < 50
+            or p["short_map_proj"] < p["line"]
+            or p["normal_map_proj"] < p["line"]
+        ):
+            p["final_label"] = "NO BET"
+            p["potd"]        = False
+            p["lock"]        = False
+            p["units"]       = 0
+
+        # 5. ELITE FILTER (very strict) ─────────────────────────────
+        # POTD is granted ONLY if all five elite criteria hold; any
+        # miss zeros it out. Re-evaluates potd from scratch — this
+        # rule is the authoritative source for the field.
+        if (
+            p["adjusted_edge"]   >= 10
+            and p["hit_rate"]    >= 65
+            and p["short_map_proj"]  > p["line"]
+            and p["normal_map_proj"] > p["line"]
+            and p["score"]       >= 70
+        ):
+            p["potd"] = True
+        else:
+            p["potd"] = False
+
+        # 6. LOCK ───────────────────────────────────────────────────
+        # Lock = POTD AND not high-variance. Variance can take a
+        # POTD play down a tier even when every other signal aligns.
+        if p["potd"] and p["variance"] != "high":
+            p["lock"] = True
+        else:
+            p["lock"] = False
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(

@@ -5923,6 +5923,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "f70625aa-44e4-4cc3-af62-b6df3ccb44a4",
+      "ts": 1777197552.206429,
+      "date": "2026-04-26",
+      "player": "martinezsa",
+      "display": "Martinezsa",
+      "line": 33.5,
+      "stat": "Kills",
+      "opponent": "9ine",
+      "over_pct": 34.5,
+      "under_pct": 65.5,
+      "grade": "7/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "auto_no_bet": false,
+      "sim_median": 29.14,
+      "hist_median": 33.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
