@@ -38,6 +38,43 @@ import itertools
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Value label (independent of A/B/NO BET grade; describes EDGE QUALITY)
+# ─────────────────────────────────────────────────────────────────────
+def get_value_label(p: dict, adjusted_edge: float, var_score: float) -> str:
+    """
+    Classifies a play by edge quality. Independent of the A/B/NO BET
+    grade — the grade encodes "should I bet this?" while this label
+    encodes "how clean is the edge?".
+
+    Buckets:
+      • NO CLEAR EDGE — volatile + projection sits on the line
+      • STRONG VALUE  — adjusted_edge ≥ 10 AND variance ≤ 7
+      • MODERATE VALUE — adjusted_edge ≥ 6
+      • NO VALUE       — otherwise
+
+    `normal_map_proj` is the projected stat over a normal-length map
+    (i.e. the simulator's projected mean for the player). Falls back
+    to `avg` and then `line` for plays missing the explicit field.
+    """
+    normal_proj = float(
+        p.get("normal_map_proj", p.get("avg", p["line"]))
+    )
+    line = float(p["line"])
+
+    # ❌ NOT value if volatile + close to line
+    if abs(normal_proj - line) < 2 and var_score >= 9:
+        return "NO CLEAR EDGE"
+
+    if adjusted_edge >= 10 and var_score <= 7:
+        return "STRONG VALUE"
+
+    if adjusted_edge >= 6:
+        return "MODERATE VALUE"
+
+    return "NO VALUE"
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Grade ONE prop
 # ─────────────────────────────────────────────────────────────────────
 def grade_prop(p: dict) -> dict:
@@ -51,23 +88,24 @@ def grade_prop(p: dict) -> dict:
     # gates below; raw edge stays on the dict for display.
     variance_num = float(p.get("variance_num", 6.0))
     adjusted_edge = max(0.0, float(p["edge"]) - variance_num * 0.5)
+    value_label = get_value_label(p, adjusted_edge, variance_num)
 
     # ── NO BET filter (uses ADJUSTED edge) ───────────────────────────
     if adjusted_edge < 6 or prob < 55:
         return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge}
+                "adjusted_edge": adjusted_edge, "value_label": value_label}
 
     # NEW: coin-flip-with-high-variance trap
     #   variance_num ≥ 9 AND |avg − line| < 2  →  forced NO BET
     avg = float(p.get("avg", p["line"]))
     if variance_num >= 9 and abs(avg - float(p["line"])) < 2:
         return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge}
+                "adjusted_edge": adjusted_edge, "value_label": value_label}
 
     # HARD FAIL: fragile overs (short-map fail + high variance OR stomp)
     if decision == "OVER" and short_fail and (p["variance"] == "high" or stomp):
         return {**p, "decision": "NO BET", "grade": "NO BET",
-                "adjusted_edge": adjusted_edge}
+                "adjusted_edge": adjusted_edge, "value_label": value_label}
 
     grade = "B"
 
@@ -92,7 +130,7 @@ def grade_prop(p: dict) -> dict:
         grade = "A"
 
     return {**p, "decision": decision, "grade": grade,
-            "adjusted_edge": adjusted_edge}
+            "adjusted_edge": adjusted_edge, "value_label": value_label}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -194,10 +232,12 @@ def format_for_discord(
                 if abs(adj_e - raw_e) >= 0.05 else
                 f"Edge: +{raw_e:.1f}%"
             )
+            value_str = p.get("value_label", "")
+            value_suffix = f" | {value_str}" if value_str else ""
             out.append(
                 f"{tag} {p['player']} vs {p['opponent']} | "
                 f"{p['decision']} {p['line']} | "
-                f"{prob:.0f}% | Grade: {grade_label} | {edge_str}"
+                f"{prob:.0f}% | Grade: {grade_label} | {edge_str}{value_suffix}"
             )
         out.append("")
 
@@ -215,9 +255,12 @@ def format_for_discord(
             prob = leg["over_prob"] if leg["decision"] == "OVER" else leg["under_prob"]
             tag  = "🟢" if leg["decision"] == "OVER" else "🔴"
             team_show = leg.get(disp_team_key) or leg.get("team") or "?"
+            value_str = leg.get("value_label", "")
+            value_suffix = f" · {value_str}" if value_str else ""
             out.append(
                 f"  {tag} {leg['player']} ({team_show}) vs {leg['opponent']} | "
-                f"{leg['decision']} {leg['line']} ({prob:.0f}%) | Grade {leg['grade']}"
+                f"{leg['decision']} {leg['line']} ({prob:.0f}%) | "
+                f"Grade {leg['grade']}{value_suffix}"
             )
     return "\n".join(out)
 

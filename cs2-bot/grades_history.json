@@ -5524,6 +5524,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "fcfa1bc7-9989-46f2-86be-ca9dbdef40e8",
+      "ts": 1777185629.056564,
+      "date": "2026-04-26",
+      "player": "bnox",
+      "display": "Bnox",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "gentle mates",
+      "over_pct": 32.0,
+      "under_pct": 68.0,
+      "grade": "3/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "NO_BET",
+      "auto_no_bet": true,
+      "sim_median": 26.29,
+      "hist_median": 28.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }

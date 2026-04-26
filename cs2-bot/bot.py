@@ -4898,20 +4898,24 @@ def _to_v2_play(p: dict) -> dict:
         avg = line
 
     return {
-        "player":         p.get("player") or "?",
-        "team":           norm_team,
-        "_disp_team":     disp_team,
-        "opponent":       p.get("opponent") or "?",
-        "line":           line,
-        "over_prob":      op,
-        "under_prob":     up,
-        "edge":           edge,
-        "variance":       variance,
-        "variance_num":   float(vnum),
-        "stomp":          stomp,
-        "hit_rate":       float(hr),
-        "short_map_proj": float(smp),
-        "avg":            float(avg),
+        "player":          p.get("player") or "?",
+        "team":            norm_team,
+        "_disp_team":      disp_team,
+        "opponent":        p.get("opponent") or "?",
+        "line":            line,
+        "over_prob":       op,
+        "under_prob":      up,
+        "edge":            edge,
+        "variance":        variance,
+        "variance_num":    float(vnum),
+        "stomp":           stomp,
+        "hit_rate":        float(hr),
+        "short_map_proj":  float(smp),
+        "avg":             float(avg),
+        # normal_map_proj = simulator's projected mean over a full-length
+        # map (used by get_value_label to detect "projection sits on
+        # line" volatility traps). Same source as `avg`.
+        "normal_map_proj": float(avg),
     }
 
 
