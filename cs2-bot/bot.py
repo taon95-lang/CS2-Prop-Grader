@@ -382,8 +382,21 @@ def _cache_play_for_slip(
             if   sim_std_val <= 4.5: variance_bucket = "low"
             elif sim_std_val <= 7.5: variance_bucket = "medium"
             else:                    variance_bucket = "high"
+            v2_variance_num = float(sim_std_val)
         else:
             variance_bucket = "medium"
+            v2_variance_num = 6.0  # neutral middle of medium band
+
+        # Projected average for the new "coin-flip with high variance"
+        # NO BET rule: variance ≥ 9 AND |avg − line| < 2.
+        sim_med_val  = sim_result.get("sim_median")
+        sim_mean_val = sim_result.get("sim_mean")
+        if isinstance(sim_med_val, (int, float)):
+            v2_avg = float(sim_med_val)
+        elif isinstance(sim_mean_val, (int, float)):
+            v2_avg = float(sim_mean_val)
+        else:
+            v2_avg = float(line)  # neutral — won't trigger the rule
 
         hit_rate_val = sim_result.get("hit_rate")
         if isinstance(hit_rate_val, (int, float)):
@@ -432,9 +445,11 @@ def _cache_play_for_slip(
             "under_prob":   under_pct,
             # ── v2 model extras (see model_v2.py) ──
             "v2_variance":       variance_bucket,
+            "v2_variance_num":   v2_variance_num,
             "v2_hit_rate":       v2_hit_rate,
             "v2_stomp":          stomp_val,
             "v2_short_map_proj": float(short_proj),
+            "v2_avg":            v2_avg,
         })
     except Exception as _e:
         logger.warning(f"[slip_cache] skip — {_e}")
@@ -4872,6 +4887,16 @@ def _to_v2_play(p: dict) -> dict:
     if not isinstance(smp, (int, float)):
         smp = line
 
+    # variance_num (raw σ): stored at grade time, else map from string bucket
+    vnum = p.get("v2_variance_num")
+    if not isinstance(vnum, (int, float)):
+        vnum = {"low": 3.0, "medium": 6.0, "high": 9.0}.get(variance, 6.0)
+
+    # avg (projected mean): stored at grade time, else neutral (= line)
+    avg = p.get("v2_avg")
+    if not isinstance(avg, (int, float)):
+        avg = line
+
     return {
         "player":         p.get("player") or "?",
         "team":           norm_team,
@@ -4882,9 +4907,11 @@ def _to_v2_play(p: dict) -> dict:
         "under_prob":     up,
         "edge":           edge,
         "variance":       variance,
+        "variance_num":   float(vnum),
         "stomp":          stomp,
         "hit_rate":       float(hr),
         "short_map_proj": float(smp),
+        "avg":            float(avg),
     }
 
 

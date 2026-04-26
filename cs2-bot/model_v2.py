@@ -18,9 +18,20 @@ Required input fields per play:
   player, team, opponent, line
   over_prob, under_prob, edge       (all 0–100 percent floats)
   variance      ('low'|'medium'|'high')
+  variance_num  (float, raw σ — used for adjusted_edge & coin-flip rule)
+  avg           (float, projected mean for the stat)
   stomp         (bool)
   hit_rate      (0–100 percent float)
   short_map_proj (float, projected stat on shorter maps)
+
+Edge handling:
+  adjusted_edge = max(0, edge − variance_num × 0.5)
+  All edge gates (NO BET threshold, A grade, slip-build) use the
+  ADJUSTED edge so high-variance plays are penalised. The raw `edge`
+  is preserved on the play dict for display.
+
+Coin-flip-with-high-variance NO BET rule:
+  variance_num ≥ 9 AND |avg − line| < 2  →  forced NO BET.
 """
 
 import itertools
@@ -36,19 +47,33 @@ def grade_prop(p: dict) -> dict:
     short_fail = p["short_map_proj"] < p["line"]
     stomp = bool(p.get("stomp", False))
 
-    # ── NO BET filter ────────────────────────────────────────────────
-    if p["edge"] < 6 or prob < 55:
-        return {**p, "decision": "NO BET", "grade": "NO BET"}
+    # Adjusted edge — penalise high-variance plays. Used for ALL edge
+    # gates below; raw edge stays on the dict for display.
+    variance_num = float(p.get("variance_num", 6.0))
+    adjusted_edge = max(0.0, float(p["edge"]) - variance_num * 0.5)
+
+    # ── NO BET filter (uses ADJUSTED edge) ───────────────────────────
+    if adjusted_edge < 6 or prob < 55:
+        return {**p, "decision": "NO BET", "grade": "NO BET",
+                "adjusted_edge": adjusted_edge}
+
+    # NEW: coin-flip-with-high-variance trap
+    #   variance_num ≥ 9 AND |avg − line| < 2  →  forced NO BET
+    avg = float(p.get("avg", p["line"]))
+    if variance_num >= 9 and abs(avg - float(p["line"])) < 2:
+        return {**p, "decision": "NO BET", "grade": "NO BET",
+                "adjusted_edge": adjusted_edge}
 
     # HARD FAIL: fragile overs (short-map fail + high variance OR stomp)
     if decision == "OVER" and short_fail and (p["variance"] == "high" or stomp):
-        return {**p, "decision": "NO BET", "grade": "NO BET"}
+        return {**p, "decision": "NO BET", "grade": "NO BET",
+                "adjusted_edge": adjusted_edge}
 
     grade = "B"
 
-    # ── A grade (strict) ─────────────────────────────────────────────
+    # ── A grade (strict, ADJUSTED edge) ──────────────────────────────
     if (
-        p["edge"] >= 10
+        adjusted_edge >= 10
         and prob >= 65
         and p["hit_rate"] >= 60
         and p["variance"] != "high"
@@ -66,7 +91,8 @@ def grade_prop(p: dict) -> dict:
     if decision == "UNDER" and short_fail and grade == "B":
         grade = "A"
 
-    return {**p, "decision": decision, "grade": grade}
+    return {**p, "decision": decision, "grade": grade,
+            "adjusted_edge": adjusted_edge}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -74,7 +100,8 @@ def grade_prop(p: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────
 def limit_A_plays(graded_props: list[dict], max_A: int = 3) -> list[dict]:
     A_plays = [p for p in graded_props if p["grade"] == "A"]
-    A_plays.sort(key=lambda x: x["edge"], reverse=True)
+    # Rank by ADJUSTED edge so high-variance plays don't beat clean ones.
+    A_plays.sort(key=lambda x: x.get("adjusted_edge", x["edge"]), reverse=True)
     keep_A = A_plays[:max_A]
     keep_A_ids = {id(x) for x in keep_A}
     for p in graded_props:
@@ -90,12 +117,15 @@ def build_slips(props: list[dict], sizes=(2, 3, 4, 6)) -> list[dict]:
     def get_prob(p):
         return p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
 
+    def get_adj_edge(p):
+        return p.get("adjusted_edge", p["edge"])
+
     playable = [
         p for p in props
         if p["decision"] != "NO BET"
         and p["grade"] in ("A", "B")
         and get_prob(p) >= 60
-        and p["edge"] >= 6
+        and get_adj_edge(p) >= 6   # ADJUSTED edge gate
     ]
 
     slips: list[dict] = []
@@ -106,16 +136,20 @@ def build_slips(props: list[dict], sizes=(2, 3, 4, 6)) -> list[dict]:
             teams = [p["team"] for p in combo]
             if len(set(teams)) != len(teams):
                 continue  # same-team inside slip
-            probs = [get_prob(p) for p in combo]
-            edges = [p["edge"] for p in combo]
-            avg_prob = sum(probs) / len(probs)
-            avg_edge = sum(edges) / len(edges)
-            score = (avg_prob * 0.5) + (avg_edge * 0.5)
+            probs     = [get_prob(p)     for p in combo]
+            adj_edges = [get_adj_edge(p) for p in combo]
+            raw_edges = [p["edge"]       for p in combo]
+            avg_prob     = sum(probs)     / len(probs)
+            avg_adj_edge = sum(adj_edges) / len(adj_edges)
+            avg_raw_edge = sum(raw_edges) / len(raw_edges)
+            # Score uses ADJUSTED edge so high-variance combos drop in rank.
+            score = (avg_prob * 0.5) + (avg_adj_edge * 0.5)
             slips.append({
                 "legs": list(combo),
                 "score": score,
                 "avg_prob": avg_prob,
-                "avg_edge": avg_edge,
+                "avg_edge": avg_raw_edge,        # raw edge for display
+                "avg_adj_edge": avg_adj_edge,    # adjusted edge for transparency
                 "size": size,
             })
     slips.sort(key=lambda x: x["score"], reverse=True)
@@ -153,10 +187,17 @@ def format_for_discord(
             prob = p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
             tag  = "🟢" if p["decision"] == "OVER" else ("🔴" if p["decision"] == "UNDER" else "⚪")
             grade_label = p["grade"]
+            raw_e = p["edge"]
+            adj_e = p.get("adjusted_edge", raw_e)
+            edge_str = (
+                f"Edge: +{raw_e:.1f}% (adj +{adj_e:.1f}%)"
+                if abs(adj_e - raw_e) >= 0.05 else
+                f"Edge: +{raw_e:.1f}%"
+            )
             out.append(
                 f"{tag} {p['player']} vs {p['opponent']} | "
                 f"{p['decision']} {p['line']} | "
-                f"{prob:.0f}% | Grade: {grade_label} | Edge: +{p['edge']:.1f}%"
+                f"{prob:.0f}% | Grade: {grade_label} | {edge_str}"
             )
         out.append("")
 
