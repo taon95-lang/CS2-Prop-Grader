@@ -6364,6 +6364,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "bc14746c-1dd4-4126-9b00-21fb241544c6",
+      "ts": 1777202851.69257,
+      "date": "2026-04-26",
+      "player": "olimp",
+      "display": "Olimp",
+      "line": 29.5,
+      "stat": "Kills",
+      "opponent": "ursa",
+      "over_pct": 40.0,
+      "under_pct": 60.0,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 27.16,
+      "hist_median": 28.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
