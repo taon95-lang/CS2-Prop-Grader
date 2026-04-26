@@ -48,10 +48,16 @@ Hard NO BET filters (in order):
   4. OVER + short-map fail + (high var OR stomp) → NO BET (fragile over)
 
 Value classification (independent of grade):
-  STRONG VALUE   — adjusted_edge ≥ 10 AND var_score ≤ 7
+  STRONG VALUE   — adjusted_edge ≥ 10 AND hit_rate ≥ 60
   MODERATE VALUE — adjusted_edge ≥ 6
   LOW VALUE      — otherwise
   NO VALUE       — only set by hard-NO-BET filter (1) above
+
+Elite/POTD block (post-classification):
+  If ANY profile penalty triggered (hit_rate<50, short_map<line,
+  stomp), the play cannot be POTD (potd=False) and any STRONG
+  VALUE label is demoted to MODERATE — elite status requires
+  a clean profile.
 
 Mispriced flag (diagnostic):
   |normal_map_proj − line| ≥ 3 AND hit_rate ≥ 60
@@ -111,12 +117,28 @@ def grade_prop(p: dict) -> dict:
     )
 
     # ── VALUE CLASSIFICATION ─────────────────────────────────────────
-    if adjusted_edge >= 10 and var_score <= 7:
+    # STRONG now requires reliable history (hit_rate ≥ 60) instead of
+    # the previous variance gate. High-variance plays can still earn
+    # STRONG provided their historical hit-rate backs them up.
+    if adjusted_edge >= 10 and p["hit_rate"] >= 60:
         value = "STRONG VALUE"
     elif adjusted_edge >= 6:
         value = "MODERATE VALUE"
     else:
         value = "LOW VALUE"
+
+    # ── POTD / ELITE BLOCK ───────────────────────────────────────────
+    # If ANY of the three profile penalties were triggered above, the
+    # play cannot be Pick-Of-The-Day and any STRONG VALUE label is
+    # demoted to MODERATE — elite status requires a clean profile.
+    if (
+        p["hit_rate"] < 50
+        or p["short_map_proj"] < p["line"]
+        or p.get("stomp")
+    ):
+        p["potd"] = False
+        if value == "STRONG VALUE":
+            value = "MODERATE VALUE"
 
     # Common return scaffold — every code path below carries these
     extras = {
