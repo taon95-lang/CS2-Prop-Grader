@@ -30,10 +30,16 @@ Variance score (categorical → fixed numeric):
   high → 10
 
 Edge handling:
-  adjusted_edge = edge − var_score × 0.5
-  All edge gates (NO BET threshold, A grade, slip-build) use the
-  ADJUSTED edge so high-variance plays are penalised. The raw `edge`
-  is preserved on the play dict for display.
+  Profile-based stepwise penalties applied independently:
+    weak hit-rate (<50%)               → −5
+    short-map projection below line    → −5
+    opponent stomp risk                → −3
+  adjusted_edge = edge − (sum of triggered penalties)
+  Worst case (all three) = edge − 13.
+  Variance is NOT subtracted from the edge — it's enforced via
+  separate var_score gates in the value classifier and the coin-
+  flip NO BET filter. The raw `edge` is preserved on the play
+  dict for display.
 
 Hard NO BET filters (in order):
   1. hit_rate < 40 AND variance == 'high'        → NO BET / NO VALUE
@@ -66,10 +72,25 @@ def grade_prop(p: dict) -> dict:
     stomp = bool(p.get("stomp", False))
 
     # ── VARIANCE SCORE (categorical bucket → fixed numeric score) ────
+    # Still used by the value classification (STRONG requires var≤7)
+    # and the coin-flip NO BET rule (var≥9 + |avg-line|<2).
     var_score = {"low": 3, "medium": 6, "high": 10}.get(p["variance"], 6)
 
     # ── ADJUSTED EDGE ────────────────────────────────────────────────
-    adjusted_edge = p["edge"] - (var_score * 0.5)
+    # Profile-based stepwise penalties — each triggers independently:
+    #   • weak hit-rate (<50%)               → −5
+    #   • short-map projection below line    → −5
+    #   • opponent stomp risk                → −3
+    # Worst case (all three) = edge − 13. Variance is NOT subtracted
+    # from the edge anymore; it's enforced separately via var_score
+    # gates in the value classifier and coin-flip filter below.
+    adjusted_edge = p["edge"]
+    if p["hit_rate"] < 50:
+        adjusted_edge -= 5
+    if p["short_map_proj"] < p["line"]:
+        adjusted_edge -= 5
+    if p.get("stomp"):
+        adjusted_edge -= 3
 
     # ── HARD NO BET: weak history + high variance ────────────────────
     # If the model has weak hit-rate evidence (<40%) AND variance is
