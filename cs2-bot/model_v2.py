@@ -299,15 +299,37 @@ def run_model(
     graded = [grade_prop(dict(p)) for p in props]
     graded = limit_A_plays(graded, max_A=max_A)
 
-    # ── FORCE CONSISTENCY ────────────────────────────────────────────
-    # Ensure every NO BET play carries a flat, normalised final-call
-    # and weighted-score label so downstream consumers (display,
-    # exports, weighted-score machinery) never see drift between
-    # `decision` and the play's other status fields.
+    # ── FINAL CONSISTENCY CHECK ──────────────────────────────────────
+    # Walks every graded play and normalises its status fields so
+    # downstream consumers (slip builder, display, exports) never see
+    # drift between grade / decision / value / sizing flags.
+    #
+    # Rule order matters:
+    #   1. Weak grade (C/D/F) → cap value at LOW, half size, no POTD
+    #   2. NO BET           → zero size, value = NO PLAY, normalised
+    #                          final_call + weighted-score label
+    #   3. Hard block       → STRONG VALUE is reserved for grade A;
+    #                          any STRONG on a non-A play is demoted
+    #                          to MODERATE so slips can never carry a
+    #                          "STRONG" leg below A grade.
     for p in graded:
+        # 1. weak-grade cap
+        if p["grade"] in ("C", "D", "F"):
+            p["potd"]     = False
+            p["bet_size"] = 0.5
+            p["value"]    = "LOW VALUE"
+
+        # 2. NO BET normalisation
         if p["decision"] == "NO BET":
-            p["final_call"] = "NO BET"
+            p["potd"]                 = False
+            p["bet_size"]             = 0
+            p["value"]                = "NO PLAY"
+            p["final_call"]           = "NO BET"
             p["weighted_score_label"] = "N/A"
+
+        # 3. HARD BLOCK: no elite value on weak grades
+        if p["grade"] != "A" and p.get("value") == "STRONG VALUE":
+            p["value"] = "MODERATE VALUE"
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(

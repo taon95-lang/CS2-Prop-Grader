@@ -5587,6 +5587,48 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "a9cd03e2-481c-4f9c-8e15-667b21968119",
+      "ts": 1777188273.191238,
+      "date": "2026-04-26",
+      "player": "jdc",
+      "display": "Jdc",
+      "line": 30.5,
+      "stat": "Kills",
+      "opponent": "Sparta",
+      "over_pct": 32.0,
+      "under_pct": 68.0,
+      "grade": "8/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "UNDER",
+      "auto_no_bet": false,
+      "sim_median": 27.45,
+      "hist_median": 26.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
+    },
+    {
+      "id": "5af9f0be-0cc6-4e9e-a3e0-8df1027a3f5d",
+      "ts": 1777188369.773403,
+      "date": "2026-04-26",
+      "player": "faven",
+      "display": "Faven",
+      "line": 29.0,
+      "stat": "Kills",
+      "opponent": "Sparta",
+      "over_pct": 72.0,
+      "under_pct": 28.0,
+      "grade": "7/10 (Elite edge (capped))",
+      "grade_label": null,
+      "recommendation": "OVER",
+      "auto_no_bet": false,
+      "sim_median": 31.68,
+      "hist_median": 32.0,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": null
     }
   ]
 }
