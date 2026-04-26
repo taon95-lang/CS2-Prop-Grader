@@ -19,6 +19,7 @@ from deep_analysis import run_deep_analysis
 from simulator import run_simulation
 from keep_alive import keep_alive
 from grades_db import save_grade, record_result, get_entries_for_date, get_pending_entries, get_recent_entries, date_label
+from model_v2 import run_model as run_model_v2
 from scraper import get_actual_result as _scraper_get_actual_result
 from prizepicks import get_cs2_lines, get_player_line, get_all_cs2_props, invalidate_cache as pp_invalidate
 from grade_engine import (
@@ -371,6 +372,49 @@ def _cache_play_for_slip(
         # Cache-side team key: never let an empty team collapse into one bucket
         team_for_cache = (team or "").strip() or f"?{(player or '').lower()}"
 
+        # ── v2 model extras: pulled directly from sim_result when present ──
+        # These power the alt !slip2 / !modelv2 grader (model_v2.py). They
+        # are stored on every cache entry so the v2 model has accurate
+        # variance / hit_rate / stomp / short-map signals without re-scraping.
+        sim_std_val = sim_result.get("sim_std")
+        if isinstance(sim_std_val, (int, float)):
+            # Bucket: low ≤ 4.5, med ≤ 7.5, high otherwise
+            if   sim_std_val <= 4.5: variance_bucket = "low"
+            elif sim_std_val <= 7.5: variance_bucket = "medium"
+            else:                    variance_bucket = "high"
+        else:
+            variance_bucket = "medium"
+
+        hit_rate_val = sim_result.get("hit_rate")
+        if isinstance(hit_rate_val, (int, float)):
+            v2_hit_rate = float(hit_rate_val)
+        else:
+            v2_hit_rate = max(over_pct, under_pct)  # neutral fallback
+
+        stomp_val = bool(sim_result.get("stomp_via_rank") or False)
+
+        # Short-map projection: prefer per-map kpr × short-map round count.
+        # Fallback: scale sim_median by short/full ratio (≈ 0.78 for CS2 BO3
+        # Maps 1+2 vs full series). If we have nothing, use line itself
+        # (neutral — no short_fail trigger).
+        short_proj = None
+        map_kpr   = sim_result.get("map_kpr") or {}
+        total_rds = sim_result.get("total_projected_rounds")
+        if map_kpr and isinstance(total_rds, (int, float)) and total_rds > 0:
+            try:
+                avg_kpr = sum(map_kpr.values()) / len(map_kpr)
+                # 24 rds is a typical full BO3 map; short ≈ 24 × 2 = 48 of total
+                short_rds = min(48.0, float(total_rds) * 0.78)
+                short_proj = avg_kpr * short_rds
+            except Exception:
+                short_proj = None
+        if short_proj is None:
+            sm = sim_result.get("sim_median")
+            if isinstance(sm, (int, float)):
+                short_proj = float(sm) * 0.78
+            else:
+                short_proj = float(line)  # neutral
+
         SLIP_CACHE.append({
             "ts":           _time.time(),
             "player":       player,
@@ -386,6 +430,11 @@ def _cache_play_for_slip(
             "probability":  prob,
             "over_prob":    over_pct,
             "under_prob":   under_pct,
+            # ── v2 model extras (see model_v2.py) ──
+            "v2_variance":       variance_bucket,
+            "v2_hit_rate":       v2_hit_rate,
+            "v2_stomp":          stomp_val,
+            "v2_short_map_proj": float(short_proj),
         })
     except Exception as _e:
         logger.warning(f"[slip_cache] skip — {_e}")
@@ -4756,6 +4805,188 @@ async def cmd_autoslip(ctx, *args):
     )
     await ctx.send(header)
 
+    for i in range(0, len(formatted), 1900):
+        chunk = formatted[i : i + 1900]
+        await ctx.send(f"```\n{chunk}\n```")
+
+
+# ---------------------------------------------------------------------------
+# !slip2 / !modelv2 — alternative grader using model_v2.py
+# ---------------------------------------------------------------------------
+
+def _to_v2_play(p: dict) -> dict:
+    """
+    Adapt a SLIP_CACHE / DB-shaped play into the dict that model_v2 expects.
+
+    Required v2 fields: player, team, opponent, line, over_prob, under_prob,
+    edge, variance ('low'|'medium'|'high'), stomp (bool), hit_rate (0-100),
+    short_map_proj (float).
+
+    Source-of-truth priority for each v2 signal:
+      1. v2_* field stored in the cache when the play was graded
+         (populated by _cache_play_for_slip from sim_result fields).
+      2. Best-effort derivation from data we DO have.
+      3. Neutral default that won't trigger HARD FAIL or block A grade.
+
+    Team is normalized via _norm_team_for_dedup() and a separate
+    `_disp_team` is kept for rendering, mirroring the !slip / !autoslip
+    adapter pattern.
+    """
+    raw_team = p.get("team") or ""
+    norm_team = _norm_team_for_dedup(raw_team)
+    if raw_team and not str(raw_team).startswith("?") and not str(raw_team).startswith("dbplay_"):
+        disp_team = raw_team.strip()
+    else:
+        disp_team = "?"
+
+    op = float(p.get("over_prob") or 0.0)
+    up = float(p.get("under_prob") or 0.0)
+    edge = float(p.get("edge_percent") or p.get("edge") or 0.0)
+    line = float(p.get("line") or 0.0)
+
+    # variance: stored at grade time, else derived from numeric grade
+    variance = p.get("v2_variance")
+    if variance not in ("low", "medium", "high"):
+        g = p.get("grade") or 0
+        try:
+            g = int(g)
+        except (TypeError, ValueError):
+            g = 0
+        if   g >= 8: variance = "low"
+        elif g >= 5: variance = "medium"
+        else:        variance = "high"
+
+    # hit_rate: stored at grade time, else proxy = max(over_prob, under_prob)
+    hr = p.get("v2_hit_rate")
+    if not isinstance(hr, (int, float)):
+        hr = max(op, up)
+
+    # stomp: stored at grade time, else proxy = very high edge (≥ 25%)
+    if "v2_stomp" in p:
+        stomp = bool(p.get("v2_stomp"))
+    else:
+        stomp = edge >= 25.0
+
+    # short_map_proj: stored at grade time, else neutral (= line, no fail)
+    smp = p.get("v2_short_map_proj")
+    if not isinstance(smp, (int, float)):
+        smp = line
+
+    return {
+        "player":         p.get("player") or "?",
+        "team":           norm_team,
+        "_disp_team":     disp_team,
+        "opponent":       p.get("opponent") or "?",
+        "line":           line,
+        "over_prob":      op,
+        "under_prob":     up,
+        "edge":           edge,
+        "variance":       variance,
+        "stomp":          stomp,
+        "hit_rate":       float(hr),
+        "short_map_proj": float(smp),
+    }
+
+
+@bot.command(name="slip2", aliases=["modelv2", "v2", "slipsv2"])
+async def cmd_slip2(ctx, *args):
+    """
+    !slip2 [hours] [top_n]
+
+    Alternative slip builder using model_v2.py:
+      • Stronger NO BET filter (edge < 6 OR prob < 55 → NO BET)
+      • HARD FAIL on fragile overs (short-map fail + high variance OR stomp)
+      • Strict A grade (edge ≥ 10, prob ≥ 65, hit_rate ≥ 60, !high variance)
+      • UNDER boost on short maps
+      • A-grade plays capped at top 3 by edge
+      • Score = avg_prob × 0.5 + avg_edge × 0.5
+      • Sizes: 2 / 3 / 4 / 6 leg
+
+    Defaults: hours = 24, top_n = 5.
+    Pulls from in-memory cache + persistent grades_history.json (same
+    pool as !autoslip).
+    """
+    # Parse args
+    hours = 24.0
+    top_n = 5
+    try:
+        if len(args) >= 1: hours = max(0.5, float(args[0]))
+        if len(args) >= 2: top_n = max(1, min(25, int(args[1])))
+    except ValueError:
+        await ctx.send(embed=discord.Embed(
+            title="❌ Bad arguments",
+            description="Usage: `!slip2 [hours] [top_n]`  e.g. `!slip2 24 5`",
+            color=0xFF4136,
+        ))
+        return
+
+    # Build the same merged pool that !autoslip uses
+    cutoff = _time.time() - (hours * 3600)
+    mem_pool = [p for p in SLIP_CACHE if p.get("ts", 0) >= cutoff]
+    db_pool  = _db_plays_in_window(hours)
+    pool = _merge_pools(mem_pool, db_pool)
+
+    if len(pool) < 2:
+        await ctx.send(embed=discord.Embed(
+            title="📭 Not enough plays cached",
+            description=(
+                f"Found **{len(pool)}** play(s) in the last **{hours:.0f}h** "
+                f"(memory: {len(mem_pool)}, history file: {len(db_pool)}).\n"
+                f"Run `!grade`, `!pp`, `!parlay`, or `!teamscan` first to populate "
+                f"the cache, then come back to `!slip2`."
+            ),
+            color=0xFFDC00,
+        ))
+        return
+
+    # Cap to top-25 by best probability before model v2 runs (combinatorial guard)
+    pool.sort(
+        key=lambda x: max(
+            float(x.get("over_prob") or 0.0),
+            float(x.get("under_prob") or 0.0),
+        ),
+        reverse=True,
+    )
+    if len(pool) > 25:
+        pool = pool[:25]
+
+    # Adapt → model v2
+    v2_props = [_to_v2_play(p) for p in pool]
+
+    # Run the v2 pipeline
+    try:
+        graded, slips, formatted = run_model_v2(
+            v2_props,
+            sizes=(2, 3, 4, 6),
+            max_A=3,
+            top_n=top_n,
+            show_grades=True,
+            disp_team_key="_disp_team",
+        )
+    except Exception as exc:
+        logger.error(f"[slip2] run_model_v2 failed: {exc}", exc_info=True)
+        await ctx.send(embed=discord.Embed(
+            title="❌ model_v2 failed",
+            description=str(exc)[:300],
+            color=0xFF4136,
+        ))
+        return
+
+    # Diagnostic: per-bucket counts so user can see what the model did
+    n_a       = sum(1 for g in graded if g["grade"] == "A")
+    n_b       = sum(1 for g in graded if g["grade"] == "B")
+    n_no_bet  = sum(1 for g in graded if g["grade"] == "NO BET")
+    n_slips   = len(slips)
+
+    header = (
+        f"🧪 **MODEL v2** · last **{hours:.0f}h** · pool **{len(pool)}** "
+        f"(memory: `{len(mem_pool)}` · history file: `{len(db_pool)}`)\n"
+        f"📊 Graded: **A:** `{n_a}` · **B:** `{n_b}` · **NO BET:** `{n_no_bet}` · "
+        f"slips: **{n_slips}** (showing top {min(top_n, n_slips)})"
+    )
+    await ctx.send(header)
+
+    # Send formatted output in chunks (Discord 2000-char limit)
     for i in range(0, len(formatted), 1900):
         chunk = formatted[i : i + 1900]
         await ctx.send(f"```\n{chunk}\n```")
