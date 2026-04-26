@@ -80,6 +80,12 @@ Per-play status fields written by run_model's consistency pass
   bet_size     — 0 when MASTER FINAL FILTER fires (also set to 0
                  by Rule 2 NO BET, 0.5 by Rule 1 weak grade).
   confidence   — 0 when MASTER FINAL FILTER fires (else unset).
+  can_bet      — Soft eligibility flag (always set). True if
+                 score ≥ 55 AND hit_rate ≥ 50 AND (short_map_proj
+                 > line OR normal_map_proj > line). Looser than
+                 the master filter (OR between projections, not
+                 AND), so a play can have can_bet=True even when
+                 the master filter fires.
 
 MASTER FINAL FILTER (HARD OVERRIDE — runs last, authoritative):
   If score < 55 OR hit_rate < 50 OR short_map_proj < line
@@ -449,6 +455,20 @@ def run_model(
             p["confidence"]  = 0
             p["potd"]        = False
             p["lock"]        = False
+
+        # 7. CAN_BET (soft eligibility flag) ────────────────────────
+        # Looser than the master filter — needs only ONE projection
+        # above the line (OR), not both. Diagnostic field that flags
+        # whether the play meets minimum betting criteria at all,
+        # regardless of POTD / LOCK / master-filter results.
+        p["can_bet"] = (
+            p["score"]    >= 55
+            and p["hit_rate"] >= 50
+            and (
+                p["short_map_proj"]  > p["line"]
+                or p["normal_map_proj"] > p["line"]
+            )
+        )
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(
