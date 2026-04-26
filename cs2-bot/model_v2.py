@@ -63,22 +63,29 @@ Mispriced flag (diagnostic):
   |normal_map_proj − line| ≥ 3 AND hit_rate ≥ 60
   Surfaces "the line looks soft" plays without changing grade.
 
-Per-play status fields written by run_model's consistency pass:
+Per-play status fields written by run_model's consistency pass
+(applied in order; later rules override earlier ones):
   score        — 0–100 confidence on the chosen direction (= prob)
-  final_label  — 'NO BET' when the output guard fires (else unset)
-  units        — 0 when the output guard fires (else unset)
-  potd         — True only if the strict elite filter passes:
+  potd         — Set by ELITE FILTER. True only if all five hold:
                    adjusted_edge ≥ 10
                    hit_rate     ≥ 65
                    short_map_proj  > line
                    normal_map_proj > line
                    score        ≥ 70
                  Else False.
-  lock         — True only if potd AND variance != 'high'. Else False.
+  lock         — Set by LOCK rule. True only if potd AND
+                 variance != 'high'. Else False.
+  final_label  — Set to 'NO BET' by MASTER FINAL FILTER when any
+                 fail condition holds (else unset).
+  bet_size     — 0 when MASTER FINAL FILTER fires (also set to 0
+                 by Rule 2 NO BET, 0.5 by Rule 1 weak grade).
+  confidence   — 0 when MASTER FINAL FILTER fires (else unset).
 
-Final output guard (forces NO BET output regardless of grade):
-  score < 55 OR hit_rate < 50 OR short_map_proj < line
-  OR normal_map_proj < line
+MASTER FINAL FILTER (HARD OVERRIDE — runs last, authoritative):
+  If score < 55 OR hit_rate < 50 OR short_map_proj < line
+  OR normal_map_proj < line:
+      final_label = 'NO BET', bet_size = 0, confidence = 0,
+      potd = False, lock = False
 """
 
 import itertools
@@ -403,25 +410,9 @@ def run_model(
         if p["grade"] != "A" and p.get("value") == "STRONG VALUE":
             p["value"] = "MODERATE VALUE"
 
-        # 4. FINAL OUTPUT GUARD ─────────────────────────────────────
-        # Any single fragility signal forces a hard NO BET output:
-        # weak score (<55), weak history (<50), short-map fail, or
-        # normal-map projection below the line.
-        if (
-            p["score"] < 55
-            or p["hit_rate"] < 50
-            or p["short_map_proj"] < p["line"]
-            or p["normal_map_proj"] < p["line"]
-        ):
-            p["final_label"] = "NO BET"
-            p["potd"]        = False
-            p["lock"]        = False
-            p["units"]       = 0
-
-        # 5. ELITE FILTER (very strict) ─────────────────────────────
+        # 4. ELITE FILTER (very strict) ─────────────────────────────
         # POTD is granted ONLY if all five elite criteria hold; any
-        # miss zeros it out. Re-evaluates potd from scratch — this
-        # rule is the authoritative source for the field.
+        # miss zeros it out. Re-evaluates potd from scratch.
         if (
             p["adjusted_edge"]   >= 10
             and p["hit_rate"]    >= 65
@@ -433,13 +424,31 @@ def run_model(
         else:
             p["potd"] = False
 
-        # 6. LOCK ───────────────────────────────────────────────────
+        # 5. LOCK ───────────────────────────────────────────────────
         # Lock = POTD AND not high-variance. Variance can take a
         # POTD play down a tier even when every other signal aligns.
         if p["potd"] and p["variance"] != "high":
             p["lock"] = True
         else:
             p["lock"] = False
+
+        # 6. MASTER FINAL FILTER (HARD OVERRIDE) ────────────────────
+        # Authoritative last word. Any single fragility signal
+        # zeroes out the play regardless of what earlier rules set:
+        # weak score (<55), weak history (<50), short-map fail, or
+        # normal-map projection below the line.
+        fail_conditions = (
+            p["score"] < 55
+            or p["hit_rate"] < 50
+            or p["short_map_proj"] < p["line"]
+            or p["normal_map_proj"] < p["line"]
+        )
+        if fail_conditions:
+            p["final_label"] = "NO BET"
+            p["bet_size"]    = 0
+            p["confidence"]  = 0
+            p["potd"]        = False
+            p["lock"]        = False
 
     slips = build_slips(graded, sizes=sizes)
     text = format_for_discord(
