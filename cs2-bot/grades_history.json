@@ -6427,6 +6427,27 @@
       "actual": null,
       "outcome": null,
       "baseline_match_id": null
+    },
+    {
+      "id": "bed436de-013e-41e1-8daf-e5ba3b16d4a8",
+      "ts": 1777264604.171312,
+      "date": "2026-04-27",
+      "player": "jackasmo",
+      "display": "Jackasmo",
+      "line": 33.5,
+      "stat": "Kills",
+      "opponent": "Leo",
+      "over_pct": 54.5,
+      "under_pct": 45.5,
+      "grade": "N/A",
+      "grade_label": null,
+      "recommendation": "PASS",
+      "auto_no_bet": false,
+      "sim_median": 33.22,
+      "hist_median": 35.5,
+      "actual": null,
+      "outcome": null,
+      "baseline_match_id": "2393514"
     }
   ]
 }
