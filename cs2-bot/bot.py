@@ -6,6 +6,7 @@ import os
 import re
 import asyncio
 import logging
+import statistics
 from scraper import (
     get_player_info,
     get_player_info_fallback,
@@ -414,6 +415,51 @@ def _cache_play_for_slip(
 
         stomp_val = bool(sim_result.get("stomp_via_rank") or False)
 
+        # ── v2_median: median of last 10 map1+2 kills (REQUIRED-priority) ──
+        # Strict rule per spec: only fall back to v2_avg when sample < 5.
+        # Source: sim_result["map_kills"] — newest-first per-map kill totals
+        # from HLTV. Take the most recent 10 entries (any map; map1+map2 of
+        # each series are both included since the scraper returns each map
+        # individually). v2_median feeds model_v2.decide_side's "median"
+        # signal which drives the conflicting_core NO BET filter.
+        _map_kills_raw = sim_result.get("map_kills") or []
+        _last10_kills = []
+        for _m in _map_kills_raw[:10]:
+            _sv = _m.get("stat_value") if isinstance(_m, dict) else None
+            if isinstance(_sv, (int, float)):
+                _last10_kills.append(float(_sv))
+        if len(_last10_kills) >= 5:
+            v2_median = float(statistics.median(_last10_kills))
+        else:
+            v2_median = float(v2_avg)   # spec'd fallback only when n<5
+
+        # ── v2_multi_kill: HIGH/MEDIUM/LOW from KPR thresholds ──
+        # Source: period_stats["kpr"] (HLTV 90-day aggregate). Spec:
+        #   kpr ≥ 0.80 → HIGH ; kpr ≥ 0.70 → MEDIUM ; else LOW.
+        # No KPR available → MEDIUM (neutral, doesn't affect decide_side
+        # since multi_kill is currently carried-but-unused in the verdict).
+        _ps_for_mk = sim_result.get("period_stats") or {}
+        _kpr_val = _ps_for_mk.get("kpr") if isinstance(_ps_for_mk, dict) else None
+        if isinstance(_kpr_val, (int, float)):
+            if   _kpr_val >= 0.80: v2_multi_kill = "HIGH"
+            elif _kpr_val >= 0.70: v2_multi_kill = "MEDIUM"
+            else:                  v2_multi_kill = "LOW"
+        else:
+            v2_multi_kill = "MEDIUM"
+
+        # ── v2_round_swing: read existing value from grade_pkg, no recalc ──
+        # Source: sim_result["grade_pkg"]["round_swing"]["level"] which
+        # compute_grade_package already populates (LOW/MEDIUM/HIGH). Per
+        # spec: do NOT recalculate; use existing value, fall back to MEDIUM
+        # only when the field is missing entirely.
+        _gp_for_rs = sim_result.get("grade_pkg") or {}
+        _rs_dict   = (_gp_for_rs.get("round_swing") or {}) if isinstance(_gp_for_rs, dict) else {}
+        _rs_level  = (_rs_dict.get("level") or "").upper() if isinstance(_rs_dict, dict) else ""
+        if _rs_level in ("LOW", "MEDIUM", "HIGH"):
+            v2_round_swing = _rs_level
+        else:
+            v2_round_swing = "MEDIUM"
+
         # Short-map projection: prefer per-map kpr × short-map round count.
         # Fallback: scale sim_median by short/full ratio (≈ 0.78 for CS2 BO3
         # Maps 1+2 vs full series). If we have nothing, use line itself
@@ -458,6 +504,10 @@ def _cache_play_for_slip(
             "v2_stomp":          stomp_val,
             "v2_short_map_proj": float(short_proj),
             "v2_avg":            v2_avg,
+            # ── New decide_side inputs (model_v2.decide_side / _to_decision_data) ──
+            "v2_median":         v2_median,         # median of last10 map1+2 kills (or v2_avg fallback when n<5)
+            "v2_multi_kill":     v2_multi_kill,     # HIGH / MEDIUM / LOW from period_stats kpr
+            "v2_round_swing":    v2_round_swing,    # LOW / MEDIUM / HIGH from grade_pkg.round_swing.level
         })
     except Exception as _e:
         logger.warning(f"[slip_cache] skip — {_e}")
@@ -1387,6 +1437,10 @@ def _analyze_player(
                 )
     sim_result["hs_rate_src"]   = hs_rate_src  # None for kills props, str for HS props
     sim_result["period_stats"]  = period_stats  # HLTV 90-day aggregate stats
+    # Per-map kill history — needed by _cache_play_for_slip to compute
+    # v2_median (model_v2.decide_side's "median" signal). Newest-first
+    # list of {map_name, stat_value, ...} dicts from the HLTV scrape.
+    sim_result["map_kills"]     = (info or {}).get("map_kills") or []
     sim_result["is_awper"]          = is_awper
     sim_result["awper_warn"]        = awper_warn
     sim_result["series_breakdown"]  = _series_breakdown   # per-series stat totals
@@ -4916,7 +4970,16 @@ def _to_v2_play(p: dict) -> dict:
     if not isinstance(vnum, (int, float)):
         vnum = {"low": 3.0, "medium": 6.0, "high": 9.0}.get(variance, 6.0)
 
-    return {
+    # ── decide_side inputs (model_v2.decide_side / _to_decision_data) ──
+    # Pulled from grade-time cache. _to_decision_data has neutral defaults
+    # (median=avg, swing=MEDIUM, multi_kill=MEDIUM) for older entries that
+    # predate these cache fields, so historical DB-loaded plays still grade
+    # without errors.
+    median_cached     = p.get("v2_median")
+    multi_kill_cached = p.get("v2_multi_kill")
+    swing_cached      = p.get("v2_round_swing")
+
+    out = {
         "player":          p.get("player") or "?",
         "team":            norm_team,
         "_disp_team":      disp_team,
@@ -4936,6 +4999,15 @@ def _to_v2_play(p: dict) -> dict:
         # line" volatility traps). Same source as `avg`.
         "normal_map_proj": float(avg),
     }
+    # Only forward decide_side fields when actually cached. _to_decision_data
+    # applies the documented defaults if these are absent.
+    if isinstance(median_cached, (int, float)):
+        out["median"] = float(median_cached)
+    if isinstance(multi_kill_cached, str) and multi_kill_cached.upper() in ("LOW", "MEDIUM", "HIGH"):
+        out["multi_kill"] = multi_kill_cached.upper()
+    if isinstance(swing_cached, str) and swing_cached.upper() in ("LOW", "MEDIUM", "HIGH"):
+        out["round_swing"] = swing_cached.upper()
+    return out
 
 
 @bot.command(name="slip2", aliases=["modelv2", "v2", "slipsv2"])

@@ -69,11 +69,14 @@ Existing hard NO BET filters (still applied AFTER decide_side picks a side):
   4. OVER + short-map fail + (high var OR stomp) → NO BET (fragile over)
 
 Score adjustments (applied inside grade_prop, before grade is set):
-  Score starts at `prob` (0–100). Profile penalties may reduce it:
-    UNDER + variance == 'high'                   → score −5
+  Score starts at `prob` (0–100), where `prob` is over_prob when the
+  3-state bet_side is OVER (covers literal OVER and LEAN OVER) and
+  under_prob when bet_side is UNDER. Profile penalties may reduce it:
+    bet_side == 'UNDER' + variance == 'high'     → score −5
   The master filter in run_model later trips NO BET on score < 55,
   so a 5-point dock can flip a borderline UNDER. Score is display
-  only — see the per-play status fields section below.
+  only — see the per-play status fields section below. LEAN / NO BET
+  early-return with score=None (no confidence = not bettable).
 
 Grade overrides (applied inside grade_prop, after the strict-A gate
 and after the variance/short-map downgrades):
@@ -119,9 +122,20 @@ Per-play status fields written by run_model's consistency pass
   confidence   — 0 when MASTER FINAL FILTER fires (else unset).
 
 MASTER FINAL FILTER (HARD OVERRIDE — runs last, authoritative):
-  If score < 55 OR hit_rate < 50 OR short_map_proj < line
+  If score is None OR score < 55 OR hit_rate < 50 OR short_map_proj < line
   OR normal_map_proj < line:
-      final_label = 'NO BET', bet_size = 0, confidence = 0
+      final_label = 'NO BET' (or 'LEAN' if decision was 'LEAN'),
+      bet_size = 0, confidence = 0
+  Note: score is None for the LEAN / NO BET early-return path in
+  grade_prop, so the None-check both prevents a TypeError and
+  correctly treats those plays as failed (no confidence = no play).
+
+DECISION LABELS (5-state, preserved literally on `decision`):
+  OVER, LEAN OVER, UNDER, LEAN, NO BET. The internal _bet_side helper
+  collapses to a 3-state (OVER / UNDER / None) for engine math —
+  LEAN OVER drives the OVER engine path (force-A, prob lookup, etc.)
+  while keeping its literal label for display. LEAN and NO BET both
+  early-return with grade='NO BET' so build_slips excludes them.
 """
 
 import itertools
@@ -279,19 +293,40 @@ def _to_decision_data(p: dict) -> dict:
 # ─────────────────────────────────────────────────────────────────────
 # Grade ONE prop
 # ─────────────────────────────────────────────────────────────────────
+def _bet_side(decision: str | None) -> str | None:
+    """
+    Map a 5-state decision (OVER / LEAN OVER / UNDER / LEAN / NO BET)
+    to the 3-state engine direction used by all internal math:
+        'OVER'   — bettable as an over (includes LEAN OVER)
+        'UNDER'  — bettable as an under
+        None     — not bettable (LEAN / NO BET)
+
+    The literal 5-state label is preserved on `p["decision"]` for display.
+    """
+    if decision in ("OVER", "LEAN OVER"):
+        return "OVER"
+    if decision == "UNDER":
+        return "UNDER"
+    return None
+
+
 def grade_prop(p: dict) -> dict:
-    # ── SIGNAL-COUNTING DECISION (replaces the old prob-based one) ──
+    # ── SIGNAL-COUNTING DECISION ─────────────────────────────────────
     # decide_side returns one of OVER / LEAN OVER / UNDER / LEAN /
-    # NO BET. We map LEAN OVER → OVER (carrying raw_verdict for the
-    # display layer), LEAN → NO BET (coin-flip pass), and NO BET →
-    # NO BET (return early with a minimal extras-shaped dict).
+    # NO BET. We PRESERVE the literal 5-state label on `decision` (so
+    # display can show LEAN OVER / LEAN distinctly) and use a 3-state
+    # `bet_side` helper for internal engine math (prob, score, grade,
+    # adjusted_edge, etc.).
+    #
+    # NO BET / LEAN → early-return with grade='NO BET' so build_slips
+    # excludes them. The literal label rides on `decision` for display.
     raw_verdict = decide_side(_to_decision_data(p))
     p["raw_verdict"] = raw_verdict
 
     if raw_verdict in ("NO BET", "LEAN"):
         return {
             **p,
-            "decision":      "NO BET",
+            "decision":      raw_verdict,        # preserved literal label
             "grade":         "NO BET",
             "value":         "NO VALUE",
             "mispriced":     False,
@@ -301,8 +336,9 @@ def grade_prop(p: dict) -> dict:
             "score":         None,
         }
 
-    decision = "OVER" if raw_verdict in ("OVER", "LEAN OVER") else "UNDER"
-    prob = p["over_prob"] if decision == "OVER" else p["under_prob"]
+    decision  = raw_verdict                       # 'OVER' / 'LEAN OVER' / 'UNDER'
+    bet_side  = _bet_side(decision)               # 'OVER' or 'UNDER' (engine math)
+    prob      = p["over_prob"] if bet_side == "OVER" else p["under_prob"]
 
     short_fail = p["short_map_proj"] < p["line"]
     stomp = bool(p.get("stomp", False))
@@ -339,7 +375,7 @@ def grade_prop(p: dict) -> dict:
     # plays are noisier than prob alone suggests. Drop 5 points so
     # borderline UNDERs slide under the master filter's <55 cut.
     # Mirrors the -5 adjusted_edge profile penalties in scale.
-    if decision == "UNDER" and p["variance"] == "high":
+    if bet_side == "UNDER" and p["variance"] == "high":
         score -= 5
 
     # Pin canonical `normal_map_proj` onto the play so all downstream
@@ -407,7 +443,7 @@ def grade_prop(p: dict) -> dict:
         return {**p, "decision": "NO BET", "grade": "NO BET", **extras}
 
     # ── NO BET: fragile overs (short-map fail + high var OR stomp) ──
-    if decision == "OVER" and short_fail and (p["variance"] == "high" or stomp):
+    if bet_side == "OVER" and short_fail and (p["variance"] == "high" or stomp):
         return {**p, "decision": "NO BET", "grade": "NO BET", **extras}
 
     grade = "B"
@@ -423,7 +459,7 @@ def grade_prop(p: dict) -> dict:
             grade = "A"
 
     # ── Downgrades ───────────────────────────────────────────────────
-    if short_fail and decision == "OVER":
+    if short_fail and bet_side == "OVER":
         grade = "B"
     if p["variance"] == "high":
         grade = "B"
@@ -437,11 +473,11 @@ def grade_prop(p: dict) -> dict:
     # "OVER + short_fail + (high var OR stomp)" hard NO BET (above)
     # still rules out the worst fragile overs, so this guarantee
     # only applies to plays that survive that gate.
-    if decision == "OVER" and adjusted_edge >= 10 and prob >= 58:
+    if bet_side == "OVER" and adjusted_edge >= 10 and prob >= 58:
         grade = "A"
 
     # ── UNDER boost (short maps favor unders) ────────────────────────
-    if decision == "UNDER" and short_fail and grade == "B":
+    if bet_side == "UNDER" and short_fail and grade == "B":
         grade = "A"
 
     return {**p, "decision": decision, "grade": grade, **extras}
@@ -467,14 +503,17 @@ def limit_A_plays(graded_props: list[dict], max_A: int = 3) -> list[dict]:
 # ─────────────────────────────────────────────────────────────────────
 def build_slips(props: list[dict], sizes=(2, 3, 4, 6)) -> list[dict]:
     def get_prob(p):
-        return p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
+        # LEAN OVER counts as OVER side for prob lookup; UNDER stays UNDER.
+        # NO BET / LEAN are filtered out by `playable` below before this runs.
+        return p["over_prob"] if _bet_side(p["decision"]) == "OVER" else p["under_prob"]
 
     def get_adj_edge(p):
         return p.get("adjusted_edge", p["edge"])
 
     playable = [
         p for p in props
-        if p["decision"] != "NO BET"
+        # Exclude both NO BET and LEAN — LEAN is "do not bet" by spec.
+        if p["decision"] not in ("NO BET", "LEAN")
         and p["grade"] in ("A", "B")
         and p.get("value") in ("STRONG VALUE", "MODERATE VALUE")
         and get_prob(p) >= 60
@@ -537,8 +576,13 @@ def format_for_discord(
                 -max(x["over_prob"], x["under_prob"]),
             ),
         ):
-            prob = p["over_prob"] if p["decision"] == "OVER" else p["under_prob"]
-            tag  = "🟢" if p["decision"] == "OVER" else ("🔴" if p["decision"] == "UNDER" else "⚪")
+            # 5-state decision: OVER / LEAN OVER → over_prob + 🟢
+            #                    UNDER             → under_prob + 🔴
+            #                    LEAN / NO BET     → max(prob)   + ⚪
+            _bs  = _bet_side(p["decision"])
+            prob = p["over_prob"] if _bs == "OVER" else (
+                   p["under_prob"] if _bs == "UNDER" else max(p["over_prob"], p["under_prob"]))
+            tag  = "🟢" if _bs == "OVER" else ("🔴" if _bs == "UNDER" else "⚪")
             grade_label = p["grade"]
             raw_e = p["edge"]
             adj_e = p.get("adjusted_edge", raw_e)
@@ -569,8 +613,12 @@ def format_for_discord(
             f"Avg Prob {slip['avg_prob']:.1f}% | Avg Edge +{slip['avg_edge']:.1f}%"
         )
         for leg in slip["legs"]:
-            prob = leg["over_prob"] if leg["decision"] == "OVER" else leg["under_prob"]
-            tag  = "🟢" if leg["decision"] == "OVER" else "🔴"
+            # Slip legs are pre-filtered to bettable plays only (OVER /
+            # LEAN OVER / UNDER), never LEAN or NO BET — but use the
+            # _bet_side helper to keep LEAN OVER on the OVER branch.
+            _bs_leg = _bet_side(leg["decision"])
+            prob = leg["over_prob"] if _bs_leg == "OVER" else leg["under_prob"]
+            tag  = "🟢" if _bs_leg == "OVER" else "🔴"
             team_show = leg.get(disp_team_key) or leg.get("team") or "?"
             value_str = leg.get("value", "")
             value_suffix = f" · {value_str}" if value_str else ""
@@ -632,11 +680,12 @@ def run_model(
             p["bet_size"] = 0.5
             p["value"]    = "LOW VALUE"
 
-        # 2. NO BET normalisation
-        if p["decision"] == "NO BET":
+        # 2. NO BET / LEAN normalisation (both are unactionable; LEAN's
+        # literal label is preserved on `decision` and `final_call`).
+        if p["decision"] in ("NO BET", "LEAN"):
             p["bet_size"]             = 0
             p["value"]                = "NO PLAY"
-            p["final_call"]           = "NO BET"
+            p["final_call"]           = p["decision"]    # 'NO BET' or 'LEAN'
             p["weighted_score_label"] = "N/A"
 
         # 3. HARD BLOCK: no elite value on weak grades
@@ -646,26 +695,34 @@ def run_model(
         # 4. MASTER FINAL FILTER (HARD OVERRIDE) ────────────────────
         # Authoritative last word. Any single fragility signal
         # zeroes out the play regardless of what earlier rules set:
-        # weak score (<55), weak history (<50), short-map fail, or
-        # normal-map projection below the line.
+        # weak score (<55 or absent), weak history (<50), short-map
+        # fail, or normal-map projection below the line.
+        #
+        # `score` is None for the LEAN / NO BET early-return path in
+        # grade_prop, so it must be treated as a fail (None is no
+        # confidence at all). Without the None-check this would
+        # TypeError on every LEAN/NO BET play.
+        score_val = p.get("score")
         fail_conditions = (
-            p["score"] < 55
+            (score_val is None or score_val < 55)
             or p["hit_rate"] < 50
             or p["short_map_proj"] < p["line"]
             or p["normal_map_proj"] < p["line"]
         )
         if fail_conditions:
-            p["final_label"] = "NO BET"
+            # Preserve the literal LEAN label on final_label when the
+            # play came in as LEAN; otherwise mark NO BET. (For LEAN
+            # plays, step 2 above already set final_call='LEAN' — keep
+            # final_label aligned so display layers don't disagree.)
+            p["final_label"] = "LEAN" if p.get("decision") == "LEAN" else "NO BET"
             p["bet_size"]    = 0
             p["confidence"]  = 0
 
         # 5. SCORE ONLY USED FOR CONFIDENCE ─────────────────────────
         # Score does not trigger bets — it's just a display-time
-        # confidence signal. Null it on NO BET so it can never be
-        # mistaken for justification of a play that didn't qualify.
-        # .get() is used because final_label is only set by the
-        # master filter above (plays that pass have no such field).
-        if p.get("final_label") == "NO BET":
+        # confidence signal. Null it on NO BET / LEAN so it can never
+        # be mistaken for justification of a play that didn't qualify.
+        if p.get("final_label") in ("NO BET", "LEAN"):
             p["score"] = None
 
     slips = build_slips(graded, sizes=sizes)
