@@ -47,6 +47,23 @@ Hard NO BET filters (in order):
   3. var_score ≥ 9 AND |avg − line| < 2          → NO BET (coin-flip trap)
   4. OVER + short-map fail + (high var OR stomp) → NO BET (fragile over)
 
+Score adjustments (applied inside grade_prop, before grade is set):
+  Score starts at `prob` (0–100). Profile penalties may reduce it:
+    UNDER + variance == 'high'                   → score −5
+  The master filter in run_model later trips NO BET on score < 55,
+  so a 5-point dock can flip a borderline UNDER. Score is display
+  only — see the per-play status fields section below.
+
+Grade overrides (applied inside grade_prop, after the strict-A gate
+and after the variance/short-map downgrades):
+  OVER + adjusted_edge ≥ 10                      → grade = 'A' (forced)
+    Strong-edge OVERs guarantee A regardless of variance / short-map
+    state. Earlier hard NO BET filters still rule out the worst
+    fragile overs (filter #4), so this only fires on plays that
+    already survive the NO BET gates.
+  UNDER + short-map fail + currently grade B     → grade = 'A' (boost)
+    Short maps favor unders; reward survival of all earlier filters.
+
 Value classification (independent of grade):
   STRONG VALUE   — adjusted_edge ≥ 10 AND hit_rate ≥ 60
   MODERATE VALUE — adjusted_edge ≥ 6
@@ -120,10 +137,18 @@ def grade_prop(p: dict) -> dict:
         adjusted_edge -= 3
 
     # ── PLAY-LEVEL SCORE ─────────────────────────────────────────────
-    # Canonical 0–100 confidence on the chosen direction. For now
-    # equals `prob`; kept as a separate field so it can evolve into
-    # a richer composite later without breaking downstream rules.
+    # Canonical 0–100 confidence on the chosen direction. Starts at
+    # `prob`; profile-based penalties below mutate it before it gets
+    # frozen onto the play. Score is display/confidence only — see
+    # "Score adjustments" in the module docstring.
     score = prob
+
+    # UNDER + HIGH VARIANCE penalty: UNDER bets on high-variance
+    # plays are noisier than prob alone suggests. Drop 5 points so
+    # borderline UNDERs slide under the master filter's <55 cut.
+    # Mirrors the -5 adjusted_edge profile penalties in scale.
+    if decision == "UNDER" and p["variance"] == "high":
+        score -= 5
 
     # Pin canonical `normal_map_proj` onto the play so all downstream
     # consumers (consistency rules, exports) read the same value.
@@ -210,6 +235,16 @@ def grade_prop(p: dict) -> dict:
         grade = "B"
     if p["variance"] == "high":
         grade = "B"
+
+    # ── OVER + STRONG EDGE → grade A (overrides downgrades) ─────────
+    # If the model still shows ≥10 EV after every profile penalty
+    # has been subtracted (weak hit, short-map fail, stomp), the
+    # raw edge is doing the work and we guarantee grade A. Note:
+    # the earlier "OVER + short_fail + (high var OR stomp)" hard
+    # NO BET (above) still rules out the worst fragile overs, so
+    # this guarantee only applies to plays that survive that gate.
+    if decision == "OVER" and adjusted_edge >= 10:
+        grade = "A"
 
     # ── UNDER boost (short maps favor unders) ────────────────────────
     if decision == "UNDER" and short_fail and grade == "B":
