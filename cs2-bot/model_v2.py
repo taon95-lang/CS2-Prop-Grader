@@ -56,11 +56,12 @@ Score adjustments (applied inside grade_prop, before grade is set):
 
 Grade overrides (applied inside grade_prop, after the strict-A gate
 and after the variance/short-map downgrades):
-  OVER + adjusted_edge ≥ 10                      → grade = 'A' (forced)
+  OVER + adjusted_edge ≥ 10 AND prob ≥ 58        → grade = 'A' (forced)
     Strong-edge OVERs guarantee A regardless of variance / short-map
-    state. Earlier hard NO BET filters still rule out the worst
-    fragile overs (filter #4), so this only fires on plays that
-    already survive the NO BET gates.
+    state, provided the pick prob clears 58 (blocks coin-flip OVERs
+    from being elevated on edge alone). Earlier hard NO BET filters
+    still rule out the worst fragile overs (filter #4), so this only
+    fires on plays that already survive the NO BET gates.
   UNDER + short-map fail + currently grade B     → grade = 'A' (boost)
     Short maps favor unders; reward survival of all earlier filters.
 
@@ -238,12 +239,14 @@ def grade_prop(p: dict) -> dict:
 
     # ── OVER + STRONG EDGE → grade A (overrides downgrades) ─────────
     # If the model still shows ≥10 EV after every profile penalty
-    # has been subtracted (weak hit, short-map fail, stomp), the
-    # raw edge is doing the work and we guarantee grade A. Note:
-    # the earlier "OVER + short_fail + (high var OR stomp)" hard
-    # NO BET (above) still rules out the worst fragile overs, so
-    # this guarantee only applies to plays that survive that gate.
-    if decision == "OVER" and adjusted_edge >= 10:
+    # has been subtracted (weak hit, short-map fail, stomp) AND
+    # the pick prob is at least 58, the raw edge is doing the work
+    # and we guarantee grade A. The prob≥58 floor blocks coin-flip
+    # OVERs from being elevated on edge alone. Note: the earlier
+    # "OVER + short_fail + (high var OR stomp)" hard NO BET (above)
+    # still rules out the worst fragile overs, so this guarantee
+    # only applies to plays that survive that gate.
+    if decision == "OVER" and adjusted_edge >= 10 and prob >= 58:
         grade = "A"
 
     # ── UNDER boost (short maps favor unders) ────────────────────────
