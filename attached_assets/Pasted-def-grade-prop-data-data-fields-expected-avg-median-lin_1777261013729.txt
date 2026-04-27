@@ -1,0 +1,115 @@
+def grade_prop(data):
+    """
+    data fields expected:
+    avg, median, line
+    normal_proj, short_proj
+    over_prob, under_prob
+    round_swing ("LOW","MEDIUM","HIGH")
+    multi_kill ("LOW","MEDIUM","HIGH")
+    stomp_risk (True/False)
+    variance ("LOW","MEDIUM","HIGH")
+    sample_size
+    hit_rate
+    side ("OVER" or "UNDER")
+    """
+
+    # -----------------------------
+    # 1. HARD NO BET FILTERS (ONLY TRUE EDGE KILLERS)
+    # -----------------------------
+    if data["sample_size"] < 8:
+        return "NO BET"
+
+    conflicting_core = (
+        (data["avg"] > data["line"] and data["median"] < data["line"]) or
+        (data["avg"] < data["line"] and data["median"] > data["line"])
+    )
+
+    extreme_stomp_low_swing = (
+        data["stomp_risk"] and data["round_swing"] == "LOW"
+    )
+
+    if conflicting_core or extreme_stomp_low_swing:
+        return "NO BET"
+
+
+    # -----------------------------
+    # 2. MATCH LENGTH ADJUSTMENT (FIXED WEIGHTING)
+    # -----------------------------
+    short_map_penalty = 0
+
+    if data["short_proj"] < data["line"]:
+        short_map_penalty = 1
+
+        # FIX: reduce penalty if player can survive short maps
+        if data["round_swing"] == "HIGH":
+            short_map_penalty *= 0.5
+        elif data["round_swing"] == "MEDIUM":
+            short_map_penalty *= 0.75
+
+
+    # -----------------------------
+    # 3. BASE SIGNAL (REAL DATA FIRST)
+    # -----------------------------
+    over_signal = 0
+    under_signal = 0
+
+    if data["avg"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+    if data["median"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+    if data["normal_proj"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+
+    # -----------------------------
+    # 4. SIMULATION (USED LAST, NOT FIRST)
+    # -----------------------------
+    if data["over_prob"] >= 55:
+        over_signal += 1
+    elif data["under_prob"] >= 55:
+        under_signal += 1
+
+
+    # -----------------------------
+    # 5. STRONG OVER OVERRIDE (CRITICAL FIX)
+    # -----------------------------
+    strong_over = (
+        data["avg"] >= data["line"] and
+        data["median"] >= data["line"] and
+        data["normal_proj"] >= data["line"] and
+        data["round_swing"] in ["MEDIUM", "HIGH"]
+    )
+
+    if strong_over:
+        return "LEAN OVER" if data["over_prob"] < 60 else "OVER"
+
+
+    # -----------------------------
+    # 6. FINAL DECISION (NO 100-PT SCORE USED)
+    # -----------------------------
+    over_score = over_signal - short_map_penalty
+    under_score = under_signal - short_map_penalty
+
+    if over_score > under_score:
+        return "OVER"
+    elif under_score > over_score:
+        return "UNDER"
+    else:
+        return "LEAN"
+
+
+    # -----------------------------
+    # NOTES:
+    # - NO 100-PT SCORE USED (REMOVED)
+    # - SIMULATION IS SECONDARY
+    # - SHORT MAP PENALTY IS ADJUSTED BY ROUND SWING
+    # - NO BET ONLY TRIGGERS ON TRUE CONFLICT / LOW DATA
+    # -----------------------------
