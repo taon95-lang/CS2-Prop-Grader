@@ -4,5 +4,6 @@
   "packages": {
     "node": "lts",
     "pnpm": "latest"
-  }
+  },
+  "installCommand": "uv sync --locked --no-dev --no-install-project && pnpm install --frozen-lockfile"
 }
