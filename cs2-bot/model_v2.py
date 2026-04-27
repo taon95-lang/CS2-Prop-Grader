@@ -41,7 +41,28 @@ Edge handling:
   flip NO BET filter. The raw `edge` is preserved on the play
   dict for display.
 
-Hard NO BET filters (in order):
+Decision is now driven by SIGNAL COUNTING, not by raw simulator probability.
+Pipeline order inside grade_prop:
+  1. decide_side(data)  →  one of OVER / LEAN OVER / UNDER / LEAN / NO BET
+                            using avg, median, normal_proj, short_proj,
+                            sim probs (only as 1 of 4 signals), round_swing,
+                            stomp_risk, sample_size.
+  2. Map verdict to dict `decision`:
+       OVER / LEAN OVER  →  decision = 'OVER'   (raw_verdict preserved on dict)
+       UNDER             →  decision = 'UNDER'
+       LEAN              →  decision = 'NO BET' (coin-flip pass)
+       NO BET            →  decision = 'NO BET' (return early)
+  3. Existing pipeline (variance score, adjusted_edge, score, value
+     classification, A/B grading, NO BET filters, force-A) runs on top
+     of the new decision exactly as before.
+
+decide_side's own NO BET conditions:
+  • sample_size < 8                                          (insufficient data)
+  • avg/median straddle the line in opposite directions      (conflicting core)
+  • stomp_risk == True AND round_swing == 'LOW'              (no upside)
+  • signals tie → 'LEAN' → mapped to NO BET in grade_prop    (coin-flip)
+
+Existing hard NO BET filters (still applied AFTER decide_side picks a side):
   1. hit_rate < 40 AND variance == 'high'        → NO BET / NO VALUE
   2. adjusted_edge < 6 OR pick prob < 55         → NO BET
   3. var_score ≥ 9 AND |avg − line| < 2          → NO BET (coin-flip trap)
@@ -107,10 +128,180 @@ import itertools
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Signal-counting decision (drives grade_prop's `decision` field)
+# ─────────────────────────────────────────────────────────────────────
+def decide_side(data: dict) -> str:
+    """
+    Pure signal-counting decision. Returns one of:
+        'OVER'  /  'UNDER'  /  'LEAN OVER'  /  'LEAN'  /  'NO BET'
+
+    Data fields expected (see _to_decision_data for the mapping from
+    grade_prop's input dict):
+        avg, median, line
+        normal_proj, short_proj
+        over_prob, under_prob          (0–100)
+        round_swing  ('LOW'|'MEDIUM'|'HIGH')
+        multi_kill   ('LOW'|'MEDIUM'|'HIGH')   (carried but unused here)
+        stomp_risk   (bool)
+        variance     ('LOW'|'MEDIUM'|'HIGH')   (carried but unused here)
+        sample_size  (int)
+        hit_rate     (0–100, carried but unused here)
+        side         ('OVER'|'UNDER',          carried but unused here)
+
+    Philosophy:
+      • Real per-map data (avg, median, normal_proj) drives the decision.
+      • Simulator probability is just one of four equal signals.
+      • NO BET only triggers on TRUE conflicts or insufficient data.
+      • No 100-point composite score.
+    """
+    # 1. HARD NO BET FILTERS (only true edge killers) ────────────────
+    if data["sample_size"] < 8:
+        return "NO BET"
+
+    conflicting_core = (
+        (data["avg"] > data["line"] and data["median"] < data["line"]) or
+        (data["avg"] < data["line"] and data["median"] > data["line"])
+    )
+    extreme_stomp_low_swing = (
+        data["stomp_risk"] and data["round_swing"] == "LOW"
+    )
+    if conflicting_core or extreme_stomp_low_swing:
+        return "NO BET"
+
+    # 2. MATCH-LENGTH ADJUSTMENT (round-swing scaled penalty) ────────
+    short_map_penalty = 0.0
+    if data["short_proj"] < data["line"]:
+        short_map_penalty = 1.0
+        if data["round_swing"] == "HIGH":
+            short_map_penalty *= 0.5
+        elif data["round_swing"] == "MEDIUM":
+            short_map_penalty *= 0.75
+
+    # 3. BASE SIGNAL (real data first) ───────────────────────────────
+    over_signal = 0
+    under_signal = 0
+
+    if data["avg"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+    if data["median"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+    if data["normal_proj"] > data["line"]:
+        over_signal += 1
+    else:
+        under_signal += 1
+
+    # 4. SIMULATION (used last, just one signal) ─────────────────────
+    if data["over_prob"] >= 55:
+        over_signal += 1
+    elif data["under_prob"] >= 55:
+        under_signal += 1
+
+    # 5. STRONG OVER OVERRIDE (avg/median/normal all ≥ line) ────────
+    strong_over = (
+        data["avg"] >= data["line"] and
+        data["median"] >= data["line"] and
+        data["normal_proj"] >= data["line"] and
+        data["round_swing"] in ("MEDIUM", "HIGH")
+    )
+    if strong_over:
+        return "LEAN OVER" if data["over_prob"] < 60 else "OVER"
+
+    # 6. FINAL DECISION (signal counts, not 100-point score) ─────────
+    over_score = over_signal - short_map_penalty
+    under_score = under_signal - short_map_penalty
+
+    if over_score > under_score:
+        return "OVER"
+    elif under_score > over_score:
+        return "UNDER"
+    else:
+        return "LEAN"
+
+
+def _to_decision_data(p: dict) -> dict:
+    """
+    Map a grade_prop input dict into the field shape that decide_side
+    expects: renames legacy keys, normalizes case, fills safe defaults
+    for fields that aren't yet wired through bot.py's data pipeline
+    (median, round_swing, multi_kill).
+
+    Defaults are deliberately neutral — they keep the new logic active
+    without spuriously triggering its NO BET / strong-over rules:
+      • median       → defaults to avg (symmetric distribution)
+      • round_swing  → defaults to 'MEDIUM' (disables LOW + stomp NO BET)
+      • multi_kill   → defaults to 'MEDIUM' (currently unused by decide_side)
+    """
+    variance_upper = (str(p.get("variance") or "medium")).upper()
+    if variance_upper not in ("LOW", "MEDIUM", "HIGH"):
+        variance_upper = "MEDIUM"
+
+    rs = (str(p.get("round_swing") or "MEDIUM")).upper()
+    if rs not in ("LOW", "MEDIUM", "HIGH"):
+        rs = "MEDIUM"
+
+    mk = (str(p.get("multi_kill") or "MEDIUM")).upper()
+    if mk not in ("LOW", "MEDIUM", "HIGH"):
+        mk = "MEDIUM"
+
+    avg = float(p.get("avg",
+                      p.get("normal_map_proj", p.get("line", 0.0))))
+    median_val = p.get("median")
+    median = float(median_val) if isinstance(median_val, (int, float)) else avg
+
+    op = float(p.get("over_prob") or 0.0)
+    up = float(p.get("under_prob") or 0.0)
+
+    return {
+        "avg":          avg,
+        "median":       median,
+        "line":         float(p.get("line", 0.0)),
+        "normal_proj":  float(p.get("normal_map_proj", p.get("line", 0.0))),
+        "short_proj":   float(p.get("short_map_proj", p.get("line", 0.0))),
+        "over_prob":    op,
+        "under_prob":   up,
+        "round_swing":  rs,
+        "multi_kill":   mk,
+        "stomp_risk":   bool(p.get("stomp", False)),
+        "variance":     variance_upper,
+        "sample_size":  int(p.get("sample_size",
+                                  p.get("history_n", 10)) or 10),
+        "hit_rate":     float(p.get("hit_rate", 0.0)),
+        "side":         "OVER" if op >= up else "UNDER",
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Grade ONE prop
 # ─────────────────────────────────────────────────────────────────────
 def grade_prop(p: dict) -> dict:
-    decision = "OVER" if p["over_prob"] > p["under_prob"] else "UNDER"
+    # ── SIGNAL-COUNTING DECISION (replaces the old prob-based one) ──
+    # decide_side returns one of OVER / LEAN OVER / UNDER / LEAN /
+    # NO BET. We map LEAN OVER → OVER (carrying raw_verdict for the
+    # display layer), LEAN → NO BET (coin-flip pass), and NO BET →
+    # NO BET (return early with a minimal extras-shaped dict).
+    raw_verdict = decide_side(_to_decision_data(p))
+    p["raw_verdict"] = raw_verdict
+
+    if raw_verdict in ("NO BET", "LEAN"):
+        return {
+            **p,
+            "decision":      "NO BET",
+            "grade":         "NO BET",
+            "value":         "NO VALUE",
+            "mispriced":     False,
+            "adjusted_edge": float(p.get("edge", 0.0)),
+            "var_score":     {"low": 3, "medium": 6, "high": 10}.get(
+                                str(p.get("variance") or "medium").lower(), 6),
+            "score":         None,
+        }
+
+    decision = "OVER" if raw_verdict in ("OVER", "LEAN OVER") else "UNDER"
     prob = p["over_prob"] if decision == "OVER" else p["under_prob"]
 
     short_fail = p["short_map_proj"] < p["line"]
